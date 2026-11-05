@@ -1,0 +1,283 @@
+//============================================================================
+//
+//  Konami M2 (MAME's konami/konamim2.cpp) for MiSTer -- work in progress.
+//
+//  The board: two PowerPC 602s at 66.67 MHz, the 3DO M2 BDA (memory controller, triangle engine, video, the DSP that makes
+//  the sound, MPEG), the CDE (the CD drive's ATAPI bus) and Konami's I/O; the game on a CD. First target: Tobe! Polystars.
+//  For now this is the CPU bring-up (rtl/m2_boot.sv): ppc1 runs the boot ROM (downloaded by the MRA into DDR3) at
+//  66.67 MHz, with main RAM in DDR3 and the board's registers as stubs, and the picture's shown
+//  in a raster near the NTSC timing MAME gives the board (rtl/m2_vtiming.sv). The rest of the machine comes in as its
+//  parts pass their benches (docs/design.md).
+//
+//  This program is free software; you can redistribute it and/or modify it
+//  under the terms of the GNU General Public License as published by the Free
+//  Software Foundation; either version 3 of the License, or (at your option)
+//  any later version.
+//
+//  This program is distributed in the hope that it will be useful, but WITHOUT
+//  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+//  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+//  more details.
+//
+//============================================================================
+
+module emu
+(
+	`include "sys/emu_ports.vh"
+);
+
+///////// Default values for ports not used in this core /////////
+
+assign ADC_BUS  = 'Z;
+assign USER_OUT = '1;
+assign {UART_RTS, UART_TXD, UART_DTR} = 0;
+assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
+
+assign VGA_F1 = 0;
+assign VGA_SCALER  = 0;
+assign VGA_DISABLE = 0;
+assign HDMI_FREEZE = 0;
+assign HDMI_BLACKOUT = 0;
+assign HDMI_BOB_DEINT = 0;
+
+wire [15:0] audio_l, audio_r;
+assign AUDIO_S   = 1;
+assign AUDIO_MIX = 0;
+assign AUDIO_L   = audio_l;
+assign AUDIO_R   = audio_r;
+
+assign LED_DISK  = 0;
+assign LED_POWER = 0;
+assign BUTTONS   = 0;
+
+// the SDRAM idle; DDR3: the bring-up's ROM and RAM (below)
+assign SDRAM_DQ   = 'Z;
+assign SDRAM_A    = 13'd0;
+assign SDRAM_BA   = 2'd0;
+assign {SDRAM_DQML, SDRAM_DQMH} = 2'b11;
+assign {SDRAM_nCS, SDRAM_nWE, SDRAM_nRAS, SDRAM_nCAS} = 4'b1111;
+assign SDRAM_CKE  = 1'b0;
+assign SDRAM_CLK  = 1'b0;
+
+assign DDRAM_CLK      = clk_cpu;
+
+//////////////////////////////////////////////////////////////////
+
+wire [127:0] status;
+wire   [1:0] buttons;
+wire         forced_scandoubler;
+wire         direct_video;
+wire  [21:0] gamma_bus;
+
+wire  [1:0] ar = status[122:121];
+reg   [2:0] scale_sel;
+always @* case (status[34:32])
+	3'd1:    scale_sel = 3'd1;
+	3'd2:    scale_sel = 3'd4;
+	3'd3:    scale_sel = 3'd2;
+	3'd4:    scale_sel = 3'd3;
+	default: scale_sel = 3'd0;
+endcase
+wire        fs_int = (ar == 2'd1) && (scale_sel != 3'd0) && (HDMI_WIDTH != 12'd0) && (HDMI_HEIGHT != 12'd0);
+
+`include "build_id.v"
+localparam CONF_STR = {
+	"A.KONAMIM2;;",
+	"-;",
+	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+	"O[34:32],Scale,Normal,V-Integer,HV-Integer,Narrower HV-Integer,HV-Integer+;",
+	"-;",
+	"SC0,BIN,CD audio image;",
+	"O[3],Service mode,Off,On;",
+	"R0,Reset;",
+	"J1,Button 1,Button 2,Button 3,Start,Coin,Service;",
+	"V,v",`BUILD_DATE
+};
+
+////////////////////   CLOCKS   ///////////////////
+
+wire clk_sys;           // 66.67 MHz: the CPUs and the BDA (M2_CLOCK); the pixels are a fractional clock enable on it
+wire clk_mem;           // 133.33 MHz: memory
+wire clk_sdram;         // 133.33 MHz, shifted: the SDRAM chip's clock
+wire clk_cpu = clk_sys; // the bring-up's CPU and DDR3 port
+wire pll_locked;
+
+pll pll
+(
+	.refclk(CLK_50M),
+	.rst(0),
+	.outclk_0(clk_sys),
+	.outclk_1(clk_mem),
+	.outclk_2(clk_sdram),
+	.locked(pll_locked)
+);
+
+///////////////////////////////////////////////////
+
+wire         ioctl_download;
+wire         ioctl_wr;
+wire  [15:0] ioctl_index;
+wire  [26:0] ioctl_addr;
+wire   [7:0] ioctl_dout;
+wire         ioctl_wait;
+
+wire  [31:0] joystick_0, joystick_1;
+
+wire         img_mounted;
+wire  [63:0] img_size;
+wire  [31:0] sd_lba;
+wire         sd_rd, sd_ack, sd_buff_wr;
+wire   [7:0] sd_buff_dout;
+
+hps_io #(.CONF_STR(CONF_STR)) hps_io
+(
+	.clk_sys(clk_sys),
+	.HPS_BUS(HPS_BUS),
+	.EXT_BUS(),
+
+	.buttons(buttons),
+	.status(status),
+	.status_menumask({15'd0, direct_video}),
+	.forced_scandoubler(forced_scandoubler),
+	.direct_video(direct_video),
+	.gamma_bus(gamma_bus),
+
+	.ioctl_download(ioctl_download),
+	.ioctl_index(ioctl_index),
+	.ioctl_wr(ioctl_wr),
+	.ioctl_addr(ioctl_addr),
+	.ioctl_dout(ioctl_dout),
+	.ioctl_wait(ioctl_wait),
+
+	.joystick_0(joystick_0),
+	.joystick_1(joystick_1),
+
+	.img_mounted(img_mounted),
+	.img_size(img_size),
+	.sd_lba('{sd_lba}),
+	.sd_blk_cnt('{6'd7}),
+	.sd_rd(sd_rd),
+	.sd_wr(1'b0),
+	.sd_ack(sd_ack),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din('{8'd0}),
+	.sd_buff_wr(sd_buff_wr)
+);
+
+reg cd_mounted = 1'b0;
+always @(posedge clk_sys) if (img_mounted) cd_mounted <= |img_size;
+
+wire        reset_sw = RESET | status[0] | buttons[1];
+reg         core_rst = 1'b1;
+always @(posedge clk_sys) core_rst <= reset_sw | ioctl_download | ~pll_locked;
+
+///////////////////////   THE BRING-UP   ///////////////////////
+
+// The download (index 0 the boot ROM, 1 the CD image, 2 the EEPROM) into clk_cpu: each byte a toggle of ld_req, held (ioctl_wait) until the CPU side
+// has given it to m2_boot and toggled ld_ack back.
+// Fast load (the MRA's address=, as the owner's other cores): Main_MiSTer copies a ROM straight to its place in the DDR3 and ends a download that
+// has no bytes, only a start address, the length. Those places are where the bytes would go anyway, so only the status page's sizes need it.
+reg         ld_req = 1'b0, ld_ack = 1'b0;
+reg  [26:0] ld_a;
+reg   [1:0] ld_sel;
+reg   [7:0] ld_d;
+reg   [1:0] ack_s;
+always @(posedge clk_sys) begin
+	ack_s <= {ack_s[0], ld_ack};
+	if (ioctl_wr && ioctl_download && ioctl_index <= 16'd2) begin
+		ld_req <= ~ld_req;
+		ld_a <= ioctl_addr;
+		ld_sel <= ioctl_index[1:0];
+		ld_d <= ioctl_dout;
+	end
+end
+assign ioctl_wait = ld_req != ack_s[1];
+
+reg   [1:0] req_s, cpu_rst_s;
+reg   [1:0] lst;
+reg         ld_wr_c;
+wire        ld_wait_c;
+always @(posedge clk_cpu) begin
+	req_s <= {req_s[0], ld_req};
+	cpu_rst_s <= {cpu_rst_s[0], core_rst};
+	ld_wr_c <= 1'b0;
+	case (lst)
+		2'd0: if (req_s[1] != ld_ack) begin ld_wr_c <= 1'b1; lst <= 2'd1; end
+		2'd1: lst <= 2'd2;
+		default: if (!ld_wait_c) begin ld_ack <= req_s[1]; lst <= 2'd0; end
+	endcase
+end
+
+wire  [9:0] hpos;
+wire  [8:0] vpos;
+wire [23:0] vdu_rgb;
+wire        vdu_on;
+m2_boot #(.TICK(8)) u_boot
+(
+	.clk(clk_cpu), .rst(cpu_rst_s[1]),
+	.ld_wr(ld_wr_c), .ld_sel(ld_sel), .ld_addr(ld_a[24:0]), .ld_data(ld_d), .ld_wait(ld_wait_c),
+	.in_p1({3'b111, ~joystick_0[9], 2'b11, ~joystick_1[8], ~joystick_0[8]}),
+	.in_dsw(8'hff),
+	.hpos(hpos), .vpos(vpos), .rgb(vdu_rgb), .vdu_on(vdu_on), .audio_l(audio_l), .audio_r(audio_r),
+	.cd_mounted(cd_mounted), .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_ack(sd_ack), .sd_wr(sd_buff_wr), .sd_d(sd_buff_dout),
+	.in_p4(~{joystick_1[7:4], joystick_1[2], joystick_1[3], joystick_1[0], joystick_1[1],
+	         joystick_0[7:4], joystick_0[2], joystick_0[3], joystick_0[0], joystick_0[1]}),
+	.in_p6({13'h1fff, ~status[3], 2'b11}),
+	.ddr_busy(DDRAM_BUSY), .ddr_burstcnt(DDRAM_BURSTCNT), .ddr_addr(DDRAM_ADDR), .ddr_dout(DDRAM_DOUT),
+	.ddr_dout_ready(DDRAM_DOUT_READY), .ddr_rd(DDRAM_RD), .ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_we(DDRAM_WE),
+	.st_pc(), .st_count(), .st_exc(), .st_nexc(), .st_dev_a(), .st_dev_d(), .st_dev_w(), .st_ndev(),
+	.retire(), .retire2(), .ipc0_o(), .ipc_o(), .p2_retire(), .p2_retire2(), .p2_ipc0_o(), .p2_ipc_o()
+);
+
+///////////////////////   VIDEO   ///////////////////////
+
+// The raster: 857 x 262 at 59.39 Hz, 640 x 240 shown (near MAME's set_ntsc(); rtl/m2_vtiming.sv)
+wire        ce_pix, hblank, vblank, hsync, vsync;
+m2_vtiming u_vtiming
+(
+	.clk(clk_sys), .rst(~pll_locked),
+	.ce_pix(ce_pix), .hpos(hpos), .vpos(vpos), .hblank(hblank), .vblank(vblank), .hsync(hsync), .vsync(vsync)
+);
+
+wire [23:0] rgb = vdu_on ? vdu_rgb : 24'h0;
+
+wire        vga_de_mix;
+
+arcade_video #(.WIDTH(640), .DW(24)) arcade_video
+(
+	.*,
+	.clk_video(clk_sys),
+	.ce_pix(ce_pix),
+	.RGB_in(rgb),
+	.HBlank(hblank),
+	.VBlank(vblank),
+	.HSync(hsync),
+	.VSync(vsync),
+	.fx(3'd0),
+	.forced_scandoubler(1'b0),
+	.VGA_DE(vga_de_mix)
+);
+
+video_freak video_freak
+(
+	.CLK_VIDEO(CLK_VIDEO),
+	.CE_PIXEL(CE_PIXEL),
+	.VGA_VS(VGA_VS),
+	.HDMI_WIDTH(HDMI_WIDTH),
+	.HDMI_HEIGHT(HDMI_HEIGHT),
+	.VGA_DE(VGA_DE),
+	.VIDEO_ARX(VIDEO_ARX),
+	.VIDEO_ARY(VIDEO_ARY),
+	.VGA_DE_IN(vga_de_mix),
+	.ARX(fs_int ? HDMI_WIDTH  : (ar == 2'd0) ? 12'd4 : {10'd0, ar - 2'd1}),
+	.ARY(fs_int ? HDMI_HEIGHT : (ar == 2'd0) ? 12'd3 : 12'd0),
+	.CROP_SIZE(12'd0),
+	.CROP_OFF(5'd0),
+	.SCALE(scale_sel)
+);
+
+///////////////////////   LED   ///////////////////////
+
+assign LED_USER = core_rst;
+
+endmodule

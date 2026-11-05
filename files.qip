@@ -1,0 +1,26 @@
+set_global_assignment -name SYSTEMVERILOG_FILE KonamiM2.sv
+set_global_assignment -name SDC_FILE KonamiM2.sdc
+set_global_assignment -name QIP_FILE rtl/pll.qip
+set_global_assignment -name SEARCH_PATH rtl
+
+# the platform layer
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_vtiming.sv
+
+# the machine: ppc1 and its memory
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpu_pkg.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpx.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_regs.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_pipe.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_cache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_bus.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_cde.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_atapi.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_kio.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_vdu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_te.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_dspp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_cdda.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_bda.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_boot.sv
