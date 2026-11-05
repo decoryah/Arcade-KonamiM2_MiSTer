@@ -10,16 +10,21 @@ but heavy scenes run below the real board's speed.** It was also checked in simu
 
 1. Unzip `KonamiM2_MiSTer_20261105.zip` over the root of the SD card. It adds `Tobe! Polystars (ver JAA).mra` to `_Arcade/` and
    `_Arcade/cores/KonamiM2_20261105.rbf`.
-2. Make the disc's images from your own MAME 0.289 set's `623jaa02.chd` (`polystar/623jaa02.chd`), with MAME's `chdman` and the
-   repository's `tools/cdimage.py`. No ROMs or disc images are included.
+2. Make the disc's images from your own MAME 0.289 set's `623jaa02.chd` (`polystar/623jaa02.chd`), in either of these ways. No ROMs or disc
+   images are included.
 
-   ```
-   chdman extractcd -i polystar/623jaa02.chd -o polystar_full.cue -ob polystar_full.bin
-   python3 tools/cdimage.py chdman polystar/623jaa02.chd polystar_cd.bin
-   zip polystar_cd.zip polystar_cd.bin
-   ```
+   - **In a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/) and download the
+     three files it makes: `polystar_cd.zip`, `polystar_full.bin` and `polystar_full.cue`. The conversion runs on your computer, and the CHD isn't
+     uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory, and takes only this disc.
+   - **By hand:** with MAME's `chdman` and the repository's `tools/cdimage.py`:
 
-   The first makes the whole disc, for the music (`polystar_full.bin`, 546 MB, with its `.cue`); the second its data track (`polystar_cd.bin`, 24 MB).
+     ```
+     chdman extractcd -i polystar/623jaa02.chd -o polystar_full.cue -ob polystar_full.bin
+     python3 tools/cdimage.py chdman polystar/623jaa02.chd polystar_cd.bin
+     zip polystar_cd.zip polystar_cd.bin
+     ```
+
+     The first makes the whole disc, for the music (`polystar_full.bin`, 546 MB, with its `.cue`); the second its data track (`polystar_cd.bin`, 24 MB).
 3. Put your `polystar.zip` and `polystar_cd.zip` in `games/mame/`, and `polystar_full.bin` and `polystar_full.cue` in `games/polystar/`.
 4. Start the game from the Arcade menu. Once, open the OSD and choose `polystar_full.bin` under *CD audio image*; Main remembers it and
    mounts it at each start. The MRA also asks for it, but Main releases up to 20261010 don't act on that. Without it the game runs

@@ -25,23 +25,29 @@ second measured at the start of stage 1, where the real board gives about 44.6. 
 | Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, below full speed |
 | Total Vice (ver EBA, 1997) | `totlvice` | not tried |
 | Evil Night / Hell Night (1998) | `evilngt`, `hellngt` | not tried |
-| Battle Tryst, Heat of Eleven '98 (1998) | `btltryst`, `heatof11` | not tried |
+| Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not working in MAME 0.289, not tried |
+| Battle Tryst (ver JAC, 1998) | `btltryst` | not working in MAME 0.289, not tried |
+| Heat of Eleven '98 (ver EAA, 1998) | `heatof11` | not working in MAME 0.289, not tried |
 
 ## Install
 
 1. Unzip `KonamiM2_MiSTer_<date>.zip` (`tools/package.py` writes it to `dist/`) over the root of the SD card (`/media/fat/`): the core goes
    to `_Arcade/cores/`, `Tobe! Polystars (ver JAA).mra` to `_Arcade/`. By hand from the repository: `releases/KonamiM2_<date>.rbf` to
    `_Arcade/cores/`, the contents of `mra/` to `_Arcade/`.
-2. Make the disc's images from your MAME set's `623jaa02.chd` (`polystar/623jaa02.chd`), with MAME's `chdman` and this repository's
-   `tools/cdimage.py`:
+2. Make the disc's images from your MAME set's `623jaa02.chd` (`polystar/623jaa02.chd`), in either of these ways:
 
-   ```
-   chdman extractcd -i polystar/623jaa02.chd -o polystar_full.cue -ob polystar_full.bin
-   python3 tools/cdimage.py chdman polystar/623jaa02.chd polystar_cd.bin
-   zip polystar_cd.zip polystar_cd.bin
-   ```
+   - **In a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/) and download the
+     three files it makes: `polystar_cd.zip`, `polystar_full.bin` and `polystar_full.cue`. The conversion runs on your computer, and the CHD isn't
+     uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory, and takes only this disc.
+   - **By hand:** with MAME's `chdman` and this repository's `tools/cdimage.py`:
 
-   The first makes the whole disc, for the music (`polystar_full.bin`, 546 MB, with its `.cue`); the second its data track (`polystar_cd.bin`, 24 MB).
+     ```
+     chdman extractcd -i polystar/623jaa02.chd -o polystar_full.cue -ob polystar_full.bin
+     python3 tools/cdimage.py chdman polystar/623jaa02.chd polystar_cd.bin
+     zip polystar_cd.zip polystar_cd.bin
+     ```
+
+     The first makes the whole disc, for the music (`polystar_full.bin`, 546 MB, with its `.cue`); the second its data track (`polystar_cd.bin`, 24 MB).
 3. Put the files on the SD card:
 
    | File | Goes in |
