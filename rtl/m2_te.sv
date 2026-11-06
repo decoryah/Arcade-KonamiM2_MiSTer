@@ -198,12 +198,23 @@ module m2_te (
 	wire         ms_have = ms_wpd != ms_rp;
 	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have;
 	// (a whole word in one clock, when source and place are in step and it's the texture memory)
-	wire         ms_two = ms_skip == 2'd0 && !mm_pip && !mm_src[2] && !mm_dst[2] && mm_n >= 28'd8;
+	wire         ms_two = ms_skip == 2'd0 && !mm_pip && mm_src[2:0] == 3'd0 && !mm_dst[2] && mm_n >= 28'd8;
 	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2] || ms_two);
 	wire [4:0]   ms_rn = ms_rp + 5'(ms_pop);
 	logic [63:0] ms_q;
 	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && m_ready), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
 	wire [31:0]  ms_raw = mm_src[2] ? ms_q[63:32] : ms_q[31:0];
+	// a source not on a word boundary: each word out is the end of one read and the start of the next (the first byte's in bits 7:0)
+	logic        ms_arm;
+	logic [31:0] ms_prev;
+	logic [31:0] ms_w;
+	always_comb
+		case (mm_src[1:0])
+			2'd1: ms_w = {ms_raw[7:0], ms_prev[31:8]};
+			2'd2: ms_w = {ms_raw[15:0], ms_prev[31:16]};
+			2'd3: ms_w = {ms_raw[23:0], ms_prev[31:24]};
+			default: ms_w = ms_raw;
+		endcase
 
 	assign m_other = lb_rd || lb_wait || st == T_MM;
 	// (the list goes before the caches' write-backs, between their lines)
@@ -1216,6 +1227,7 @@ module m2_te (
 					mm_src <= tm_src; mm_dst <= tm_lod0[13:0]; mm_n <= tm_count[27:0];
 					ms_a <= tm_src[31:5]; ms_left <= 29'(tm_count[27:0]) + 29'(tm_src[4:0]); ms_skip <= tm_src[4:3];
 					ms_req <= 5'd0; ms_wp <= 5'd0; ms_wpd <= 5'd0; ms_rp <= 5'd0;
+					ms_arm <= tm_src[1:0] != 2'd0;
 					if (tm_ldcntl[9:8] == 2'd1)
 					begin
 						mm_pip <= !tm_cntl[2];
@@ -1242,9 +1254,16 @@ module m2_te (
 					else if (ms_take)
 					begin
 						if (ms_skip != 2'd0) ms_skip <= ms_skip - 2'd1;
+						else if (ms_arm)
+						begin
+							ms_arm <= 1'b0;
+							ms_prev <= ms_raw;
+							mm_src <= mm_src + 32'd4;
+						end
 						else
 						begin
-							ld_d <= mm_pip ? {ms_raw[7:0], ms_raw[15:8], ms_raw[23:16], ms_raw[31:24]} : ms_raw;
+							ms_prev <= ms_raw;
+							ld_d <= mm_pip ? {ms_w[7:0], ms_w[15:8], ms_w[23:16], ms_w[31:24]} : ms_w;
 							ld_d2 <= ms_q[63:32];
 							ld_two <= ms_two;
 							ld_ta <= mm_dst[13:2];
@@ -2246,7 +2265,8 @@ module te_fetch (
 	wire  [3:0]  texp_c = exp[3:0];
 	wire  [3:0]  texp_a = exp[7:4];
 	wire         texp_ssb = exp[9], texp_col = exp[10], texp_alp = exp[11], texp_lit = exp[12];
-	wire  [5:0]  tdepth = (texp_col ? {2'b00, texp_c} : 6'd0) + (texp_alp ? {2'b00, texp_a} : 6'd0) + (texp_ssb ? 6'd1 : 6'd0);
+	// (a literal texel's colour is three components)
+	wire  [5:0]  tdepth = (texp_col ? (texp_lit ? 6'(texp_c) * 6'd3 : 6'(texp_c)) : 6'd0) + (texp_alp ? {2'b00, texp_a} : 6'd0) + (texp_ssb ? 6'd1 : 6'd0);
 	logic [11:0] t_ra;
 	logic [31:0] t_q;
 	logic [7:0]  p_ra;
@@ -2343,7 +2363,8 @@ module te_fetch (
 			t_sel <= t_ra[0];
 			a5_bit <= a4_ad[4:0];
 			d1_bit <= a5_bit;
-			d1_sh <= (t_q >> {d1_bit[4:3], 3'b000}) >> (d1_bit[2:0] ^ (3'd0 - tdepth[2:0]));
+			// (the word's big-endian: a texel's bits run from its first bit down, whatever its size, and it ends in bit 0)
+			d1_sh <= {t_q[7:0], t_q[15:8], t_q[23:16], t_q[31:24]} >> (6'd32 - 6'(d1_bit) - tdepth);
 			d2_r <= d1_rt; d2_g <= d1_gt; d2_b <= d1_bt; d2_at <= d1_at; d2_st <= d1_st;
 			p_ra <= pip_c[7:0] + d1_idx;
 			d3_r <= d2_r; d3_g <= d2_g; d3_b <= d2_b; d3_at <= d2_at; d3_st <= d2_st;

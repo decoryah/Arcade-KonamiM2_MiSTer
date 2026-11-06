@@ -90,6 +90,32 @@ static void clock1()
 	t->clk = 1; t->eval();
 #ifdef TE_PROF
 	st_n[t->rootp->m2_te__DOT__st & 127]++;
+	{
+		static uint32_t watch = getenv("TE_WATCH") ? uint32_t(strtoul(getenv("TE_WATCH"), nullptr, 16)) : 0;
+		auto *q = t->rootp;
+		static int wtrace;
+		if (watch && q->m2_te__DOT__d_addr == watch && q->m2_te__DOT__pu)
+		{
+			wtrace = 14;
+			printf("  tex: cntl %08x addr %08x pip %08x exp %08x c0 %08x c1 %08x c2 %08x c3 %08x lod0 %08x\n", unsigned(q->m2_te__DOT__tm_cntl), unsigned(q->m2_te__DOT__tm_addr), unsigned(q->m2_te__DOT__tm_pip), unsigned(q->m2_te__DOT__tm_exp),
+				unsigned(q->m2_te__DOT__tm_c0), unsigned(q->m2_te__DOT__tm_c1), unsigned(q->m2_te__DOT__tm_c2), unsigned(q->m2_te__DOT__tm_c3), unsigned(q->m2_te__DOT__tm_lod0));
+		}
+		if (wtrace && q->m2_te__DOT__pe)
+		{
+			wtrace--;
+			printf("    %2d: t_d %08x i_d %08x tb_a %06x tb_b %06x tb_t %06x ti %02x%02x%02x/%02x td %02x%02x%02x/%02x src %02x%02x%02x/%02x ds %02x%02x%02x\n", wtrace, unsigned(q->m2_te__DOT__t_d), unsigned(q->m2_te__DOT__i_d),
+				unsigned(q->m2_te__DOT__tb_a), unsigned(q->m2_te__DOT__tb_b), unsigned(q->m2_te__DOT__tb_t),
+				unsigned(q->m2_te__DOT__ti_r), unsigned(q->m2_te__DOT__ti_g), unsigned(q->m2_te__DOT__ti_b), unsigned(q->m2_te__DOT__ti_a),
+				unsigned(q->m2_te__DOT__td_r), unsigned(q->m2_te__DOT__td_g), unsigned(q->m2_te__DOT__td_b), unsigned(q->m2_te__DOT__td_a),
+				unsigned(q->m2_te__DOT__sr), unsigned(q->m2_te__DOT__sg), unsigned(q->m2_te__DOT__sb), unsigned(q->m2_te__DOT__sa),
+				unsigned(q->m2_te__DOT__ds_r), unsigned(q->m2_te__DOT__ds_g), unsigned(q->m2_te__DOT__ds_b));
+		}
+		if (watch && q->m2_te__DOT__d_addr == watch && q->m2_te__DOT__pu)
+			printf("  pixel at clock %llu: user %08x sctl %08x dctl %08x tmul %08x smul %08x tc0 %08x tc1 %08x sc0 %08x sc1 %08x const %08x alu %08x ssb %08x da %08x sa %08x discard %08x tab %08x master %08x z %08x\n",
+				(unsigned long long)clocks, unsigned(q->m2_te__DOT__db_user), unsigned(q->m2_te__DOT__db_sctl), unsigned(q->m2_te__DOT__db_dctl), unsigned(q->m2_te__DOT__db_tmul), unsigned(q->m2_te__DOT__db_smul),
+				unsigned(q->m2_te__DOT__db_tc0), unsigned(q->m2_te__DOT__db_tc1), unsigned(q->m2_te__DOT__db_sc0), unsigned(q->m2_te__DOT__db_sc1), unsigned(q->m2_te__DOT__db_constin), unsigned(q->m2_te__DOT__db_alu),
+				unsigned(q->m2_te__DOT__db_ssb), unsigned(q->m2_te__DOT__db_da), unsigned(q->m2_te__DOT__db_sa), unsigned(q->m2_te__DOT__db_discard), unsigned(q->m2_te__DOT__tm_tab), unsigned(q->m2_te__DOT__gc_master), unsigned(q->m2_te__DOT__db_zctl));
+	}
 	stalled += !t->rootp->m2_te__DOT__pe;
 	{
 		static int was;
@@ -303,7 +329,7 @@ int main(int argc, char **argv)
 		uint64_t nw = 0, nbad = 0;
 		std::map<uint32_t, uint64_t> pbad, pmiss, pwrote;
 		int shown = 0;
-		uint32_t db = be32(nte, 0x8000 + 10 * 4), ds = be32(nte, 0x8000 + 11 * 4), dctl = be32(nte, 0x8000 + 9 * 4);
+		uint32_t db = getenv("TE_DB") ? uint32_t(strtoul(getenv("TE_DB"), nullptr, 16)) : be32(nte, 0x8000 + 10 * 4), ds = be32(nte, 0x8000 + 11 * 4), dctl = be32(nte, 0x8000 + 9 * 4);
 		for (uint32_t i = 0; i < RAM_SIZE; i++)
 		{
 			if (wrote[i])
