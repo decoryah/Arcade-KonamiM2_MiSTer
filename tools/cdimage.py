@@ -62,11 +62,13 @@ def main(chdman, chd, outf):
         cue, b = d + '/x.cue', d + '/x.bin'
         subprocess.run([chdman, 'extractcd', '-i', chd, '-o', cue, '-ob', b, '-f'], check=True, capture_output=True)
         frames = tr[0][2]
+        # (a CHD's data track is MODE1, 2048 bytes a sector, or MODE1_RAW, 2352; extractcd keeps it as it is)
+        cooked = tr[0][1] == 'MODE1'
         with open(b, 'rb') as f, open(outf, 'wb') as o:
             o.write(info)
             for _ in range(frames):
-                s = f.read(2352)
-                o.write(s[16:2064])
+                s = f.read(2048 if cooked else 2352)
+                o.write(s if cooked else s[16:2064])
     print(outf, 2048 * (frames + 1), 'bytes;', len(tr), 'tracks, lead-out', lba)
 
 
