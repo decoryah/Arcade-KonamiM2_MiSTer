@@ -822,7 +822,7 @@ module m2_te (
 	logic [7:0]  sr, sg, sb, sa;        // the source pixel
 	logic        dsb_s;                 // its destination bit
 	logic [7:0]  tp_a;                  // MAME's texpath.a and blend.r keep what they had when they aren't set
-	logic [7:0]  bl_r_old;
+	logic        taz5, taz6, taz7, tcz5, tcz6, tcz7;    // the texture unit's alpha (after the clamp controls), its colour: zero, for the discards
 
 	logic [7:0]  tp_an;
 	always_comb
@@ -870,7 +870,7 @@ module m2_te (
 		return cmp ? ~v : v;
 	endfunction
 
-	// the alpha's constant and the destination bit: what select_alpha_dsb does before the colours (and their coefficients) see it
+	// the alpha's constant and the destination bit
 	wire         da_sel = db_da[3:2] == 2'd0 ? ts4 : db_da[3:2] == 2'd1 ? dsb_s : 1'b0;
 	wire  [7:0]  da_const = da_sel ? db_dac[7:0] : db_dac[23:16];
 	logic        dsb_n;
@@ -882,8 +882,9 @@ module m2_te (
 				default: dsb_n = dsb_s;
 			endcase
 		else dsb_n = ts4;
-	wire         tcs = db_tmul[3:2] == 2'd0 ? ts4 : db_tmul[3:2] == 2'd1 ? dsb_n : 1'b0;
-	wire         scs = db_smul[3:2] == 2'd0 ? ts4 : db_smul[3:2] == 2'd1 ? dsb_n : 1'b0;
+	// (the colour coefficients' constants go by the source pixel's destination bit, not the one to be written: BDA spec)
+	wire         tcs = db_tmul[3:2] == 2'd0 ? ts4 : db_tmul[3:2] == 2'd1 ? dsb_s : 1'b0;
+	wire         scs = db_smul[3:2] == 2'd0 ? ts4 : db_smul[3:2] == 2'd1 ? dsb_s : 1'b0;
 	wire  [31:0] tcc = tcs ? db_tc1 : db_tc0;
 	wire  [31:0] scc = scs ? db_sc1 : db_sc0;
 
@@ -941,8 +942,9 @@ module m2_te (
 
 	wire         c_zp = fc_q[73], c_zb = fc_q[72];
 	wire         ssbdis = db_discard[2] && !ts7;
-	wire         adis = db_discard[0] && da7 == 8'd0;
-	wire         rgbdis = db_discard[1] && ds_r == 8'd0 && ds_g == 8'd0 && ds_b == 8'd0;
+	// (the texture unit's output, not the blend's: BDA spec)
+	wire         adis = db_discard[0] && taz7;
+	wire         rgbdis = db_discard[1] && tcz7;
 	wire         dis = ssbdis || adis || rgbdis;
 	wire         c_wr = t7_v && !dis && c_zp && db_super[0];
 	wire         old7 = c_wr && !db_dctl[0] && d_mask != 4'hf;
@@ -1032,7 +1034,7 @@ module m2_te (
 			case (tm_tab[16:15])
 				2'd0: ti_a <= i_d[7:0];
 				2'd1: ti_a <= t_d[7:0];
-				2'd2: ti_a <= t_mul ? tbl_a : 8'h0;
+				2'd2: ti_a <= tbl_a;     // (its own multiplier, whichever the colours' function)
 				default: ti_a <= 8'h0;
 			endcase
 			ts3 <= ts2;
@@ -1045,17 +1047,16 @@ module m2_te (
 			else if (db_sctl[0])
 			begin
 				sr <= c_q[23:16]; sg <= c_q[15:8]; sb <= c_q[7:0];
-				sa <= {c_q[30:24], db_sctl[1] && c_q[29]};
+				sa <= {c_q[30:24], db_sctl[1] && c_q[30]};
 				dsb_s <= c_q[31];
 			end
 			else
 			begin
-				// (MAME's bit, a byte, can't hold it)
 				sr <= {c_q[14:10], db_sctl[1] ? c_q[14:12] : 3'b000};
 				sg <= {c_q[9:5], db_sctl[1] ? c_q[9:7] : 3'b000};
 				sb <= {c_q[4:0], db_sctl[1] ? c_q[4:2] : 3'b000};
 				sa <= 8'h0;
-				dsb_s <= 1'b0;
+				dsb_s <= c_q[15];
 			end
 			// T4: the operands
 			if (t4_v) tp_a <= tp_an;
@@ -1064,15 +1065,17 @@ module m2_te (
 					2'd0: da5 <= tp_an;
 					2'd1: da5 <= da_const;
 					2'd2: da5 <= sa;
-					default: da5 <= bl_r_old;
+					default: da5 <= 8'h0;   // (this pixel's red ALU, T6)
 				endcase
 			else da5 <= tp_an;
 			dsb5 <= dsb_n;
+			taz5 <= tp_an == 8'd0;
+			tcz5 <= td_r == 8'd0 && td_g == 8'd0 && td_b == 8'd0;
 			ts5 <= ts4;
 			dx5 <= dx4;
-			o_tr <= blen ? tin(db_tmul[7:6], td_r, db_constin[23:16], sr, td_a, db_tmul[0]) : td_r;
-			o_tg <= blen ? tin(db_tmul[7:6], td_g, db_constin[15:8], sg, td_a, db_tmul[0]) : td_g;
-			o_tb <= blen ? tin(db_tmul[7:6], td_b, db_constin[7:0], sb, td_a, db_tmul[0]) : td_b;
+			o_tr <= blen ? tin(db_tmul[7:6], td_r, db_constin[23:16], sr, tp_an, db_tmul[0]) : td_r;
+			o_tg <= blen ? tin(db_tmul[7:6], td_g, db_constin[15:8], sg, tp_an, db_tmul[0]) : td_g;
+			o_tb <= blen ? tin(db_tmul[7:6], td_b, db_constin[7:0], sb, tp_an, db_tmul[0]) : td_b;
 			o_sr <= sin(db_smul[7:6], sr, db_constin[23:16], td_r, sa, db_smul[0]);
 			o_sg <= sin(db_smul[7:6], sg, db_constin[15:8], td_g, sa, db_smul[0]);
 			o_sb <= sin(db_smul[7:6], sb, db_constin[7:0], td_b, sa, db_smul[0]);
@@ -1090,12 +1093,13 @@ module m2_te (
 			b_sg <= pick(o_dg, o_sg, o_dg * o_sg);
 			b_sb <= pick(o_db, o_sb, o_db * o_sb);
 			da6 <= da5; dsb6 <= dsb5; ts6 <= ts5; dx6 <= dx5;
+			taz6 <= taz5; tcz6 <= tcz5;
 			// T6: the ALU, the dither
-			if (t6_v) bl_r_old <= bl_ro;
 			ds_r <= db_user[4] ? dith(bl_ro, dith_v) : bl_ro;
 			ds_g <= db_user[4] ? dith(bl_go, dith_v) : bl_go;
 			ds_b <= db_user[4] ? dith(bl_bo, dith_v) : bl_bo;
-			da7 <= da6; dsb7 <= dsb6; ts7 <= ts6;
+			da7 <= blen && db_da[1:0] == 2'd3 ? bl_ro : da6; dsb7 <= dsb6; ts7 <= ts6;
+			taz7 <= taz6; tcz7 <= tcz6;
 			// T7: on to the writes
 			ds8_r <= ds_r; ds8_g <= ds_g; ds8_b <= ds_b;
 			da8 <= da7; dsb8 <= dsb7;
@@ -2312,7 +2316,7 @@ module te_fetch (
 			3'd2: d3_os = pv[31];
 			default: d3_os = 1'b0;
 		endcase
-		c = d3_os ? c1 : c0;
+		c = d3_st ? c1 : c0;
 		case (pip_c[10:8])
 			3'd0: begin d3_or = c[23:16]; d3_og = c[15:8]; d3_ob = c[7:0]; end
 			3'd1: begin d3_or = d3_r; d3_og = d3_g; d3_ob = d3_b; end
