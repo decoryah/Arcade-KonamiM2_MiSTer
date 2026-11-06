@@ -311,6 +311,12 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	wire         w_pc = w_do && w_a == 10'h3ee;
 	wire         dev_reset = rst || (w_frame && audlock) || (we && !h_code && !h_data && !h_dma && h_off == 15'h6074 && wd[0]);
 
+	// where an instruction goes when its operands are parsed: arithmetic straight to its first read (s_ret is then S_A1), or to A
+	st_t         s_ops_end;
+	assign       s_ops_end = op[15] ? S_X : has_mul ? S_RN : S_A3;
+	// a write that can fetch the next instruction in its own clock: not the FIFOs' places, whose writes do more, nor the PC, which moves,
+	// nor a frame that resets the DSP
+	wire         w_then_op = s == S_W && wa[9:7] != 3'b110 && wa != 10'h3ee && !(wa == 10'h3d7 && audlock);
 	wire [9:0]   o_cur = o_v[o_i[2:0]][9:0];
 	wire         o_there = o_i < o_n;
 	wire         o_is_imm = o_there && o_imm[o_i[2:0]];
@@ -330,9 +336,9 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 		p_fw = 1'b0; p_fwd = f_q; p_fwa = {ra_ch, 4'd8};
 		push_ev = 1'b0; stk_push = 1'b0; under = 1'b0;
 		osc_we = 1'b0; osc_phase_n = osc_phase; last_osc_n = last_osc;
-		if (!hw)
-		case (s)
-			S_OP:
+		if (!hw && (s == S_OP || w_then_op))
+		begin
+			s_n = S_OP;
 				if (gwilling)
 				begin
 					op_n = c_q;
@@ -374,6 +380,9 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 							default: if (branch) pc_n = c_q[9:0];
 						endcase
 				end
+		end
+		else if (!hw)
+		case (s)
 			S_PW:
 			begin
 				opw_n = c_q;
@@ -383,7 +392,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 					o_we_p = 1'b1; o_imm_w = 1'b1;
 					o_wv = c_q[13] ? {c_q[12:0], 3'b000} : {{3{c_q[12]}}, c_q[12:0]};
 					o_n_n = o_n + 3'd1;
-					s_n = o_n + 3'd1 >= n_ops ? S_X : S_PW;
+					s_n = o_n + 3'd1 >= n_ops ? s_ops_end : S_PW;
+					s_ret_n = S_A1;
 				end
 				else if (c_q[15:13] == 3'b100)  // an address
 				begin
@@ -393,7 +403,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 						o_we_p = 1'b1; o_wv = 16'(c_q[9:0]);
 						if (c_q[11]) begin wb_v_n = 1'b1; wb_a_n = c_q[9:0]; end
 						o_n_n = o_n + 3'd1;
-						s_n = o_n + 3'd1 >= n_ops ? S_X : S_PW;
+						s_n = o_n + 3'd1 >= n_ops ? s_ops_end : S_PW;
+						s_ret_n = S_A1;
 					end
 				end
 				else
@@ -408,7 +419,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				o_we_p = 1'b1; o_wv = 16'(rv[9:0]);
 				if (opw[11]) begin wb_v_n = 1'b1; wb_a_n = rv[9:0]; end
 				o_n_n = o_n + 3'd1;
-				s_n = o_n + 3'd1 >= n_ops ? S_X : S_PW;
+				s_n = o_n + 3'd1 >= n_ops ? s_ops_end : S_PW;
+				s_ret_n = S_A1;
 			end
 			S_PR:
 			begin
@@ -423,7 +435,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 					if (r_tot == 2'd2 ? (r_left == 2'd2 ? opw[12] : opw[11]) : r_tot == 2'd1 && opw[11]) begin wb_v_n = 1'b1; wb_a_n = ad; end
 					o_n_n = o_n + 3'd1;
 					r_left_n = r_left - 2'd1;
-					s_n = r_left != 2'd1 ? S_PR : o_n + 3'd1 >= n_ops ? S_X : S_PW;
+					s_n = r_left != 2'd1 ? S_PR : o_n + 3'd1 >= n_ops ? s_ops_end : S_PW;
+					if (r_left == 2'd1) s_ret_n = S_A1;
 				end
 			end
 			S_PRD:
@@ -432,7 +445,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				if (r_tot == 2'd2 ? (r_left == 2'd2 ? opw[12] : opw[11]) : r_tot == 2'd1 && opw[11]) begin wb_v_n = 1'b1; wb_a_n = rv[9:0]; end
 				o_n_n = o_n + 3'd1;
 				r_left_n = r_left - 2'd1;
-				s_n = r_left != 2'd1 ? S_PR : o_n + 3'd1 >= n_ops ? S_X : S_PW;
+				s_n = r_left != 2'd1 ? S_PR : o_n + 3'd1 >= n_ops ? s_ops_end : S_PW;
+				if (r_left == 2'd1) s_ret_n = S_A1;
 			end
 			S_X:
 				if (!op[15]) s_n = S_A0;
@@ -460,24 +474,31 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				else begin rv_n = acc[19:4]; s_n = S_A2; end
 			end
 			S_A2: s_n = S_MR;
-			S_MR:
+			// (A, then B, each without a clock of its own unless it has to read)
+			S_MR, S_A3:
 			begin
-				mul_res_n = mul_q[30:11];
-				s_n = S_A3;
-			end
-			S_A3:
+				if (s == S_MR) mul_res_n = mul_q[30:11];
 				case (muxa)
-					2'd0: begin alu_a_n = acc; s_n = S_A5; end
-					2'd3: begin alu_a_n = mul_res; s_n = S_A5; end
+					2'd0: alu_a_n = acc;
+					2'd3: alu_a_n = mul_res_n;
 					default: begin s_ret_n = S_A4; s_n = S_RN; end
 				endcase
-			S_A4: begin alu_a_n = {rv, 4'h0}; s_n = S_A5; end
-			S_A5:
+				if (muxa == 2'd0 || muxa == 2'd3)
+					case (muxb)
+						2'd0: begin alu_b_n = acc; s_n = S_A7; end
+						2'd3: begin alu_b_n = mul_res_n; s_n = S_A7; end
+						default: begin s_ret_n = S_A6; s_n = S_RN; end
+					endcase
+			end
+			S_A4:
+			begin
+				alu_a_n = {rv, 4'h0};
 				case (muxb)
 					2'd0: begin alu_b_n = acc; s_n = S_A7; end
 					2'd3: begin alu_b_n = mul_res; s_n = S_A7; end
 					default: begin s_ret_n = S_A6; s_n = S_RN; end
 				endcase
+			end
 			S_A6: begin alu_b_n = {rv, 4'h0}; s_n = S_A7; end
 			S_A7:
 			begin
@@ -551,7 +572,19 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 			begin
 				rv_n = ra_spec;
 				s_n = s_ret;
-				if (ra_needs_f)
+				if (s_ret == S_A1 && !ra_needs_f)   // S_A1 without its clock, and the next read
+				begin
+					mul_a_n = ra_spec;
+					if (!op[12]) begin rv_n = acc[19:4]; s_n = S_A2; end
+					else
+					begin
+						s_ret_n = S_A2;
+						o_i_n = o_i + 3'd1;
+						if (o_is_imm) begin rv_n = o_v[o_i[2:0]]; s_n = S_A2; end
+						else begin ra_n = o_there ? o_cur : 10'h3ff; s_n = S_R; end
+					end
+				end
+				else if (ra_needs_f)
 				begin
 					f_empty_n = ra_depth == 4'd0;
 					f_pop_n = ra[2:0] == 3'd4;
