@@ -25,6 +25,9 @@
     <rom index="2" zip="heatof11.zip" md5="none">
         <part name="93c46.7k"/>
     </rom>
+    <!-- the EEPROM, the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
+    <nvram index="2" size="128"/>
+
     <rom index="3" zip="heatof11.zip" md5="none">
         <part name="dallas.5e"/>
         <part>01</part>
