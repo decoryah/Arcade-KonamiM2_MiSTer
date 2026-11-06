@@ -9,6 +9,7 @@
 module m2_bda (
 	input  logic        clk,
 	input  logic        rst,
+	input  logic [31:0] mcfg0,          // the memory controller's reset: the sizes of the RAM's two banks
 
 	// the registers: a read's value in the clock of its address, a write in that clock
 	input  logic [19:2] a,              // of 0x000xxxxx
@@ -71,7 +72,7 @@ module m2_bda (
 		if (rst)
 		begin
 			pb_en <= 32'h0; pb_st <= 32'h0;
-			mcfg <= 32'h00004800; mref <= 32'h0;
+			mcfg <= mcfg0; mref <= 32'h0;
 			vint <= 32'h0;
 			ppc2_int <= 1'b0;
 		end

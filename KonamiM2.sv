@@ -186,7 +186,7 @@ always @(posedge clk_sys) core_rst <= reset_sw | ioctl_download | ~pll_locked;
 
 ///////////////////////   THE BRING-UP   ///////////////////////
 
-// The download (index 0 the boot ROM, 1 the CD image, 2 the EEPROM) into clk_cpu: each byte a toggle of ld_req, held (ioctl_wait) until the CPU side
+// The download (index 0 the boot ROM, 1 the CD image, 2 the EEPROM, 3 the M48T58 and the board) into clk_cpu: each byte a toggle of ld_req, held (ioctl_wait) until the CPU side
 // has given it to m2_boot and toggled ld_ack back.
 // Fast load (the MRA's address=, as the owner's other cores): Main_MiSTer copies a ROM straight to its place in the DDR3 and ends a download that
 // has no bytes, only a start address, the length. Those places are where the bytes would go anyway, so only the status page's sizes need it.
@@ -197,7 +197,7 @@ reg   [7:0] ld_d;
 reg   [1:0] ack_s;
 always @(posedge clk_sys) begin
 	ack_s <= {ack_s[0], ld_ack};
-	if (ioctl_wr && ioctl_download && ioctl_index <= 16'd2) begin
+	if (ioctl_wr && ioctl_download && ioctl_index <= 16'd3) begin
 		ld_req <= ~ld_req;
 		ld_a <= ioctl_addr;
 		ld_sel <= ioctl_index[1:0];
