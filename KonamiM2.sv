@@ -89,8 +89,9 @@ localparam CONF_STR = {
 	"-;",
 	"SC0,BIN,CD audio image;",
 	"O[3],Service mode,Off,On;",
+	"DIP;",
 	"R0,Reset;",
-	"J1,Button 1,Button 2,Button 3,Start,Coin,Service;",
+	"J1,Button 1,Button 2,Button 3,Start,Coin;",
 	"V,v",`BUILD_DATE
 };
 
@@ -120,6 +121,8 @@ wire  [15:0] ioctl_index;
 wire  [26:0] ioctl_addr;
 wire   [7:0] ioctl_dout;
 wire         ioctl_wait;
+wire   [7:0] ee_ud;         // the EEPROM, for Main to save (the MRA's nvram, index 2): it asks with ioctl_addr and takes the byte a while later
+wire         ee_chg;
 
 wire  [31:0] joystick_0, joystick_1;
 
@@ -148,6 +151,11 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
 	.ioctl_wait(ioctl_wait),
+	.ioctl_upload(),
+	.ioctl_upload_req(ee_chg),      // (Main saves on the OSD's opening only when asked)
+	.ioctl_upload_index(8'd2),
+	.ioctl_din(ee_ud),
+	.ioctl_rd(),
 
 	.joystick_0(joystick_0),
 	.joystick_1(joystick_1),
@@ -163,6 +171,11 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.sd_buff_din('{8'd0}),
 	.sd_buff_wr(sd_buff_wr)
 );
+
+// the DIP switches (the MRA's <switches>, ioctl index 254): byte 0 is IO1 2, MAME's P2: bit 0 the sound, 1 mono, bit 1 the screen, 0 flipped;
+// stereo by default
+reg   [7:0] dsw = 8'hfe;
+always @(posedge clk_sys) if (ioctl_wr && ioctl_download && ioctl_index[7:0] == 8'd254 && ioctl_addr == 27'd0) dsw <= ioctl_dout;
 
 reg cd_mounted = 1'b0;
 always @(posedge clk_sys) if (img_mounted) cd_mounted <= |img_size;
@@ -216,8 +229,9 @@ m2_boot #(.TICK(8)) u_boot
 (
 	.clk(clk_cpu), .rst(cpu_rst_s[1]),
 	.ld_wr(ld_wr_c), .ld_sel(ld_sel), .ld_addr(ld_a[24:0]), .ld_data(ld_d), .ld_wait(ld_wait_c),
-	.in_p1({3'b111, ~joystick_0[9], 2'b11, ~joystick_1[8], ~joystick_0[8]}),
-	.in_dsw(8'hff),
+	.ee_ua(ioctl_addr[6:0]), .ee_ud(ee_ud), .ee_chg(ee_chg),
+	.in_p1({6'b111111, ~joystick_1[8], ~joystick_0[8]}),  // (the service coin not on a button: Coin does as much)
+	.in_dsw(dsw),
 	.hpos(hpos), .vpos(vpos), .rgb(vdu_rgb), .vdu_on(vdu_on), .audio_l(audio_l), .audio_r(audio_r),
 	.cd_mounted(cd_mounted), .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_ack(sd_ack), .sd_wr(sd_buff_wr), .sd_d(sd_buff_dout),
 	.in_p4(~{joystick_1[7:4], joystick_1[2], joystick_1[3], joystick_1[0], joystick_1[1],

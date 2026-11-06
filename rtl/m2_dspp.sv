@@ -29,7 +29,7 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 );
 	// ---- memories: code and data have a copy for the host's reads -------------------------------------------------------
 	logic [9:0]  pc, pc_n, ra, ra_n;
-	logic [15:0] c_q, d_q, hc_q, hd_q;
+	logic [15:0] c_q, d_q, hc_q, hd_q, c_r, d_r;
 	logic        d_we;
 	logic [9:0]  d_wa;
 	logic [15:0] d_wd;
@@ -37,10 +37,22 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	wire         h_data = a[13:10] == 4'h1;
 	wire         h_dma = a[13:10] == 4'h5;
 	wire [14:0]  h_off = {a[12:0], 2'b00};
-	ppc_ram #(.W(16), .AW(10)) code  (.clk, .we(we && h_code), .wa(a[9:0]), .wd(wd[15:0]), .ra(pc_n), .rd(c_q));
+	ppc_ram #(.W(16), .AW(10)) code  (.clk, .we(we && h_code), .wa(a[9:0]), .wd(wd[15:0]), .ra(pc_n), .rd(c_r));
 	ppc_ram #(.W(16), .AW(10)) hcode (.clk, .we(we && h_code), .wa(a[9:0]), .wd(wd[15:0]), .ra(pre_a), .rd(hc_q));
-	ppc_ram #(.W(16), .AW(10)) data  (.clk, .we(d_we), .wa(d_wa), .wd(d_wd), .ra(ra_n), .rd(d_q));
+	ppc_ram #(.W(16), .AW(10)) data  (.clk, .we(d_we), .wa(d_wa), .wd(d_wd), .ra(ra_n), .rd(d_r));
 	ppc_ram #(.W(16), .AW(10)) hdata (.clk, .we(d_we), .wa(d_wa), .wd(d_wd), .ra(pre_a), .rd(hd_q));
+	// the RAMs' answer to a read of the word being written is undefined, and the OS patches the program as it runs (a jump, at each voice's start)
+	logic        c_by, d_by;
+	logic [15:0] c_bw, d_bw;
+	assign c_q = c_by ? c_bw : c_r;
+	assign d_q = d_by ? d_bw : d_r;
+	always_ff @(posedge clk)
+	begin
+		c_by <= we && h_code && a[9:0] == pc_n;
+		c_bw <= wd[15:0];
+		d_by <= d_we && d_wa == ra_n;
+		d_bw <= d_wd;
+	end
 
 	// the FIFOs: 8 words a channel, and slot 8 the last the program had
 	logic [7:0]  fa_n, fa;
@@ -54,9 +66,18 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	// the DMA registers: current address, current count, next address, next count, by channel
 	logic        r_we;
 	logic [5:0]  r_wa, r_ra;
-	logic [31:0] r_wd, r_q, hr_q;
-	ppc_ram #(.W(32), .AW(6)) dregs  (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(r_ra), .rd(r_q));
-	ppc_ram #(.W(32), .AW(6)) hdregs (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(pre_a[5:0]), .rd(hr_q));
+	logic [31:0] r_wd, r_q, hr_q, r_r, hr_r, r_bw;
+	logic        r_by, hr_by;
+	ppc_ram #(.W(32), .AW(6)) dregs  (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(r_ra), .rd(r_r));
+	ppc_ram #(.W(32), .AW(6)) hdregs (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(pre_a[5:0]), .rd(hr_r));
+	assign r_q = r_by ? r_bw : r_r;
+	assign hr_q = hr_by ? r_bw : hr_r;
+	always_ff @(posedge clk)
+	begin
+		r_by <= r_we && r_wa == r_ra;
+		hr_by <= r_we && r_wa == pre_a[5:0];
+		r_bw <= r_wd;
+	end
 
 	// the output FIFO, in pairs
 	logic [15:0] out0, out1;
@@ -657,7 +678,6 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 		begin
 			if (w_a == 10'h2e0) out0 <= w_v;
 			if (w_a == 10'h2e1) out1 <= w_v;
-			if (w_a == 10'h3e6) partial_int[31:16] <= partial_int[31:16] | w_v;
 			if (w_a == 10'h3f6) audlock <= w_v[0];
 			if (w_a == 10'h3f7) tclock <= w_v;
 		end
@@ -677,7 +697,6 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 		begin
 			up_time <= up_time + 32'd1;
 			duration <= duration - 16'd1;
-			if (duration == 16'h0) partial_int[8] <= 1'b1;
 		end
 		if (under) underover_int[ra_ch] <= 1'b1;
 		if (we && !h_code && !h_data && !h_dma)
@@ -710,6 +729,9 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				2'd2: sh_na <= wd;
 				default: sh_nc <= wd;
 			endcase
+		// (after the host's, so that neither is lost)
+		if (w_do && w_a == 10'h3e6) partial_int[31:16] <= (we && !h_code && !h_data && !h_dma && h_off == 15'h4004 ? partial_int[31:16] & ~wd[31:16] : partial_int[31:16]) | w_v;
+		if (w_frame && duration == 16'h0) partial_int[8] <= 1'b1;
 		if (h_ctl)
 		begin
 			if (wd[16]) next_valid[a[5:2]] <= wd[0];
@@ -754,7 +776,12 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				begin
 					if (d_cnt[31] || d_cnt == 32'h0)
 					begin
-						if (next_valid[dc]) d <= D_N0;
+						if (next_valid[dc])
+						begin
+							if (!go_forever[dc]) next_valid[dc] <= 1'b0;
+							dmanext_int[dc] <= 1'b1;
+							d <= D_N0;
+						end
 						else begin ch_enable[dc] <= 1'b0; d <= D_IDLE; end
 					end
 					else d <= D_IDLE;
@@ -765,12 +792,7 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 			D_N3: if (d_dirty) d <= D_IDLE; else if (!r_host) d <= D_N4;
 			D_N4:
 				if (d_dirty) d <= D_IDLE;
-				else if (!r_host)
-				begin
-					if (!go_forever[dc]) next_valid[dc] <= 1'b0;
-					dmanext_int[dc] <= 1'b1;
-					d <= D_IDLE;
-				end
+				else if (!r_host) d <= D_IDLE;
 			default: d <= D_IDLE;
 		endcase
 

@@ -7,6 +7,7 @@
 //     second), printing where it is every million and each register stub access not seen before
 #include "Vm2_boot.h"
 #include "verilated.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +47,9 @@ int main(int argc, char **argv)
 	uint32_t p2last[8] = {};
 	FILE *ffull = nullptr, *faudio = nullptr;
 	int snap = 0;                          // -snap n: every n frames the picture, frameNNNN.ppm
+	int coin = -1, hist_from = -1;
+	bool board = false;
+	std::map<uint32_t, uint32_t> hist[2];
 	FILE *fata = nullptr;                  // -ata file: each access to the CD drive, as work/lua/cd_ata.lua logs MAME's
 	std::vector<uint8_t> cd, ee;
 	FILE *fpc = nullptr;
@@ -59,6 +63,9 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-more") && i + 1 < argc) more = strtoull(argv[++i], 0, 0);
 		else if (!strcmp(argv[i], "-cd") && i + 1 < argc) cd = slurp(argv[++i]);
 		else if (!strcmp(argv[i], "-snap") && i + 1 < argc) snap = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-coin") && i + 1 < argc) coin = atoi(argv[++i]);    // at this frame a coin, then start and the buttons in turn
+		else if (!strcmp(argv[i], "-board")) board = true;                             // memory about as the board's
+		else if (!strcmp(argv[i], "-hist") && i + 1 < argc) hist_from = atoi(argv[++i]); // from this frame, every 120 frames, the PCs most retired
 		else if (!strcmp(argv[i], "-ee") && i + 1 < argc) ee = slurp(argv[++i]);
 		else if (!strcmp(argv[i], "-ata") && i + 1 < argc) fata = fopen(argv[++i], "w");
 		else if (!strcmp(argv[i], "-full") && i + 1 < argc) ffull = fopen(argv[++i], "rb");     // the disc's raw image, as the SD card has it
@@ -118,6 +125,27 @@ int main(int argc, char **argv)
 						if (f) { fprintf(f, "P6\n640 240\n255\n"); fwrite(pic.data(), 1, pic.size(), f); fclose(f); }
 					}
 					r_frame++;
+					if (coin >= 0)
+					{
+						int d = r_frame - coin;
+						t.in_p1 = 0xff & ~((d >= 0 && d < 8) ? 1 : 0) & ~((d >= 120 && d % 240 < 8) ? 16 : 0);
+						int b = 0;
+						for (int q = 0; q < 4; q++) if (d >= 240 && (d + 40 * q) % 120 < 8) b |= 16 << q;
+						t.in_p4 = 0xffff & ~b;
+					}
+					if (hist_from >= 0 && r_frame >= hist_from && (r_frame - hist_from) % 120 == 119)
+						for (int j = 0; j < 2; j++)
+						{
+							std::vector<std::pair<uint32_t, uint32_t>> h;
+							uint64_t all = 0;
+							for (auto &e : hist[j]) { h.push_back({ e.second, e.first }); all += e.second; }
+							std::sort(h.rbegin(), h.rend());
+							printf("HIST f%d ppc%d %llu:", r_frame, j + 1, (unsigned long long)all);
+							for (size_t q = 0; q < h.size() && q < 24; q++) printf(" %08X=%u", h[q].second, h[q].first);
+							printf("\n");
+							fflush(stdout);
+							hist[j].clear();
+						}
 				}
 			}
 			t.hpos = (r_h - 172) & 1023;
@@ -147,7 +175,12 @@ int main(int argc, char **argv)
 			int16_t a[2] = { int16_t(t.audio_l), int16_t(t.audio_r) };
 			fwrite(a, 2, 2, faudio);
 		}
-		t.ddr_busy = fast ? 0 : (rng() % 4 == 0);
+		if (hist_from >= 0 && r_frame >= hist_from)
+		{
+			if (t.retire) hist[0][t.ipc_o & ~31u]++;
+			if (t.p2_retire) hist[1][t.p2_ipc_o & ~31u]++;
+		}
+		t.ddr_busy = fast ? 0 : board ? (rng() % 4 != 0) : (rng() % 4 == 0);
 		t.ddr_dout_ready = 0;
 		if (!rq.empty() && rq.front().wait <= 0)
 		{
@@ -169,7 +202,7 @@ int main(int argc, char **argv)
 			else
 			{
 				// (a line's words one a clock, after the delay)
-				int wait = fast ? 1 : 2 + int(rng() % 12);
+				int wait = fast ? 1 : board ? 30 : 2 + int(rng() % 12);
 				for (int k = 0; k < burst; k++) rq.push_back({ ddr[w - BASE + k], wait + k });
 			}
 		}

@@ -2,7 +2,7 @@
 # run.sh [options]: builds the Triangle Engine's bench in WSL (~/build_m2/te) and runs it; options as tb_te.cpp. NOBUILD=1 reuses the build.
 # PROF=1: clocks per state, its own build.
 set -e
-R=/mnt/c/repos/konamim2-mister/mister
+R=${R:-/mnt/c/repos/konamim2-mister/mister}
 B=${B:-~/build_m2/te}
 if [ -n "$PROF" ]; then B=~/build_m2/te_prof; VFLAGS=--public-flat-rw; CF=-DTE_PROF; fi
 mkdir -p $B

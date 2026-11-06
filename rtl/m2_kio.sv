@@ -1,7 +1,8 @@
 // m2_kio: Konami's I/O on the BioBus, what MAME 0.289 makes of it (konamim2.cpp): the inputs (0x37e00000, IO1), the 003461's serial
 // data register (0x37c0001e), the gun ports (0x37a00020, nothing there) and the 93C46 EEPROM (0x37400000). All 16-bit accesses.
 //
-// The EEPROM's contents come with the download (ee_*), the first address's two bytes first, the first of them bits 15:8.
+// The EEPROM's contents come with the download (ee_*), the first address's two bytes first, the first of them bits 15:8; Main reads them back
+// the same way (ee_u*) to save them.
 `default_nettype none
 module m2_kio (
 	input  logic        clk,
@@ -20,7 +21,10 @@ module m2_kio (
 
 	input  logic        ee_wr,
 	input  logic [6:0]  ee_a,
-	input  logic [7:0]  ee_d
+	input  logic [7:0]  ee_d,
+	input  logic [6:0]  ee_ua,          // the upload, Main saving it: a byte, in the download's order, the clock after its address
+	output logic [7:0]  ee_ud,
+	output logic        ee_chg          // a clock: the game wrote it, so Main saves it when the OSD next opens
 );
 	// ---- the EEPROM ------------------------------------------------------------------------------------------------------
 	typedef enum logic [2:0] { E_IDLE, E_CMD, E_READ, E_WRITE, E_END } est_t;
@@ -36,6 +40,13 @@ module m2_kio (
 	logic [7:0]  e_hi;
 
 	ppc_ram #(.W(16), .AW(6)) mem (.clk, .we(e_we || (ee_wr && ee_a[0])), .wa(e_we ? e_wa : ee_a[6:1]), .wd(e_we ? e_wd : {e_hi, ee_d}), .ra(e_ra), .rd(e_q));
+	// a copy for the upload, so it never gets in the way of the game's reads
+	logic [15:0] u_q;
+	logic        u_lo;
+	ppc_ram #(.W(16), .AW(6)) umem (.clk, .we(e_we || (ee_wr && ee_a[0])), .wa(e_we ? e_wa : ee_a[6:1]), .wd(e_we ? e_wd : {e_hi, ee_d}), .ra(ee_ua[6:1]), .rd(u_q));
+	always_ff @(posedge clk) u_lo <= ee_ua[0];
+	assign ee_ud = u_lo ? u_q[7:0] : u_q[15:8];
+	assign ee_chg = e_we;
 
 	wire sk_up = sk && !sk_q;
 	logic [1:0] e_load;                 // (the memory's answer is two clocks from the address)

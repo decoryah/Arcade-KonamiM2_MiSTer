@@ -2,7 +2,7 @@
 # run.sh [options]: builds the bring-up machine's bench in WSL (~/build_m2/m2boot) and runs it on the boot ROM against
 # MAME's power-on trace; options as tb_m2boot.cpp. NOBUILD=1 reuses the build.
 set -e
-R=/mnt/c/repos/konamim2-mister/mister
+R=${R:-/mnt/c/repos/konamim2-mister/mister}
 W=/mnt/c/repos/konamim2-mister/work
 B=${B:-~/build_m2/m2boot}
 mkdir -p $B

@@ -5,6 +5,12 @@
     <year>1997</year>
     <manufacturer>Konami</manufacturer>
     <rbf>KonamiM2</rbf>
+    <buttons names="Shoot,Bomb,-,Start,Coin" default="B,A,Start,Select" />
+    <!-- the board's two DIP switches, as MAME's P2 (the rest unused) -->
+    <switches default="FE" base="16">
+        <dip bits="0" name="Sound Output" ids="Stereo,Mono" values="0,1"/>
+        <dip bits="1" name="Flip Screen" ids="On,Off" values="0,1"/>
+    </switches>
 
     <!--
       The core downloads the boot ROM (623b01.8q, 2 MB, BIOBUS slot 0) and the data track of
@@ -29,4 +35,6 @@
     <rom index="2" zip="polystar.zip" md5="none">
         <part name="93c46.7k"/>
     </rom>
+    <!-- the EEPROM, the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
+    <nvram index="2" size="128"/>
 </misterromdescription>

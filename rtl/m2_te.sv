@@ -32,8 +32,6 @@ module m2_te (
 	input  logic        m_busy,
 	input  logic        m_ready,
 	input  logic [63:0] m_dout,
-	input  logic        sn_v,           // another master's write: its line
-	input  logic [31:5] sn_a,
 
 	output logic        busy
 );
@@ -43,9 +41,9 @@ module m2_te (
 
 	typedef enum logic [6:0] {
 		I_STOP, I_FLUSH, I_FETCH, I_REGS, I_REGW, I_AFTER, T_LOAD, T_MM,
-		V_NEXT, V_FIELD, V_PUT, V_SCW, V_SCE, V_DONE,
+		V_NEXT, V_FIELD, V_DONE,
 		S_SORT, S_AR, S_FD, S_FDE, S_DIV0, S_DIV1, S_DIV2, S_XYS, S_FC,
-		S_ATTR, S_Q1, S_Q2, S_Q3, S_Q4, S_OP, S_FX1,
+		S_ATTR, S_Q1, S_Q2, S_Q3, S_Q4, S_OP, S_FX1, S_JOB,
 		E_START, E_NEXT,
 		P_RUN
 	} st_t;
@@ -109,7 +107,8 @@ module m2_te (
 	logic        ld_tram, ld_pip;
 	logic [11:0] ld_ta;
 	logic [7:0]  ld_pa;
-	logic [31:0] ld_d;
+	logic [31:0] ld_d, ld_d2;
+	logic        ld_two;
 	wire         r_pip = r_we && r_unit == 3'd3 && !r_reg[8];
 	logic        pe, pu;                // the pixel pipeline moves; so do the stages before the texels
 	logic        t_hold, p_any, serial;
@@ -118,63 +117,48 @@ module m2_te (
 	logic        z_wn, c_rn, c_wn, c_rs32, c_wwait;
 	logic [27:0] z_wa, c_ra, c_wa;
 	logic [15:0] z_wd;
-	logic [31:0] c_wd, z_cq, c_q;
+	logic [31:0] c_wd, c_q;
 	logic [3:0]  c_wbe;
 	logic        z_rn;
 	logic [31:0] z_ra_full;
-	logic        zr_stall, zw_stall, cr_stall, cw_stall;
-	logic        c_flush, zc_flushed, cc_flushed;
-	logic [1:0]  c_fdone;
-	logic        z_req, c_req, m_own, m_owned;
-	wire         z_gnt = m_owned && !m_own, c_gnt = m_owned && m_own;
-	logic        zm_rd, zm_we, ccm_rd, ccm_we;
-	logic [31:3] zm_a, ccm_a;
-	logic [63:0] zm_wd, ccm_wd;
-	logic [7:0]  zm_be, ccm_be;
-	assign pe = !(zr_stall || zw_stall || cr_stall || cw_stall);
-	assign pu = pe && !t_hold;
-	// (what the colour cache writes in the Z buffer's place, as a list that clears it does, reaches the Z cache's copy)
-	logic        cc_full, x_v, x_full;
-	logic [27:3] x_a;
-	logic [63:0] x_wd;
-	logic [7:0]  x_be;
-	always_ff @(posedge clk)
-	begin
-		x_v <= ccm_we && m_own && !m_busy;
-		x_a <= ccm_a[27:3]; x_wd <= ccm_wd; x_be <= ccm_be; x_full <= cc_full;
-	end
-	te_cache #(.SH(1)) zc (.clk, .rst, .z_base(db_zbase[27:14]), .x_v, .x_a, .x_wd, .x_be, .x_full, .sn_v, .sn_a(sn_a[27:5]), .m_full(), .r_n(z_rn), .r_na(z_ra_full[27:1]), .r_ns32(1'b0), .r_adv(pu), .q(z_cq), .r_stall(zr_stall),
-		.w_n(z_wn), .w_na(z_wa[27:1]), .w_ns32(1'b0), .w_adv(pe), .w_wait(1'b0), .wd({16'h0, z_wd}), .be(4'hf), .w_stall(zw_stall),
-		.flush(c_flush), .flushed(zc_flushed), .m_req(z_req), .m_gnt(z_gnt),
-		.m_rd(zm_rd), .m_we(zm_we), .m_a(zm_a), .m_wd(zm_wd), .m_be(zm_be), .m_busy, .m_ready, .m_dout);
-	te_cache #(.SH(0)) cc (.clk, .rst, .z_base(14'h0), .x_v(1'b0), .x_a(25'h0), .x_wd(64'h0), .x_be(8'h0), .x_full(1'b0), .sn_v(1'b0), .sn_a(23'h0), .m_full(cc_full), .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
-		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
-		.flush(c_flush), .flushed(cc_flushed), .m_req(c_req), .m_gnt(c_gnt),
-		.m_rd(ccm_rd), .m_we(ccm_we), .m_a(ccm_a), .m_wd(ccm_wd), .m_be(ccm_be), .m_busy, .m_ready, .m_dout);
-	wire  [15:0] z_q = z_cq[15:0];
-
-	// the port goes to one of them until it's finished. A write-back can outlast the pixels, so the list's fetches and a texture load take turns with them
-	logic        m_other;
-	wire         m_caches = m_owned || z_req || c_req;
-	always_ff @(posedge clk)
-		if (rst) m_owned <= 1'b0;
-		else if (!m_owned)
-		begin
-			if (!m_other)
-			if (z_req) begin m_owned <= 1'b1; m_own <= 1'b0; end
-			else if (c_req) begin m_owned <= 1'b1; m_own <= 1'b1; end
-		end
-		else if (m_own ? !c_req : !z_req) m_owned <= 1'b0;
-
+	logic        zw_stall, cr_stall, cw_stall;
+	logic        c_flush, cc_flushed, c_fdone;
+	logic        c_req, m_owned;
 	logic        cm_rd, cm_we;
 	logic [31:3] cm_a;
 	logic [63:0] cm_wd;
 	logic [7:0]  cm_be;
-	assign cm_rd = m_own ? ccm_rd : zm_rd;
-	assign cm_we = m_own ? ccm_we : zm_we;
-	assign cm_a = m_own ? ccm_a : zm_a;
-	assign cm_wd = m_own ? ccm_wd : zm_wd;
-	assign cm_be = m_own ? ccm_be : zm_be;
+	assign pe = !(zw_stall || cr_stall || cw_stall);
+	assign pu = pe && !t_hold;
+	// The Z buffer's here and nowhere else: nothing but this engine looks at one (the CPUs store only past its end), so memory needn't hear of it, and Z never waits.
+	// A list clearing it draws in its place through the colour cache: what that has for there comes here instead of going to memory
+	logic        cc_sink, x_v;
+	logic [27:3] x_a;
+	logic [63:0] x_wd;
+	logic [7:0]  x_be;
+	wire         cc_sinks = db_dbase == db_zbase && 14'(cm_a[27:14] - db_zbase[27:14]) < 14'd10;
+	always_ff @(posedge clk)
+	begin
+		x_v <= cc_sink;
+		x_a <= cm_a[27:3]; x_wd <= cm_wd; x_be <= cm_be;
+	end
+	logic [15:0] z_q;
+	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:14]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
+		.w_n(z_wn), .w_na(z_wa[27:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall));
+	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
+		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_nfour(fc_q[74]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
+		.flush(c_flush), .flushed(cc_flushed), .m_req(c_req), .m_gnt(m_owned),
+		.m_rd(cm_rd), .m_we(cm_we), .m_a(cm_a), .m_wd(cm_wd), .m_be(cm_be), .m_busy, .m_ready, .m_dout);
+
+	// the port goes to one of them until it's finished. A write-back can outlast the pixels, so the list's fetches and a texture load take turns with them
+	logic        m_other, lb_go;
+	always_ff @(posedge clk)
+		if (rst) m_owned <= 1'b0;
+		else if (!m_owned)
+		begin
+			if (!m_other && !lb_go && c_req) m_owned <= 1'b1;
+		end
+		else if (!c_req) m_owned <= 1'b0;
 
 	// the list's two lines, one for each value of address bit 5: while the engine's busy with what it has read and no pixel wants memory, the next line comes in
 	logic [63:0] lb [0:7];
@@ -204,16 +188,20 @@ module m2_te (
 	logic [1:0]  ms_skip;               // beats of the first line before the source
 	wire         ms_more = !ms_left[28] && ms_left != 29'd0;
 	wire [4:0]   ms_out = ms_req - ms_rp;
-	wire         ms_rd = st == T_MM && ms_more && ms_out <= 5'd8 && !m_owned;   // (a write-back asking waits for the load: m_other)
+	wire         ms_rd = st == T_MM && ms_more && ms_out <= 5'd12 && !m_owned;   // (a write-back asking waits for the load: m_other)
 	wire         ms_have = ms_wpd != ms_rp;
 	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have;
-	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2]);
+	// (a whole word in one clock, when source and place are in step and it's the texture memory)
+	wire         ms_two = ms_skip == 2'd0 && !mm_pip && !mm_src[2] && !mm_dst[2] && mm_n >= 28'd8;
+	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2] || ms_two);
 	wire [4:0]   ms_rn = ms_rp + 5'(ms_pop);
 	logic [63:0] ms_q;
 	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && m_ready), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
 	wire [31:0]  ms_raw = mm_src[2] ? ms_q[63:32] : ms_q[31:0];
 
 	assign m_other = lb_rd || lb_wait || st == T_MM;
+	// (the list goes before the caches' write-backs, between their lines)
+	assign lb_go = !lb_rd && !lb_wait && !m_owned && !lb_inv && ((f_want && !f_ok) || (pf_need && pf_st));
 	assign m_rd = lb_rd || cm_rd || ms_rd;
 	assign m_we = cm_we;
 	assign m_a = ms_rd ? {ms_a, 2'b00} : lb_rd ? {lb_a, 2'b00} : cm_a;
@@ -225,16 +213,16 @@ module m2_te (
 		else
 		begin
 			f_nx <= f_a[31:5] + 27'd1;
-			pf_need <= f_ok && f_nx[5] != f_a[5] && !(lb_ok[f_nx[5]] && lb_tag[f_nx[5]] == f_nx);
+			pf_need <= !lb_rd && !lb_wait && f_ok && f_nx[5] != f_a[5] && !(lb_ok[f_nx[5]] && lb_tag[f_nx[5]] == f_nx);
 			if (lb_inv)
 			begin
 				lb_ok <= 2'b00;
 				lb_dead <= lb_rd || lb_wait;
 			end
-			else if (!lb_rd && !lb_wait && !m_caches)
+			else if (lb_go)
 			begin
 				if (f_want && !f_ok) begin lb_rd <= 1'b1; lb_ok[f_a[5]] <= 1'b0; lb_a <= f_a[31:5]; lb_dead <= 1'b0; end
-				else if (pf_need && pf_st) begin lb_rd <= 1'b1; lb_ok[f_nx[5]] <= 1'b0; lb_a <= f_nx; lb_dead <= 1'b0; end
+				else begin lb_rd <= 1'b1; lb_ok[f_nx[5]] <= 1'b0; lb_a <= f_nx; lb_dead <= 1'b0; end
 			end
 			if (lb_rd && !m_busy) begin lb_rd <= 1'b0; lb_wait <= 1'b1; lb_n <= 2'd0; lb_tag[lb_a[5]] <= lb_a; end
 			if (lb_wait && m_ready)
@@ -303,6 +291,10 @@ module m2_te (
 	logic [2:0]  tsort;
 	logic [1:0]  vcnt, vslot;
 	logic [31:0] fw_q;
+	logic        vf_v;
+	logic [3:0]  vf_d;
+	logic [3:0]  vm_v, vm_c;
+	logic [5:0]  vm_a [0:3];
 
 	// ---- the triangle ------------------------------------------------------------------------------------------------------
 	val_t        e_v [0:6];             // the edge's
@@ -314,11 +306,10 @@ module m2_te (
 	logic [1:0]  wrange;
 	logic signed [29:0] aria;
 	logic        scan_lr;
-	logic [31:0] iaria, fa_aria;
+	logic [31:0] fa_aria;
 	logic signed [13:0] fc_c;
 	logic signed [13:0] xstep0, xstep1, xstepl, dy0, dy1, dyl;
 	logic signed [13:0] xys0, xys1, xysl;
-	logic [31:0] fc [0:6];              // y23 y31 y12 x23 x31 x12 xstep_long
 	logic [2:0]  fc_i;
 	wire signed [13:0] x12 = x1 - x2, x23 = x2 - x3, x31 = x3 - x1, y12 = y1 - y2, y23 = y2 - y3, y31 = y3 - y1;
 
@@ -335,6 +326,7 @@ module m2_te (
 	logic [1:0]  div_i;
 	logic signed [13:0] dv_nm, dv_dn;
 	logic        dv_flr;
+	wire  [13:0] dv_nabs = dv_nm < 0 ? 14'(-dv_nm) : 14'(dv_nm);
 	always_comb
 		case (div_i)
 			2'd0: begin dv_nm = -x12; dv_dn = y12; dv_flr = !scan_lr; end
@@ -346,49 +338,83 @@ module m2_te (
 	logic [26:0] fd_q;
 	logic [25:0] fd_r;
 	logic [4:0]  fd_i;
+	logic        fd_run;
 	wire  [25:0] fd_m = {2'b01, fa_aria[22:0], 1'b0} >> 1;
 	wire         fd_ge = fd_r >= fd_m;
 
 	// an attribute
 	logic [2:0]  at_i;
-	logic [31:0] q1f, q2f, q3f, acc, tmp, detx, dety;
-	logic [5:0]  op_t;
-	logic [2:0]  op_n;
-	logic [3:0]  at_field;
-	always_comb
-		case (at_i)
-			3'd0: at_field = 4'd2;
-			3'd1: at_field = 4'd3;
-			3'd2: at_field = 4'd4;
-			3'd3: at_field = 4'd5;
-			3'd4: at_field = 4'd7;
-			3'd5: at_field = 4'd8;
-			default: at_field = 4'd6;
+	logic [31:0] q1f, q2f, q3f;
+	function automatic logic [3:0] af(input logic [2:0] i);
+		case (i)
+			3'd0: return 4'd2;
+			3'd1: return 4'd3;
+			3'd2: return 4'd4;
+			3'd3: return 4'd5;
+			3'd4: return 4'd7;
+			3'd5: return 4'd8;
+			default: return 4'd6;
 		endcase
+	endfunction
 	wire         at_have = at_i < 3'd4 ? f_shad : at_i < 3'd6 ? f_text : f_prsp;
-	wire         at_col = at_i < 3'd4;
-	logic signed [5:0] at_bits;
+	// (Quartus 17 dies elaborating a case inside a function inside a cast, so no case here)
+	wire signed [5:0] af_w = wrange == 2'd0 ? 6'sd0 : wrange == 2'd1 ? -6'sd3 : wrange == 2'd2 ? -6'sd6 : -6'sd9;
+	function automatic logic signed [5:0] af_bits(input logic [2:0] i);
+		return i < 3'd4 ? 6'sd8 : i < 3'd6 ? af_w + 6'sd10 : af_w;
+	endfunction
+
+	// The slopes (calculate_slope), in C's order wherever the order shows:
+	//   P1 = q1 * fc0   P2 = q2 * fc1   S1 = P1 + P2   P3 = q3 * fc2   detx = S1 + P3
+	//   P4 = q1 * fc3   P5 = q2 * fc4   S2 = P4 + P5   P6 = q3 * fc5   dety = S2 + P6
+	//   P7 = fc6 * detx   S3 = P7 - dety   slope = S3 * iaria   ddx = detx * iaria
+	// The multiplier and the adder are pipelines, so an attribute starts every 14 clocks, up to four under way: a schedule that repeats (work/te_sched.py), an op asked
+	// each clock and a result written each clock. A product's ready 4 clocks after it's asked for, a sum 5. What's waiting is in a memory, each attribute's own
+	// and the triangle's fc0-6 and iaria, written from a register, and so read for an op 3 clocks after its result at the soonest.
+	logic [3:0]  j_m;
+	logic [3:0]  j_v;
+	logic [2:0]  j_a [0:3];
+	logic [6:0]  at_mask;
+	logic        rf_we;
+	logic [6:0]  rf_wa, ra_a, ra_b;
+	logic [31:0] rf_wd, rfa_q, rfb_q;
+	function automatic logic [6:0] rf_ad(input logic [2:0] i, input logic [4:0] t);
+		return t[4] ? {3'd7, t[3:0]} : {i, t[3:0]};
+	endfunction
+	ppc_ram #(.W(32), .AW(7)) rf_a (.clk, .we(rf_we), .wa(rf_wa), .wd(rf_wd), .ra(ra_a), .rd(rfa_q));
+	ppc_ram #(.W(32), .AW(7)) rf_b (.clk, .we(rf_we), .wa(rf_wa), .wd(rf_wd), .ra(ra_b), .rd(rfb_q));
 	always_comb
-		if (at_col) at_bits = 6'sd8;
-		else if (at_i < 3'd6)
-			case (wrange)
-				2'd0: at_bits = 6'sd10;
-				2'd1: at_bits = 6'sd7;
-				2'd2: at_bits = 6'sd4;
-				default: at_bits = 6'sd1;
-			endcase
-		else
-			case (wrange)
-				2'd0: at_bits = 6'sd0;
-				2'd1: at_bits = -6'sd3;
-				2'd2: at_bits = -6'sd6;
-				default: at_bits = -6'sd9;
-			endcase
+	begin
+		ra_a = 7'd0; ra_b = 7'd0;
+		case (j_m)
+			4'd0: begin ra_a = rf_ad(j_a[2], 5'd22); ra_b = rf_ad(j_a[2], 5'd9); end
+			4'd1: begin ra_b = rf_ad(j_a[0], 5'd20); end
+			4'd2: begin ra_b = rf_ad(j_a[0], 5'd19); end
+			4'd3: begin ra_b = rf_ad(j_a[0], 5'd17); end
+			4'd4: begin ra_b = rf_ad(j_a[0], 5'd16); end
+			4'd5: begin ra_b = rf_ad(j_a[0], 5'd18); end
+			4'd6: begin ra_a = rf_ad(j_a[1], 5'd7); ra_b = rf_ad(j_a[1], 5'd2); end
+			4'd7: begin ra_a = rf_ad(j_a[3], 5'd11); ra_b = rf_ad(j_a[3], 5'd23); end
+			4'd8: begin ra_b = rf_ad(j_a[0], 5'd21); end
+			4'd9: begin ra_a = rf_ad(j_a[0], 5'd3); ra_b = rf_ad(j_a[0], 5'd4); end
+			4'd10: begin ra_a = rf_ad(j_a[1], 5'd8); ra_b = rf_ad(j_a[1], 5'd5); end
+			4'd11: begin ra_a = rf_ad(j_a[0], 5'd0); ra_b = rf_ad(j_a[0], 5'd1); end
+			4'd12: begin ra_a = rf_ad(j_a[2], 5'd6); ra_b = rf_ad(j_a[2], 5'd10); end
+			4'd13: begin ra_a = rf_ad(j_a[2], 5'd9); ra_b = rf_ad(j_a[2], 5'd23); end
+			default: ;
+		endcase
+	end
+	logic [2:0]  j_nx;
+	always_comb
+	begin
+		j_nx = 3'd6;
+		for (int i = 5; i >= 0; i--) if (at_mask[i]) j_nx = 3'(i);
+	end
 
 	// ieee754_to_tefix: |f| * 2^(23 - bits), to nearest, modulo 2^24, with f's sign; a colour then >> 4
 	logic [31:0] fx_f;
 	logic signed [10:0] fx_sh;
-	logic [1:0]  fx_to;
+	logic [1:0]  fx_to;                 // the value after this one's fx_o: 0 a slope, 1 ddx, 2 the edge's, 3 none
+	logic [2:0]  fx_at;
 	val_t        fx_o;
 	always_comb
 	begin
@@ -411,7 +437,7 @@ module m2_te (
 			end
 		end
 		s = fx_f[31] ? -$signed({2'b00, r}) : $signed({2'b00, r});
-		fx_o = at_col ? 27'(s >>> 4) : 27'(s);
+		fx_o = fx_at < 3'd4 ? 27'(s >>> 4) : 27'(s);
 	end
 
 	// ---- the walk --------------------------------------------------------------------------------------------------------
@@ -480,6 +506,11 @@ module m2_te (
 
 	wire         v0_go = st == P_RUN && px != pxe && pu && !(serial && p_any);
 	wire         v0_ok = v0_go && !(fbclipdis || winclipdis || zclipdis);
+	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
+	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
+	logic        tri_flat, v1_four;
+	wire         f4_on = tri_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:4] == 7'd0 && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
+	wire         v0_four = f4_on && px[1:0] == (scan_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
 	assign       z_rn = v0_ok && zon && !zclip;
 	assign       z_ra_full = z_addr;
 
@@ -592,15 +623,16 @@ module m2_te (
 	logic [4:0]  fw, fa_r, fb_r, fc_r;
 	wire         f_push = v1_ok && pu;
 	logic [31:0] fa_q, fb_q;
-	logic [73:0] fc_q;
+	logic [74:0] fc_q;
 	te_ram #(.W(32), .AW(5)) fifo_a (.clk, .we(f_push), .wa(fw), .wd(v1_c), .re(pe), .ra(fa_r), .rd(fa_q));
 	te_ram #(.W(32), .AW(5)) fifo_b (.clk, .we(f_push), .wa(fw), .wd({v1_dx, v1_s}), .re(pe), .ra(fb_r), .rd(fb_q));
-	te_ram #(.W(74), .AW(5)) fifo_c (.clk, .we(f_push), .wa(fw), .wd({zp, zb, v1_w16, v1_d, v1_z}), .re(pe), .ra(fc_r), .rd(fc_q));
+	te_ram #(.W(75), .AW(5)) fifo_c (.clk, .we(f_push), .wa(fw), .wd({v1_four, zp, zb, v1_w16, v1_d, v1_z}), .re(pe), .ra(fc_r), .rd(fc_q));
 
 	always_ff @(posedge clk)
 		if (pu)
 		begin
 			v1_zc <= zon && !zclip;
+			v1_four <= v0_four;
 			v1_w16 <= w16;
 			v1_z <= z_addr[27:0]; v1_d <= d_addr[27:0]; v1_s <= s_addr[27:0];
 			v1_c <= {m_dshade ? 8'hff : s_v[A_R][18:11], m_dshade ? 8'hff : s_v[A_G][18:11], m_dshade ? 8'hff : s_v[A_B][18:11], m_dshade ? 8'hff : s_v[A_A][18:11]};
@@ -645,9 +677,9 @@ module m2_te (
 	wire  [13:0] kv = tv + (tk_i ? 14'h10 : 14'h0);
 	wire  [9:0]  k_u0 = tu[13:4] & umask, k_u1 = ku[13:4] & umask, k_v0 = kv[13:4] & vmask;
 	logic [32:0] d3_a, d3_b;
-	te_fetch fetch_a (.clk, .pe, .ld_tram, .ld_ta, .ld_pip, .ld_pa, .ld_d, .r_pip, .r_a(r_reg[7:0]), .r_d,
+	te_fetch fetch_a (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
 		.u(k_u0), .umax, .vo(a3_vo), .lod_sh, .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
-	te_fetch fetch_b (.clk, .pe, .ld_tram, .ld_ta, .ld_pip, .ld_pa, .ld_d, .r_pip, .r_a(r_reg[7:0]), .r_d,
+	te_fetch fetch_b (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
 		.u(k_u1), .umax, .vo(a3_vo), .lod_sh, .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
 
 	// the first two, then all four for the channels to work through while the next pixel's arrive
@@ -1071,13 +1103,23 @@ module m2_te (
 		vw_e <= 1'b0;
 		lb_inv <= 1'b0;
 		c_flush <= 1'b0;
-		c_fdone <= c_flush ? 2'b00 : c_fdone | {zc_flushed, cc_flushed};
+		c_fdone <= !c_flush && (c_fdone || cc_flushed);
 		ist_set <= 32'h0;
+		rf_we <= 1'b0;
+		// the fixed-point value of the last clock's float
+		fx_to <= 2'd3;
+		case (fx_to)
+			2'd0: slope[fx_at] <= fx_o;
+			2'd1: ddx[fx_at] <= fx_o;
+			2'd2: e_v[fx_at] <= fx_o;
+			default: ;
+		endcase
 
 		if (rst)
 		begin
 			st <= I_STOP;
 			gc_master <= 32'h0; gc_idata <= 32'h0; gc_ddata <= 32'h0; gc_dcntl <= 32'h0; gc_iwp <= 32'h0; gc_irp <= 32'h0; gc_ien <= 32'h0; gc_ist <= 32'h0;
+			fd_run <= 1'b0; vf_v <= 1'b0; vm_v <= 4'd0;
 			es_cntl <= 3'd0; vcnt <= 2'd0; tsort <= 3'd0; run_stop <= 1'b0; start_p <= 1'b0; end_set <= 32'h0;
 			db_super <= 32'h0; db_user <= 32'h0; db_discard <= 32'h0; tm_cntl <= 32'h0; tm_addr <= 32'h0;
 		end
@@ -1087,7 +1129,7 @@ module m2_te (
 			case (st)
 				I_STOP: ;
 				I_FLUSH:
-					if (!c_flush && c_fdone == 2'b11)
+					if (!c_flush && c_fdone)
 					begin
 						ist_set <= end_set;
 						end_set <= 32'h0;
@@ -1181,13 +1223,15 @@ module m2_te (
 						else
 						begin
 							ld_d <= mm_pip ? {ms_raw[7:0], ms_raw[15:8], ms_raw[23:16], ms_raw[31:24]} : ms_raw;
+							ld_d2 <= ms_q[63:32];
+							ld_two <= ms_two;
 							ld_ta <= mm_dst[13:2];
 							ld_pa <= mm_dst[9:2];
 							ld_tram <= !mm_pip;
 							ld_pip <= mm_pip;
-							mm_src <= mm_src + 32'd4;
-							mm_dst <= mm_dst + 14'd4;
-							mm_n <= mm_n < 28'd4 ? 28'd0 : mm_n - 28'd4;
+							mm_src <= mm_src + (ms_two ? 32'd8 : 32'd4);
+							mm_dst <= mm_dst + (ms_two ? 14'd8 : 14'd4);
+							mm_n <= ms_two ? mm_n - 28'd8 : mm_n < 28'd4 ? 28'd0 : mm_n - 28'd4;
 						end
 					end
 				end
@@ -1238,44 +1282,19 @@ module m2_te (
 						endcase
 				end
 				V_FIELD:
+				begin
+					// a field a clock; it goes on through the multiplier by itself (below)
+					vf_v <= 1'b0;
 					if (vf_i == 4'd9) st <= V_DONE;
-					else if (!v_have) begin fw_q <= 32'h0; st <= V_PUT; end
+					else if (!v_have) begin fw_q <= 32'h0; vf_d <= vf_i; vf_v <= 1'b1; vf_i <= vf_i + 4'd1; end
 					else if (f_ok)
 					begin
 						fw_q <= f_w;
+						vf_d <= vf_i;
+						vf_v <= 1'b1;
+						vf_i <= vf_i + 4'd1;
 						gc_irp <= gc_irp + 32'd4;
-						st <= V_PUT;
 					end
-				V_PUT:
-				begin
-					st <= V_FIELD;
-					vf_i <= vf_i + 4'd1;
-					vw_a <= {vslot, vf_i};
-					vw_d <= fw_q;
-					case (vf_i)
-						4'd0: xi[vslot] <= ftoi(fw_q);
-						4'd1: yi[vslot] <= ftoi(fw_q);
-						4'd2, 4'd3, 4'd4, 4'd5:
-						begin
-							fa <= fw_q; fb <= 32'h437f0000;     // 255
-							op_n <= 3'd2;
-							vf_i <= vf_i;
-							st <= V_SCW;
-						end
-						4'd6: begin wexp[vslot] <= fw_q[30:23]; vw_e <= 1'b1; end
-						default: vw_e <= 1'b1;
-					endcase
-				end
-				V_SCW:
-				begin
-					op_n <= op_n - 3'd1;
-					if (op_n == 3'd0) st <= V_SCE;
-				end
-				V_SCE:
-				begin
-					vw_e <= 1'b1; vw_d <= ftrunc(fmul_r);
-					vf_i <= vf_i + 4'd1;
-					st <= V_FIELD;
 				end
 				V_DONE:
 				begin
@@ -1331,19 +1350,14 @@ module m2_te (
 								fd_i <= 5'd0;
 								fd_r <= 26'h0800000;
 								fd_q <= 27'd0;
-								st <= S_FD;
+								fd_run <= 1'b1;
+								div_i <= 2'd0;
+								st <= S_DIV0;
 							end
 						end
 					endcase
 				end
-				S_FD:
-				begin
-					// 1.0 / the mantissa, a bit a clock: 27, the first being whether it's 1 exactly
-					fd_q <= {fd_q[25:0], fd_ge};
-					fd_r <= (fd_ge ? fd_r - fd_m : fd_r) << 1;
-					fd_i <= fd_i + 5'd1;
-					if (fd_i == 5'd26) st <= S_FDE;
-				end
+				S_FD: if (!fd_run) st <= S_FDE;
 				S_FDE:
 				begin
 					logic [7:0] e;
@@ -1359,15 +1373,16 @@ module m2_te (
 						mt = {1'b0, fd_q[25:2]} + 25'(fd_q[1] && (fd_q[2] || fd_q[0] || fd_r != 26'd0));
 						if (mt[24]) begin e = e + 8'd1; mt = 25'h0800000; end
 					end
-					iaria <= {fa_aria[31], e, mt[22:0]};
-					div_i <= 2'd0;
-					st <= S_DIV0;
+					rf_we <= 1'b1; rf_wa <= rf_ad(3'd0, 5'd23); rf_wd <= {fa_aria[31], e, mt[22:0]};
+					st <= S_XYS;
 				end
 				S_DIV0:
 				begin
-					dv_n <= dv_nm < 0 ? 14'(-dv_nm) : 14'(dv_nm);
+					dv_n <= dv_nabs;
 					dv_d <= dv_dn < 0 ? 14'(-dv_dn) : 14'(dv_dn);
-					dv_q <= 14'd0; dv_r <= 15'd0; dv_i <= 4'd13;
+					dv_q <= 14'd0; dv_r <= 15'd0;
+					dv_i <= 4'd0;
+					for (int b = 1; b < 14; b++) if (dv_nabs[b]) dv_i <= 4'(b);
 					st <= S_DIV1;
 				end
 				S_DIV1:
@@ -1393,7 +1408,7 @@ module m2_te (
 					endcase
 					div_i <= div_i + 2'd1;
 					ss <= 4'd0;
-					st <= div_i == 2'd2 ? S_XYS : S_DIV0;
+					st <= div_i == 2'd2 ? S_FD : S_DIV0;
 				end
 				S_XYS:
 				begin
@@ -1425,96 +1440,91 @@ module m2_te (
 						3'd5: fc_c <= x12;
 						default: fc_c <= xstepl;
 					endcase
-					if (fc_i != 3'd0) fc[fc_i - 3'd1] <= itof(30'(fc_c));
+					if (fc_i != 3'd0)
+					begin
+						rf_we <= 1'b1; rf_wa <= rf_ad(3'd0, 5'd16 + 5'(fc_i - 3'd1)); rf_wd <= itof(30'(fc_c));
+					end
 					fc_i <= fc_i + 3'd1;
-					if (fc_i == 3'd7) begin at_i <= 3'd0; st <= S_ATTR; end
+					if (fc_i == 3'd7) begin at_i <= 3'd0; at_mask <= 7'd0; tri_flat <= 1'b1; st <= S_ATTR; end
 				end
 				S_ATTR:
-					if (at_i == 3'd7) st <= E_START;
+					if (at_i == 3'd7)
+					begin
+						if (at_mask == 7'd0) st <= E_START;
+						else begin j_m <= 4'd13; j_v <= 4'd0; st <= S_JOB; end
+					end
 					else if (!at_have)
 					begin
 						e_v[at_i] <= '0; ddx[at_i] <= '0; slope[at_i] <= '0;
 						at_i <= at_i + 3'd1;
 					end
+					else if (at_i[2])
+					begin
+						at_mask[at_i] <= 1'b1;
+						at_i <= at_i + 3'd1;
+					end
 					else
 					begin
-						vr_a <= {v_top, at_field};
+						vr_a <= {v_top, af(at_i)};
 						st <= S_Q1;
 					end
-				S_Q1: begin vr_a <= {v_mid, at_field}; st <= S_Q2; end
-				S_Q2: begin q1f <= vr_q; vr_a <= {v_bot, at_field}; st <= S_Q3; end
+				S_Q1: begin vr_a <= {v_mid, af(at_i)}; st <= S_Q2; end
+				S_Q2: begin q1f <= vr_q; vr_a <= {v_bot, af(at_i)}; st <= S_Q3; end
 				S_Q3: begin q2f <= vr_q; st <= S_Q4; end
-				S_Q4: begin q3f <= vr_q; op_t <= 6'd0; st <= S_OP; end
+				S_Q4: begin q3f <= vr_q; st <= S_OP; end
 				S_OP:
-				begin
-					// calculate_slope, in C's order wherever the order shows. A product's ready 4 clocks after it's asked for, a sum 5, both a clock
-					// apart if need be; each column's a place in the schedule, and nothing's overwritten before what's waiting for it has read it
-					//   acc = q1 * fc0   tmp = q2 * fc1   acc += tmp   tmp = q3 * fc2   detx = acc + tmp
-					//   acc = q1 * fc3   tmp = q2 * fc4   acc += tmp   tmp = q3 * fc5   dety = acc + tmp
-					//   acc = fc6 * detx   acc -= dety   slope = acc * iaria   ddx = detx * iaria
-					op_t <= op_t + 6'd1;
-					fsub <= 1'b0;
 					// (a colour the same at all three corners: whole numbers up to 255, so nothing rounds, and the slopes come to nothing)
-					if (op_t == 6'd0 && !at_i[2] && q1f == q2f && q1f == q3f)
+					if (q1f == q2f && q1f == q3f)
 					begin
 						slope[at_i] <= '0; ddx[at_i] <= '0;
-						fx_f <= q1f; fx_sh <= 11'(q1f[30:23]) - 11'sd127 - 11'(at_bits); fx_to <= 2'd2;
+						fx_f <= q1f; fx_sh <= 11'(q1f[30:23]) - 11'sd127 - 11'(af_bits(at_i)); fx_at <= at_i; fx_to <= 2'd2;
 						st <= S_FX1;
 					end
-					case (op_t)
-						6'd0: begin fa <= q1f; fb <= fc[0]; end
-						6'd1: begin fa <= q2f; fb <= fc[1]; end
-						6'd2: begin fa <= q3f; fb <= fc[2]; end
-						6'd6: begin fa <= acc; fb <= tmp; end
-						6'd8: begin fa <= q1f; fb <= fc[3]; end
-						6'd9: begin fa <= q2f; fb <= fc[4]; end
-						6'd10: begin fa <= q3f; fb <= fc[5]; end
-						6'd12: begin fa <= acc; fb <= tmp; end
-						6'd14: begin fa <= acc; fb <= tmp; end
-						6'd18: begin fa <= fc[6]; fb <= detx; end
-						6'd20: begin fa <= acc; fb <= tmp; end
-						6'd26: begin fa <= acc; fb <= dety; fsub <= 1'b1; end
-						6'd32: begin fa <= acc; fb <= iaria; end
-						6'd33: begin fa <= detx; fb <= iaria; end
-						default: ;
-					endcase
-					case (op_t)
-						6'd4, 6'd12, 6'd22: acc <= fmul_r;
-						6'd5, 6'd6, 6'd13, 6'd14: tmp <= fmul_r;
-						6'd11, 6'd19, 6'd31: acc <= fadd_r;
-						6'd17: detx <= fadd_r;
-						6'd25: dety <= fadd_r;
-						6'd36: begin fx_f <= fmul_r; fx_sh <= 11'(fmul_r[30:23]) - 11'sd127 - 11'(at_bits); end
-						6'd37:
-						begin
-							slope[at_i] <= fx_o;
-							fx_f <= fmul_r; fx_sh <= 11'(fmul_r[30:23]) - 11'sd127 - 11'(at_bits);
-							st <= S_FX1;
-							fx_to <= 2'd1;
-						end
-						default: ;
-					endcase
-				end
+					else
+					begin
+						at_mask[at_i] <= 1'b1;
+						tri_flat <= 1'b0;
+						at_i <= at_i + 3'd1;
+						st <= S_ATTR;
+					end
 				S_FX1:
 				begin
-					case (fx_to)
-						2'd1:
-						begin
-							ddx[at_i] <= fx_o;
-							fx_f <= q1f; fx_sh <= 11'(q1f[30:23]) - 11'sd127 - 11'(at_bits); fx_to <= 2'd2;
-							st <= S_FX1;
-						end
-						default:
-						begin
-							e_v[at_i] <= fx_o;
-							at_i <= at_i + 3'd1;
-							st <= S_ATTR;
-						end
+					at_i <= at_i + 3'd1;
+					st <= S_ATTR;
+				end
+				S_JOB:
+				begin
+					fsub <= 1'b0;
+					j_m <= j_m == 4'd13 ? 4'd0 : j_m + 4'd1;
+					case (j_m)
+						4'd0: begin vr_a <= {v_mid, af(j_a[0])}; fa <= rfa_q; fb <= rfb_q; end
+						4'd1: begin vr_a <= {v_top, af(j_a[0])}; rf_we <= j_v[1]; rf_wa <= rf_ad(j_a[1], 5'd8); rf_wd <= fadd_r; fa <= rfa_q; fb <= rfb_q; end
+						4'd2: begin vr_a <= {v_mid, af(j_a[0])}; fa <= vr_q; fb <= rfb_q; rf_we <= j_v[2]; rf_wa <= rf_ad(j_a[2], 5'd10); rf_wd <= fadd_r; end
+						4'd3: begin vr_a <= {v_top, af(j_a[0])}; fa <= vr_q; fb <= rfb_q; rf_we <= j_v[1]; rf_wa <= rf_ad(j_a[1], 5'd7); rf_wd <= fadd_r; end
+						4'd4: begin fa <= vr_q; fb <= rfb_q; vr_a <= {v_bot, af(j_a[0])}; rf_we <= j_v[3]; rf_wa <= rf_ad(j_a[3], 5'd11); rf_wd <= fadd_r; fx_f <= fmul_r; fx_sh <= 11'(fmul_r[30:23]) - 11'sd127 - 11'(af_bits(j_a[3])); fx_at <= j_a[3]; fx_to <= j_v[3] ? 2'd1 : 2'd3; end
+						4'd5: begin fa <= vr_q; fb <= rfb_q; rf_we <= j_v[2]; rf_wa <= rf_ad(j_a[2], 5'd6); rf_wd <= fmul_r; vr_a <= {v_top, af(j_a[0])}; end
+						4'd6: begin fa <= vr_q; fb <= rfb_q; rf_we <= j_v[0]; rf_wa <= rf_ad(j_a[0], 5'd4); rf_wd <= fmul_r; end
+						4'd7: begin rf_we <= j_v[0]; rf_wa <= rf_ad(j_a[0], 5'd3); rf_wd <= fmul_r; vr_a <= {v_bot, af(j_a[0])}; fa <= rfa_q; fb <= rfb_q; fx_f <= vr_q; fx_sh <= 11'(vr_q[30:23]) - 11'sd127 - 11'(af_bits(j_a[0])); fx_at <= j_a[0]; fx_to <= j_v[0] ? 2'd2 : 2'd3; end
+						4'd8: begin rf_we <= j_v[0]; rf_wa <= rf_ad(j_a[0], 5'd1); rf_wd <= fmul_r; fa <= rfa_q; fb <= rfb_q; end
+						4'd9: begin rf_we <= j_v[0]; rf_wa <= rf_ad(j_a[0], 5'd0); rf_wd <= fmul_r; fa <= vr_q; fb <= rfb_q; end
+						4'd10: begin rf_we <= j_v[0]; rf_wa <= rf_ad(j_a[0], 5'd2); rf_wd <= fmul_r; fa <= rfa_q; fb <= rfb_q; end
+						4'd11: begin fa <= rfa_q; fb <= rfb_q; end
+						4'd12: begin fa <= rfa_q; fb <= rfb_q; rf_we <= j_v[1]; rf_wa <= rf_ad(j_a[1], 5'd9); rf_wd <= fadd_r; fx_f <= fmul_r; fx_sh <= 11'(fmul_r[30:23]) - 11'sd127 - 11'(af_bits(j_a[3])); fx_at <= j_a[3]; fx_to <= j_v[3] ? 2'd0 : 2'd3; end
+						4'd13: begin rf_we <= j_v[0]; rf_wa <= rf_ad(j_a[0], 5'd5); rf_wd <= fmul_r; fa <= rfa_q; fb <= rfb_q; fsub <= 1'b1; end
+						default: ;
 					endcase
+					if (j_m == 4'd13)
+					begin
+						j_v <= {j_v[2:0], at_mask != 7'd0};
+						j_a[0] <= j_nx; j_a[1] <= j_a[0]; j_a[2] <= j_a[1]; j_a[3] <= j_a[2];
+						if (at_mask != 7'd0) at_mask[j_nx] <= 1'b0;
+						else if (j_v[2:0] == 3'd0) st <= E_START;
+					end
 				end
 
 				// ---- the walk ----
 				E_START:
+				if (!p_any)
 				begin
 					y <= y1;
 					cf_short <= 14'sd0; cf_long <= 14'sd0;
@@ -1561,18 +1571,51 @@ module m2_te (
 					begin
 						for (int i = 0; i < 4; i++) s_v[i] <= clamp19(scan_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
 						for (int i = 4; i < 7; i++) s_v[i] <= clamp23(scan_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
-						px <= scan_lr ? px + 14'sd1 : px - 14'sd1;
+						px <= scan_lr ? px + (v0_four ? 14'sd4 : 14'sd1) : px - (v0_four ? 14'sd4 : 14'sd1);
 					end
 
 				// ---- the triangle's done, or there wasn't one: the next vertex, or the list ----
 				E_NEXT:
-					if (!p_any)
+					if (!p_any || vn != 16'd0)
 					begin
 						vn <= vn - 16'd1;
 						st <= vn == 16'd0 ? I_AFTER : V_NEXT;
 					end
 				default: st <= I_STOP;
 			endcase
+
+			// 1.0 / the mantissa, a bit a clock: 27, the first being whether it's 1 exactly
+			if (fd_run)
+			begin
+				fd_q <= {fd_q[25:0], fd_ge};
+				fd_r <= (fd_ge ? fd_r - fd_m : fd_r) << 1;
+				fd_i <= fd_i + 5'd1;
+				if (fd_i == 5'd26) fd_run <= 1'b0;
+			end
+
+			// a vertex's field, from the list: X, Y and W's exponent are registers; the colours are scaled and made whole; all but X and Y go to the vertices' memory
+			// (by 1, the rest: the same number), when the multiplier's done. S_SORT reads none till long after
+			vm_v <= {vm_v[2:0], vf_v && vf_d >= 4'd2};
+			vm_c <= {vm_c[2:0], vf_d < 4'd6};
+			vm_a[0] <= {vslot, vf_d};
+			vm_a[1] <= vm_a[0]; vm_a[2] <= vm_a[1]; vm_a[3] <= vm_a[2];
+			if (vm_v[3])
+			begin
+				vw_e <= 1'b1;
+				vw_a <= vm_a[3];
+				vw_d <= vm_c[3] ? ftrunc(fmul_r) : fmul_r;
+			end
+			if (vf_v && st != V_DONE)
+			begin
+				if (vf_d == 4'd0) xi[vslot] <= ftoi(fw_q);
+				if (vf_d == 4'd1) yi[vslot] <= ftoi(fw_q);
+				if (vf_d == 4'd6) wexp[vslot] <= fw_q[30:23];
+			end
+			if (vf_v)
+			begin
+				fa <= fw_q;
+				fb <= vf_d < 4'd6 ? 32'h437f0000 : 32'h3f800000;     // 255, 1
+			end
 
 			// ---- the next line ----
 			if (st == P_RUN)
@@ -1632,8 +1675,12 @@ module m2_te (
 					end
 					y_n <= ny;
 					ss <= 4'd0;
-					if (ny == y3) begin nx_last <= 1'b1; nx <= NX_DONE; end
-					else nx <= NX_ROW;
+					// (the rows' products, a line on from the last's)
+					row_dn <= du_scan ? row_dn - 28'(db_dstride[10:0]) : row_dn + 28'(db_dstride[10:0]);
+					row_zn <= du_scan ? row_zn - 28'(db_dstride[10:0]) : row_zn + 28'(db_dstride[10:0]);
+					row_sn <= du_scan ? row_sn - 28'(db_sstride[10:0]) : row_sn + 28'(db_sstride[10:0]);
+					nx <= NX_DONE;
+					if (ny == y3) nx_last <= 1'b1;
 				end
 				NX_ROW:
 				begin
@@ -1745,21 +1792,12 @@ endmodule
 // a stall in the clock after the address (in *_n); a stalled port's address stays. A write allocates without reading: each byte has a bit
 // for whether it's been written, and a line goes back as those alone; a read of a line that's only been written sends them, then fills it.
 // A write goes as soon as it hits, in case the read waiting for the same line index would take it away; it's done with then
-module te_cache #(
-	parameter bit SH = 0                // a copy of the Z buffer beside it: see below
-) (
+module te_cache (
 	input  logic        clk,
 	input  logic        rst,
 
-	input  logic [27:14] z_base,
-	input  logic        x_v,            // the colour cache's writes, a clock late
-	input  logic [27:3] x_a,
-	input  logic [63:0] x_wd,
-	input  logic [7:0]  x_be,
-	input  logic        x_full,         // of a line wholly written
-	input  logic        sn_v,
-	input  logic [27:5] sn_a,
-	output logic        m_full,
+	input  logic        sink_in,        // the line in hand needn't go to memory
+	output logic        m_sink,         // it isn't: its word's on m_wd for the copy
 
 	input  logic        r_n,
 	input  logic [27:1] r_na,
@@ -1771,6 +1809,7 @@ module te_cache #(
 	input  logic        w_n,
 	input  logic [27:1] w_na,
 	input  logic        w_ns32,
+	input  logic        w_nfour,        // the whole 64
 	input  logic        w_adv,
 	input  logic        w_wait,         // what it writes needs the read's answer
 	input  logic [31:0] wd,             // in the clock after the address
@@ -1797,14 +1836,14 @@ module te_cache #(
 	logic        walking;               // the eviction's the flush's
 	logic        fill;                  // what comes after the eviction: a fill, or the line just cleared
 
-	logic        r_v, w_v, w_done, r_s32, w_s32, w_go;
+	logic        r_v, w_v, w_done, r_s32, w_s32, w_go, w_four;
 	logic [27:1] r_a, w_a;
 	always_ff @(posedge clk)
 		if (rst) begin r_v <= 1'b0; w_v <= 1'b0; w_done <= 1'b0; end
 		else
 		begin
 			if (r_adv) begin r_v <= r_n; r_a <= r_na; r_s32 <= r_ns32; end
-			if (w_adv) begin w_v <= w_n; w_a <= w_na; w_s32 <= w_ns32; w_done <= 1'b0; end
+			if (w_adv) begin w_v <= w_n; w_a <= w_na; w_s32 <= w_ns32; w_four <= w_nfour; w_done <= 1'b0; end
 			else if (w_go) w_done <= 1'b1;
 		end
 
@@ -1857,35 +1896,16 @@ module te_cache #(
 	wire  [6:0]  q_i = q_m[38:32];
 	wire  [31:0] q_mask = q_m[31:0];
 	wire  [7:0]  q_be = q_n == 2'd0 ? q_mask[7:0] : q_n == 2'd1 ? q_mask[15:8] : q_n == 2'd2 ? q_mask[23:16] : q_mask[31:24];
-	wire         q_go = q_st == Q_WR && (q_be == 8'h0 || (m_gnt && !m_busy));
+	logic        q_sink;
+	wire         q_go = q_st == Q_WR && (q_be == 8'h0 || q_sink || (m_gnt && !m_busy));
 	wire         q_end = q_go && q_n == 2'd3;
 	wire         q_push = b_go && b_n == 2'd3;
 	te_ram #(.W(64), .AW(6)) q_data (.clk, .we(b_go), .wa({q_wp, b_n}), .wd(d2_q), .re(1'b1), .ra({q_rp, q_n + 2'(q_go)}), .rd(q_d));
 	te_ram #(.W(55), .AW(4)) q_meta (.clk, .we(q_push), .wa(q_wp), .wd({b_t, b_i, b_mask}), .re(1'b1), .ra(q_rp), .rd(q_m));
 	// (a write takes a line that nothing needs at once: a clean one's just replaced)
 	wire         w_clean = !(t2_q[18] && t2_q[16]);
-	wire         w_ok = idle && (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i) && !(SH && x_v);
-	// the copy: 160 KB from the Z buffer's start, in step with memory, so a read of a line it has doesn't wait. A write goes on through the cache to memory.
-	// A line's good once a fill or a whole line of the colour cache's has been through; another master's write there, or a new place, starts it again
-	function automatic logic [3:0] sh_blk(input logic [27:14] a);
-		return a[17:14] - z_base[17:14];
-	endfunction
-	function automatic logic sh_in(input logic [27:14] a);
-		return SH && a[27:18] == z_base[27:18] && sh_blk(a) < 4'd10;
-	endfunction
-	logic        r_win, w_win, r_sh, sh_we, sh_set;
-	logic [14:0] sh_wa, sh_ra;
-	logic [12:0] sv_ra, sv_wa, sh_walk;
-	logic [63:0] sh_wd, sh_q;
-	logic [7:0]  sh_be;
-	logic        sh_clr, sv_q;
-	always_ff @(posedge clk)
-	begin
-		if (r_adv) r_win <= sh_in(r_na[27:14]);
-		if (w_adv) w_win <= sh_in(w_na[27:14]);
-	end
-	assign r_sh = sv_q && r_win && !sh_clr;
-	assign r_stall = r_v && !(r_sh || (idle && r_hit));
+	wire         w_ok = idle && (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i);
+	assign r_stall = r_v && !(idle && r_hit);
 	assign       w_stall = w_v && !w_done && !w_ok;
 	assign       w_go = w_v && !w_done && w_ok;
 
@@ -1900,18 +1920,14 @@ module te_cache #(
 	begin : g_b
 		ppc_ram #(.W(8), .AW(9)) b (.clk, .we(d_we && d_be[i]), .wa(d_wa), .wd(d_wd[8 * i +: 8]), .ra(d_ra), .rd(d_q[8 * i +: 8]));
 		ppc_ram #(.W(8), .AW(9)) b2 (.clk, .we(d_we && d_be[i]), .wa(d_wa), .wd(d_wd[8 * i +: 8]), .ra(d2_ra), .rd(d2_q[8 * i +: 8]));
-		if (SH) te_sh s (.clk, .we(sh_we && sh_be[i]), .wa(sh_wa), .wd(sh_wd[8 * i +: 8]), .ra(sh_ra), .rd(sh_q[8 * i +: 8]));
 	end
-	if (SH) ppc_ram #(.W(1), .AW(13)) sv (.clk, .we(sh_set || sh_clr), .wa(sv_wa), .wd(!sh_clr), .ra(sv_ra), .rd(sv_q));
-	else begin assign sh_q = 64'h0; assign sv_q = 1'b0; end
 	endgenerate
 
 	logic [1:0]  n;
 	logic [22:0] l_a;                   // [27:5]
 
 	// the answer to a read, from the 64
-	wire  [63:0] r_q = r_sh ? sh_q : d_q;
-	wire  [31:0] q32 = r_a[2] ? r_q[63:32] : r_q[31:0];
+	wire  [31:0] q32 = r_a[2] ? d_q[63:32] : d_q[31:0];
 	wire  [31:0] q32be = {q32[7:0], q32[15:8], q32[23:16], q32[31:24]};
 	assign q = r_s32 ? q32be : {16'h0, r_a[1] ? q32be[15:0] : q32be[31:16]};
 
@@ -1929,15 +1945,15 @@ module te_cache #(
 			w32 = {2{wd[7:0], wd[15:8]}};
 			wbe = w_a[1] ? 4'b1100 : 4'b0011;
 		end
-	wire  [7:0]  w_be = w_a[2] ? {wbe, 4'h0} : {4'h0, wbe};
+	wire  [7:0]  w_be = w_four ? 8'hff : w_a[2] ? {wbe, 4'h0} : {4'h0, wbe};
 
-	assign m_req = st == C_FILL || st == C_FILLW || q_st != Q_IDLE;
+	assign m_req = st == C_FILL || st == C_FILLW || (q_st != Q_IDLE && !(q_st == Q_WR && q_sink));
 	assign m_rd = st == C_FILL && q_e && m_gnt;
-	assign m_we = q_st == Q_WR && m_gnt && q_be != 8'h0;
+	assign m_we = q_st == Q_WR && m_gnt && q_be != 8'h0 && !q_sink;
+	assign m_sink = q_st == Q_WR && q_sink;
 	assign m_a = q_st != Q_IDLE ? {4'h4, q_t, q_i, q_n} : {4'h4, l_a, 2'b00};
 	assign m_wd = q_d;
 	assign m_be = q_be;
-	assign m_full = &q_mask && q_n == 2'd3;
 
 	always_comb
 	begin
@@ -1979,53 +1995,8 @@ module te_cache #(
 	end
 
 	wire         w_miss = w_v && !w_done && !w_hit && !w_clean;
-	wire         r_miss = r_v && !r_hit && !r_sh;
+	wire         r_miss = r_v && !r_hit;
 
-	// the copy's port: the colour cache's, or the cache's writes and fills
-	wire         fill_win = sh_in(l_a[22:9]);
-	wire         x_win = sh_in(x_a[27:14]);
-	logic [27:14] sh_base_r;
-	always_comb
-	begin
-		logic [27:14] ra;
-		ra = r_adv ? r_na[27:14] : r_a[27:14];
-		sh_ra = {sh_blk(ra), r_adv ? r_na[13:3] : r_a[13:3]};
-		sv_ra = sh_ra[14:2];
-		sh_we = 1'b0; sh_set = 1'b0;
-		sh_wa = {sh_blk(l_a[22:9]), l_a[8:0], n}; sh_wd = m_dout; sh_be = 8'hff;
-		sv_wa = sh_walk;
-		if (x_v && x_win)
-		begin
-			sh_we = 1'b1;
-			sh_wa = {sh_blk(x_a[27:14]), x_a[13:3]}; sh_wd = x_wd; sh_be = x_be;
-			if (x_full && !sh_clr) begin sh_set = 1'b1; sv_wa = sh_wa[14:2]; end
-		end
-		else if (st == C_FILLW)
-		begin
-			if (m_ready && m_gnt && fill_win)
-			begin
-				sh_we = 1'b1;
-				if (n == 2'd3 && !sh_clr) begin sh_set = 1'b1; sv_wa = sh_wa[14:2]; end
-			end
-		end
-		else if (w_go && w_win)
-		begin
-			sh_we = 1'b1;
-			sh_wa = {sh_blk(w_a[27:14]), w_a[13:3]}; sh_wd = {2{w32}}; sh_be = w_be;
-		end
-	end
-	logic        sn_hit;
-	always_ff @(posedge clk)
-	begin
-		sn_hit <= sn_v && sh_in(sn_a[27:14]);
-		sh_base_r <= z_base;
-		if (rst || sn_hit || sh_base_r != z_base) begin sh_clr <= 1'b1; sh_walk <= 13'd0; end
-		else if (sh_clr)
-		begin
-			sh_walk <= sh_walk + 13'd1;
-			if (sh_walk == 13'h1fff) sh_clr <= 1'b0;
-		end
-	end
 	// the line the pixels are on, the read ahead of the write
 	wire         lead_v = r_v || (w_v && !w_done);
 	wire  [6:0]  lead_i = r_v ? r_a[11:5] : w_a[11:5];
@@ -2074,7 +2045,7 @@ module te_cache #(
 			q_cnt <= q_cnt + 5'(q_push) - 5'(q_end);
 			case (q_st)
 				Q_IDLE: if (!q_e) q_st <= Q_LOOK;
-				Q_LOOK: q_st <= Q_WR;
+				Q_LOOK: begin q_sink <= sink_in; q_st <= Q_WR; end
 				default:
 					if (q_go)
 					begin
@@ -2151,7 +2122,64 @@ module te_cache #(
 	end
 endmodule
 
-// a lane of the Z buffer's copy: the blocks it spans, not a power of two
+// the Z buffer: 16 KB blocks from the one it starts in, ten of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
+module te_z (
+	input  logic        clk,
+	input  logic        rst,
+	input  logic [27:14] z_base,
+	input  logic        x_v,
+	input  logic [27:3] x_a,
+	input  logic [63:0] x_wd,
+	input  logic [7:0]  x_be,
+	input  logic [27:1] r_na,
+	input  logic        r_adv,
+	output logic [15:0] q,
+	input  logic        w_n,
+	input  logic [27:1] w_na,
+	input  logic        w_adv,
+	input  logic [15:0] wd,             // in the clock after the address
+	output logic        w_stall
+);
+	function automatic logic [3:0] blk(input logic [27:14] a);
+		return a[17:14] - z_base[17:14];
+	endfunction
+	logic        w_v, w_done, w_win;
+	logic [27:1] w_a;
+	logic [2:1]  r_a;
+	wire         w_go = w_v && !w_done && !x_v;
+	assign w_stall = w_v && !w_done && x_v;
+	always_ff @(posedge clk)
+		if (rst) begin w_v <= 1'b0; w_done <= 1'b0; end
+		else
+		begin
+			if (r_adv) r_a <= r_na[2:1];
+			if (w_adv)
+			begin
+				w_v <= w_n; w_a <= w_na; w_done <= 1'b0;
+				w_win <= 14'(w_na[27:14] - z_base) < 14'd10;
+			end
+			else if (w_go) w_done <= 1'b1;
+		end
+	logic [14:0] ra_r;
+	wire  [14:0] ra = r_adv ? {blk(r_na[27:14]), r_na[13:3]} : ra_r;
+	always_ff @(posedge clk) ra_r <= ra;
+	wire  [7:0]  wbe = {w_a[2] && w_a[1], w_a[2] && w_a[1], w_a[2] && !w_a[1], w_a[2] && !w_a[1], !w_a[2] && w_a[1], !w_a[2] && w_a[1], !w_a[2] && !w_a[1], !w_a[2] && !w_a[1]};
+	wire  [14:0] wa = x_v ? {blk(x_a[27:14]), x_a[13:3]} : {blk(w_a[27:14]), w_a[13:3]};
+	wire  [63:0] d = x_v ? x_wd : {4{wd[7:0], wd[15:8]}};
+	wire  [7:0]  be = x_v ? x_be : (w_go && w_win) ? wbe : 8'h00;
+	logic [63:0] m;
+	genvar i;
+	generate
+	for (i = 0; i < 8; i++)
+	begin : g_b
+		te_sh s (.clk, .we(be[i]), .wa, .wd(d[8 * i +: 8]), .ra, .rd(m[8 * i +: 8]));
+	end
+	endgenerate
+	wire  [31:0] m32 = r_a[2] ? m[63:32] : m[31:0];
+	assign q = r_a[1] ? {m32[23:16], m32[31:24]} : {m32[7:0], m32[15:8]};
+endmodule
+
+// a lane of the Z buffer: the blocks it spans, not a power of two
 module te_sh (
 	input  logic        clk,
 	input  logic        we,
@@ -2173,10 +2201,12 @@ module te_fetch (
 	input  logic        clk,
 	input  logic        pe,
 	input  logic        ld_tram,
+	input  logic        ld_two,         // ld_d at ld_ta, even, and ld_d2 after it
 	input  logic [11:0] ld_ta,
 	input  logic        ld_pip,
 	input  logic [7:0]  ld_pa,
 	input  logic [31:0] ld_d,
+	input  logic [31:0] ld_d2,
 	input  logic        r_pip,
 	input  logic [7:0]  r_a,
 	input  logic [31:0] r_d,
@@ -2199,7 +2229,12 @@ module te_fetch (
 	logic [31:0] t_q;
 	logic [7:0]  p_ra;
 	logic [31:0] p_q;
-	te_ram #(.W(32), .AW(12)) tram (.clk, .we(ld_tram), .wa(ld_ta), .wd(ld_d), .re(pe), .ra(t_ra), .rd(t_q));
+	// (in halves, the even words and the odd, for ld_two)
+	logic [31:0] t_q0, t_q1;
+	logic        t_sel;
+	te_ram #(.W(32), .AW(11)) tram0 (.clk, .we(ld_tram && (ld_two || !ld_ta[0])), .wa(ld_ta[11:1]), .wd(ld_d), .re(pe), .ra(t_ra[11:1]), .rd(t_q0));
+	te_ram #(.W(32), .AW(11)) tram1 (.clk, .we(ld_tram && (ld_two || ld_ta[0])), .wa(ld_ta[11:1]), .wd(ld_two ? ld_d2 : ld_d), .re(pe), .ra(t_ra[11:1]), .rd(t_q1));
+	assign t_q = t_sel ? t_q1 : t_q0;
 	te_ram #(.W(32), .AW(8)) pip (.clk, .we(r_pip || ld_pip), .wa(r_pip ? r_a : ld_pa), .wd(r_pip ? r_d : ld_d), .re(pe), .ra(p_ra), .rd(p_q));
 
 	logic [9:0]  a2_u, a3_u;
@@ -2283,6 +2318,7 @@ module te_fetch (
 			a3_u <= a2_u;
 			a4_off <= 21'(a3_sum >> lod_sh);
 			t_ra <= a4_ad[16:5];
+			t_sel <= t_ra[0];
 			a5_bit <= a4_ad[4:0];
 			d1_bit <= a5_bit;
 			d1_sh <= (t_q >> {d1_bit[4:3], 3'b000}) >> (d1_bit[2:0] ^ (3'd0 - tdepth[2:0]));

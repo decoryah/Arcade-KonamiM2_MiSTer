@@ -26,6 +26,9 @@ module m2_boot #(
 	input  logic [24:0] ld_addr,
 	input  logic [7:0]  ld_data,
 	output logic        ld_wait,
+	input  logic [6:0]  ee_ua,          // the EEPROM's upload: its byte at ee_ua, a clock later
+	output logic [7:0]  ee_ud,
+	output logic        ee_chg,         // a clock: the game wrote the EEPROM
 
 	// DDR3 (MiSTer's DDRAM_*, on clk)
 	input  logic        ddr_busy,
@@ -364,7 +367,6 @@ module m2_boot #(
 		.a(u_pa[15:2]), .we(u_req && u_we && u_te), .wd(u_wdata[31:0]), .rd(te_rd),
 		.intr(te_int),
 		.m_rd(te_m_rd), .m_we(te_m_we), .m_a(te_m_a), .m_wd(te_m_wd), .m_be(te_m_be), .m_busy(te_m_busy), .m_ready(te_m_ready), .m_dout(ddr_dout),
-		.sn_v(sn_t), .sn_a,
 		.busy()
 	);
 	// verilator lint_on PINCONNECTEMPTY
@@ -424,7 +426,7 @@ module m2_boot #(
 		.clk, .rst,
 		.a(u_pa[23:1]), .we(u_req && u_we && u_kio), .wd(u_wdata[15:0]), .rd(kio_rd),
 		.ata_int(cd_int), .in_p1, .in_dsw, .in_p4, .in_p6,
-		.ee_wr(ld_wr && ld_sel == 2'd2), .ee_a(ld_addr[6:0]), .ee_d(ld_data)
+		.ee_wr(ld_wr && ld_sel == 2'd2), .ee_a(ld_addr[6:0]), .ee_d(ld_data), .ee_ua, .ee_ud, .ee_chg
 	);
 
 	always_ff @(posedge clk)
@@ -473,4 +475,43 @@ module m2_boot #(
 			st_dev_d <= u_we ? u_wdata[31:0] : w;
 		end
 	end
+`ifdef M2_PROF
+	// a frame's worth of clocks at a time: the Triangle Engine, each CPU, the bus
+	longint p_n, p_te, p_tewait, p_lists, p_go[0:7], p_ddrb;
+	longint p_ret[0:1], p_il[0:1], p_dl[0:1], p_wf[0:1], p_dr[0:1], p_wn[0:1];
+	logic   p_te1;
+	always_ff @(posedge clk)
+	begin
+		p_te1 <= te.busy;
+		p_n <= p_n + 1;
+		p_te <= p_te + longint'(te.busy);
+		p_tewait <= p_tewait + longint'((te_m_rd || te_m_we) && te_m_busy);
+		p_lists <= p_lists + longint'(te.busy && !p_te1);
+		p_ddrb <= p_ddrb + longint'(ddr_busy);
+		if (bus.took) p_go[bus.who] <= p_go[bus.who] + 1;
+		for (int j = 0; j < 2; j++)
+		begin
+			p_ret[j] <= p_ret[j] + longint'(c_ret[j]) + longint'(c_ret[j] && c_ret2[j]);
+		end
+		p_il[0] <= p_il[0] + longint'(g_cpu[0].cache.i_st != 0);
+		p_il[1] <= p_il[1] + longint'(g_cpu[1].cache.i_st != 0);
+		p_dl[0] <= p_dl[0] + longint'(g_cpu[0].cache.d_st == 3);
+		p_dl[1] <= p_dl[1] + longint'(g_cpu[1].cache.d_st == 3);
+		p_wf[0] <= p_wf[0] + longint'(g_cpu[0].cache.d_st == 2);
+		p_wf[1] <= p_wf[1] + longint'(g_cpu[1].cache.d_st == 2);
+		p_dr[0] <= p_dr[0] + longint'(g_cpu[0].cache.d_st == 5 || g_cpu[0].cache.d_st == 6);
+		p_dr[1] <= p_dr[1] + longint'(g_cpu[1].cache.d_st == 5 || g_cpu[1].cache.d_st == 6);
+		p_wn[0] <= p_wn[0] + longint'(g_cpu[0].cache.w_push);
+		p_wn[1] <= p_wn[1] + longint'(g_cpu[1].cache.w_push);
+		if (rst || p_n == 1122000)
+		begin
+			if (!rst) $display("PROF te %0d wait %0d lists %0d | go c0 %0d c1 %0d dma %0d ata %0d vdu %0d te %0d dsp %0d | ddrb %0d | p1 ret %0d il %0d dl %0d wf %0d dr %0d wn %0d | p2 ret %0d il %0d dl %0d wf %0d dr %0d wn %0d",
+				p_te, p_tewait, p_lists, p_go[0], p_go[1], p_go[2], p_go[3], p_go[4], p_go[5], p_go[6], p_ddrb,
+				p_ret[0], p_il[0], p_dl[0], p_wf[0], p_dr[0], p_wn[0], p_ret[1], p_il[1], p_dl[1], p_wf[1], p_dr[1], p_wn[1]);
+			p_n <= 0; p_te <= 0; p_tewait <= 0; p_lists <= 0; p_ddrb <= 0;
+			for (int j = 0; j < 8; j++) p_go[j] <= 0;
+			for (int j = 0; j < 2; j++) begin p_ret[j] <= 0; p_il[j] <= 0; p_dl[j] <= 0; p_wf[j] <= 0; p_dr[j] <= 0; p_wn[j] <= 0; end
+		end
+	end
+`endif
 endmodule

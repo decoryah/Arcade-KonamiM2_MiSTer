@@ -41,9 +41,9 @@ static uint64_t writes, reads;
 #ifdef TE_PROF
 static uint64_t st_n[128];
 static const char *st_name[] = { "I_STOP", "I_FLUSH", "I_FETCH", "I_REGS", "I_REGW", "I_AFTER", "T_LOAD", "T_MM",
-	"V_NEXT", "V_FIELD", "V_PUT", "V_SCW", "V_SCE", "V_DONE",
+	"V_NEXT", "V_FIELD", "V_DONE",
 	"S_SORT", "S_AR", "S_FD", "S_FDE", "S_DIV0", "S_DIV1", "S_DIV2", "S_XYS", "S_FC",
-	"S_ATTR", "S_Q1", "S_Q2", "S_Q3", "S_Q4", "S_OP", "S_FX1",
+	"S_ATTR", "S_Q1", "S_Q2", "S_Q3", "S_Q4", "S_OP", "S_FX1", "S_JOB",
 	"E_START", "E_NEXT",
 	"P_RUN" };
 static const int P_RUN_N = int(sizeof st_name / sizeof *st_name) - 1;
@@ -94,8 +94,54 @@ static void clock1()
 	{
 		static int was;
 		int s = t->rootp->m2_te__DOT__st & 127;
+		if (getenv("TE_TRAM"))
+		{
+			static unsigned char used[4096];
+			used[t->rootp->m2_te__DOT__fetch_a__DOT__t_ra & 4095] = 1;
+			if (!strcmp(st_name[s], "T_MM") && strcmp(st_name[was], "T_MM") && t->rootp->m2_te__DOT__mm_dst == 0)
+			{
+				int w = 0, l8 = 0, l32 = 0;
+				for (int i = 0; i < 4096; i++) w += used[i];
+				for (int i = 0; i < 4096; i += 8) { int u = 0; for (int j = 0; j < 8; j++) u |= used[i + j]; l8 += u; }
+				for (int i = 0; i < 4096; i += 32) { int u = 0; for (int j = 0; j < 32; j++) u |= used[i + j]; l32 += u; }
+				printf("  tram used: %d of 4096 words, %d of 512 32-byte lines, %d of 128 128-byte blocks\n", w, l8, l32);
+				memset(used, 0, sizeof used);
+			}
+		}
 		if (getenv("TE_LOADS") && !strcmp(st_name[s], "T_MM") && strcmp(st_name[was], "T_MM"))
 			printf("  load src %08x dst %04x count %x pip %d\n", unsigned(t->rootp->m2_te__DOT__mm_src), unsigned(t->rootp->m2_te__DOT__mm_dst), unsigned(t->rootp->m2_te__DOT__mm_n), int(t->rootp->m2_te__DOT__mm_pip));
+		{
+			static FILE *fev = getenv("TE_EV") ? fopen(getenv("TE_EV"), "w") : nullptr;
+			if (fev && s != was) fprintf(fev, "%d %llu\n", s, (unsigned long long)clocks);
+		}
+		{
+			// each attribute set up: which, flat, the same as the last
+			static uint64_t at_n[8], at_flat[8], at_same[8], tri;
+			static uint32_t pq[3];
+			auto *qq = t->rootp;
+			if (!strcmp(st_name[s], "S_OP") && strcmp(st_name[was], "S_OP"))
+			{
+				int ai = qq->m2_te__DOT__at_i;
+				uint32_t a1 = qq->m2_te__DOT__q1f, a2 = qq->m2_te__DOT__q2f, a3 = qq->m2_te__DOT__q3f;
+				at_n[ai]++;
+				if (a1 == a2 && a1 == a3 && ai < 4) at_flat[ai]++;
+				else if (ai > 0 && ai < 4 && a1 == pq[0] && a2 == pq[1] && a3 == pq[2]) at_same[ai]++;
+				pq[0] = a1; pq[1] = a2; pq[2] = a3;
+			}
+			if (!strcmp(st_name[s], "P_RUN") && strcmp(st_name[was], "P_RUN") && getenv("TE_TRI"))
+			{
+				static int nt;
+				if (nt++ < atoi(getenv("TE_TRI")))
+					printf("  tri: user %08x dctl %08x discard %08x master %08x y %d..%d x1 %d lr %d zbase %08x dbase %08x stride %08x mask %02x\n", unsigned(qq->m2_te__DOT__db_user), unsigned(qq->m2_te__DOT__db_dctl),
+						unsigned(qq->m2_te__DOT__db_discard), unsigned(qq->m2_te__DOT__gc_master), int(qq->m2_te__DOT__y1), int(qq->m2_te__DOT__y3), int(qq->m2_te__DOT__x1), int(qq->m2_te__DOT__scan_lr), unsigned(qq->m2_te__DOT__db_zbase), unsigned(qq->m2_te__DOT__db_dbase), unsigned(qq->m2_te__DOT__db_dstride), int(qq->m2_te__DOT__at_mask));
+			}
+			if (!strcmp(st_name[s], "E_START") && (++tri % 500) == 0)
+			{
+				printf("  attrs at %llu triangles:", (unsigned long long)tri);
+				for (int i = 0; i < 7; i++) printf(" %llu/%llu/%llu", (unsigned long long)at_n[i], (unsigned long long)at_flat[i], (unsigned long long)at_same[i]);
+				printf("\n");
+			}
+		}
 		was = s;
 	}
 	if ((t->rootp->m2_te__DOT__st & 127) == P_RUN_N)
@@ -105,7 +151,7 @@ static void clock1()
 		if (!q->m2_te__DOT__pe)
 		{
 			p_stall++;
-			p_zr += q->m2_te__DOT__zr_stall; p_zw += q->m2_te__DOT__zw_stall; p_cr += q->m2_te__DOT__cr_stall; p_cw += q->m2_te__DOT__cw_stall;
+			p_zr += 0; p_zw += q->m2_te__DOT__zw_stall; p_cr += q->m2_te__DOT__cr_stall; p_cw += q->m2_te__DOT__cw_stall;
 		}
 		else if (!px_left) p_drain++;
 		else if (q->m2_te__DOT__t_hold)
@@ -232,9 +278,9 @@ int main(int argc, char **argv)
 		if (t->busy) { printf("k %d: still busy at %llu clocks\n", k, (unsigned long long)(clocks - c0)); 
 #ifdef TE_PROF
 		{ auto *r = t->rootp;
-			printf("  st %d m_owned %d m_own %d z_req %d c_req %d lb_rd %d lb_wait %d f_want %d f_ok %d rq %d m_rd %d m_we %d\n", int(r->m2_te__DOT__st), int(r->m2_te__DOT__m_owned), int(r->m2_te__DOT__m_own), int(r->m2_te__DOT__z_req), int(r->m2_te__DOT__c_req), int(r->m2_te__DOT__lb_rd), int(r->m2_te__DOT__lb_wait), int(r->m2_te__DOT__f_want), int(r->m2_te__DOT__f_ok), int(rq.size()), int(t->m_rd), int(t->m_we));
-			printf("  pe %d pu %d p_any %d serial %d px %d pxe %d nx %d zr %d zw %d cr %d cw %d ms_out %d ms_left %d mm_n %d\n", int(r->m2_te__DOT__pe), int(r->m2_te__DOT__pu), int(r->m2_te__DOT__p_any), int(r->m2_te__DOT__serial), int(r->m2_te__DOT__px), int(r->m2_te__DOT__pxe), int(r->m2_te__DOT__nx), int(r->m2_te__DOT__zr_stall), int(r->m2_te__DOT__zw_stall), int(r->m2_te__DOT__cr_stall), int(r->m2_te__DOT__cw_stall), int(r->m2_te__DOT__ms_out), int(r->m2_te__DOT__ms_left), int(r->m2_te__DOT__mm_n));
-			printf("  zc st %d b_st %d  cc st %d b_st %d\n", int(r->m2_te__DOT__zc__DOT__st), int(r->m2_te__DOT__zc__DOT__b_st), int(r->m2_te__DOT__cc__DOT__st), int(r->m2_te__DOT__cc__DOT__b_st)); }
+			printf("  st %d m_owned %d c_req %d lb_rd %d lb_wait %d f_want %d f_ok %d rq %d m_rd %d m_we %d\n", int(r->m2_te__DOT__st), int(r->m2_te__DOT__m_owned), int(r->m2_te__DOT__c_req), int(r->m2_te__DOT__lb_rd), int(r->m2_te__DOT__lb_wait), int(r->m2_te__DOT__f_want), int(r->m2_te__DOT__f_ok), int(rq.size()), int(t->m_rd), int(t->m_we));
+			printf("  pe %d pu %d p_any %d serial %d px %d pxe %d nx %d zw %d cr %d cw %d ms_out %d ms_left %d mm_n %d\n", int(r->m2_te__DOT__pe), int(r->m2_te__DOT__pu), int(r->m2_te__DOT__p_any), int(r->m2_te__DOT__serial), int(r->m2_te__DOT__px), int(r->m2_te__DOT__pxe), int(r->m2_te__DOT__nx), int(r->m2_te__DOT__zw_stall), int(r->m2_te__DOT__cr_stall), int(r->m2_te__DOT__cw_stall), int(r->m2_te__DOT__ms_out), int(r->m2_te__DOT__ms_left), int(r->m2_te__DOT__mm_n));
+			}
 #endif
 		return 3; }
 		uint64_t c1 = clocks;

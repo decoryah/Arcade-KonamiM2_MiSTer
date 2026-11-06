@@ -15,16 +15,16 @@ The title screen and stage 1, from MAME 0.289.
 
 No ROMs or CD images are in this repository; you supply your own MAME set.
 
-**Status.** Plays on a real MiSTer: the owner has run the attract mode for 60 minutes without a freeze and then played a game, with
-its music and sound effects. **Heavy scenes run below the real board's speed**, and the game slows with them: about 30 pictures a
-second measured at the start of stage 1, where the real board gives about 44.6. Built with Quartus 17.0: 41,273 of 41,910 ALMs (98 %),
-461 of 553 M10K blocks, 69 of 112 DSPs, timing 0.264 ns short on the machine's clock and met on the HDMI clock.
+**Status.** Plays on a real MiSTer: the owner has run the attract mode for 90 minutes and played games, with its music and sound
+effects throughout. **Gameplay runs at about 83 % of the real board's speed**, and the game slows with it: the attract mode's gameplay
+demo, from STAGE 1 START to the first OPTION x2, takes 102.9 s against 85.0 s in a video of the real board. The title and intro scenes run
+at the real board's pace. Built with Quartus 17.0: 41,451 of 41,910 ALMs (99 %), timing 0.362 ns short on the machine's clock and met on the HDMI clock.
 
 | Game | Set | On this core |
 |---|---|---|
-| Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, below full speed |
-| Total Vice (ver EBA, 1997) | `totlvice` | not tried |
-| Evil Night / Hell Night (1998) | `evilngt`, `hellngt` | not tried |
+| Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, about 83 % of full speed in gameplay |
+| Total Vice (ver EBA, 1997) | `totlvice` | planned |
+| Evil Night / Hell Night (1998) | `evilngt`, `hellngt` | planned |
 | Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not working in MAME 0.289, not tried |
 | Battle Tryst (ver JAC, 1998) | `btltryst` | not working in MAME 0.289, not tried |
 | Heat of Eleven '98 (ver EAA, 1998) | `heatof11` | not working in MAME 0.289, not tried |
@@ -61,20 +61,29 @@ second measured at the start of stage 1, where the real board gives about 44.6. 
 
 ## Controls and OSD
 
-A joystick and three buttons, Start, Coin and Service, set up in MiSTer's button mapping; the buttons have generic names for now.
+A joystick, Shoot, Bomb, Start and Coin, for two players. The default pad layout: B shoots, A bombs, Start, Select for a coin. The
+service coin isn't on a button: Coin does the same.
 
 | Option | Values |
 |---|---|
 | Aspect ratio | Original, Full Screen, two custom |
 | Scale | Normal, V-Integer, HV-Integer, Narrower HV-Integer, HV-Integer+ |
 | CD audio image | the disc's raw image |
-| Service mode | Off, On |
+| Service mode | Off, On: the game's service menu |
+| DIP Switches | Sound Output (Stereo, Mono), Flip Screen (Off, On) |
+
+The service menu's settings (Free Play and the rest) are kept in the game's EEPROM, which MiSTer saves to `config/nvram/` when the OSD
+is opened, and loads at the next start.
 
 ## Known limits
 
-- Below the real board's speed in heavy scenes.
+- About 83 % of the real board's speed in gameplay.
+- Flip Screen isn't checked against the real board.
 - No CRT Adjust: the chip has no room for it now.
-- The board's MPEG hardware isn't in the core.
+- Only Tobe! Polystars is supported (the table above). Total Vice (ver EBA) and Evil Night / Hell Night are planned; they work in
+  MAME, and may need more of the board, such as Evil Night's light guns.
+- The 3DO M2's MPEG video decoder isn't in the core. No Konami M2 game is known to need it: MAME has only an empty stand-in for it
+  and runs Polystars, Total Vice and Evil Night without one.
 
 ## What is verified
 
