@@ -25,9 +25,9 @@ at the real board's pace. Built with Quartus 17.0: 41,451 of 41,910 ALMs (99 %),
 | Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, about 83 % of full speed in gameplay |
 | Total Vice (ver EBA, 1997) | `totlvice` | planned |
 | Evil Night / Hell Night (1998) | `evilngt`, `hellngt` | planned |
-| Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not working in MAME 0.289, not tried |
-| Battle Tryst (ver JAC, 1998) | `btltryst` | not working in MAME 0.289, not tried |
-| Heat of Eleven '98 (ver EAA, 1998) | `heatof11` | not working in MAME 0.289, not tried |
+| Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not working in MAME 0.289, not planned |
+| Battle Tryst (ver JAC, 1998) | `btltryst` | not working in MAME 0.289, not planned |
+| Heat of Eleven '98 (ver EAA, 1998) | `heatof11` | not working in MAME 0.289, not planned |
 
 ## Install
 
@@ -78,7 +78,6 @@ is opened, and loads at the next start.
 ## Known limits
 
 - About 83 % of the real board's speed in gameplay.
-- Flip Screen isn't checked against the real board.
 - No CRT Adjust: the chip has no room for it now.
 - Only Tobe! Polystars is supported (the table above). Total Vice (ver EBA) and Evil Night / Hell Night are planned; they work in
   MAME, and may need more of the board, such as Evil Night's light guns.

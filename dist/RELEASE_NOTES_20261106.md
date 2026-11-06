@@ -82,7 +82,6 @@ Aspect ratio, Scale, CD audio image, Service mode, DIP Switches (Sound Output, F
 - **MPEG:** the 3DO M2's MPEG video decoder isn't in the core. No Konami M2 game is known to need it: MAME has only an empty stand-in
   for it and runs Polystars, Total Vice and Evil Night without one.
 - No CRT Adjust, no Scandoubler Fx and no volume: the chip has no room for them now.
-- Flip Screen isn't checked against the real board.
 
 ### Credits
 
