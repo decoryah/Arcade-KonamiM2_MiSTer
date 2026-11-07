@@ -11,6 +11,12 @@
 // Only the texture loads that the game's lists use: MMDMA, PIPLOAD. No compressed load (not seen in a list so far). A value that a span's
 // first pixel has made negative goes to the texture sums as if 0, where MAME's are unsigned.
 `default_nettype none
+
+// The Z buffer's size in 8 KB blocks, from the block a game's Z starts in (a qsf VERILOG_MACRO can change it). At 16 bits a pixel: Polystars 320 x 224,
+// Total Vice and Evil Night 320 x 240, all within 20. Heat of Eleven's Low Res 640 x 240 takes 38, Hell Night's 512 x 384 takes 48.
+`ifndef Z_BLOCKS
+`define Z_BLOCKS 20
+`endif
 module m2_te (
 	input  logic        clk,
 	input  logic        rst,
@@ -136,14 +142,14 @@ module m2_te (
 	logic [27:3] x_a;
 	logic [63:0] x_wd;
 	logic [7:0]  x_be;
-	wire         cc_sinks = db_dbase == db_zbase && 14'(cm_a[27:14] - db_zbase[27:14]) < 14'd10;
+	wire         cc_sinks = db_dbase == db_zbase && 15'(cm_a[27:13] - db_zbase[27:13]) < 15'(`Z_BLOCKS);
 	always_ff @(posedge clk)
 	begin
 		x_v <= cc_sink;
 		x_a <= cm_a[27:3]; x_wd <= cm_wd; x_be <= cm_be;
 	end
 	logic [15:0] z_q;
-	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:14]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
+	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:13]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
 		.w_n(z_wn), .w_na(z_wa[27:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall));
 	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
 		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_nfour(fc_q[74]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
@@ -2122,11 +2128,11 @@ module te_cache (
 	end
 endmodule
 
-// the Z buffer: 16 KB blocks from the one it starts in, ten of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
+// the Z buffer: 8 KB blocks from the one it starts in, Z_BLOCKS of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
 module te_z (
 	input  logic        clk,
 	input  logic        rst,
-	input  logic [27:14] z_base,
+	input  logic [27:13] z_base,
 	input  logic        x_v,
 	input  logic [27:3] x_a,
 	input  logic [63:0] x_wd,
@@ -2140,8 +2146,8 @@ module te_z (
 	input  logic [15:0] wd,             // in the clock after the address
 	output logic        w_stall
 );
-	function automatic logic [3:0] blk(input logic [27:14] a);
-		return a[17:14] - z_base[17:14];
+	function automatic logic [5:0] blk(input logic [27:13] a);
+		return a[18:13] - z_base[18:13];
 	endfunction
 	logic        w_v, w_done, w_win;
 	logic [27:1] w_a;
@@ -2156,15 +2162,15 @@ module te_z (
 			if (w_adv)
 			begin
 				w_v <= w_n; w_a <= w_na; w_done <= 1'b0;
-				w_win <= 14'(w_na[27:14] - z_base) < 14'd10;
+				w_win <= 15'(w_na[27:13] - z_base) < 15'(`Z_BLOCKS);
 			end
 			else if (w_go) w_done <= 1'b1;
 		end
-	logic [14:0] ra_r;
-	wire  [14:0] ra = r_adv ? {blk(r_na[27:14]), r_na[13:3]} : ra_r;
+	logic [15:0] ra_r;
+	wire  [15:0] ra = r_adv ? {blk(r_na[27:13]), r_na[12:3]} : ra_r;
 	always_ff @(posedge clk) ra_r <= ra;
 	wire  [7:0]  wbe = {w_a[2] && w_a[1], w_a[2] && w_a[1], w_a[2] && !w_a[1], w_a[2] && !w_a[1], !w_a[2] && w_a[1], !w_a[2] && w_a[1], !w_a[2] && !w_a[1], !w_a[2] && !w_a[1]};
-	wire  [14:0] wa = x_v ? {blk(x_a[27:14]), x_a[13:3]} : {blk(w_a[27:14]), w_a[13:3]};
+	wire  [15:0] wa = x_v ? {blk(x_a[27:13]), x_a[12:3]} : {blk(w_a[27:13]), w_a[12:3]};
 	wire  [63:0] d = x_v ? x_wd : {4{wd[7:0], wd[15:8]}};
 	wire  [7:0]  be = x_v ? x_be : (w_go && w_win) ? wbe : 8'h00;
 	logic [63:0] m;
@@ -2183,12 +2189,12 @@ endmodule
 module te_sh (
 	input  logic        clk,
 	input  logic        we,
-	input  logic [14:0] wa,
+	input  logic [15:0] wa,
 	input  logic [7:0]  wd,
-	input  logic [14:0] ra,
+	input  logic [15:0] ra,
 	output logic [7:0]  rd
 );
-	(* ramstyle = "no_rw_check" *) logic [7:0] mem [0:20479];
+	(* ramstyle = "no_rw_check" *) logic [7:0] mem [0:`Z_BLOCKS * 1024 - 1];
 	always_ff @(posedge clk)
 	begin
 		if (we) mem[wa] <= wd;
