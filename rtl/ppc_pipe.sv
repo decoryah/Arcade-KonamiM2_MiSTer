@@ -114,7 +114,7 @@ module ppc_pipe #(
 	// (the GPRs and FPRs: ppc_regs below; these copies are the bench's)
 	logic [31:0] gpr [0:35];            // r0-r31, then the TGPRs' other bank (32-35)
 	logic        tsel;                  // r0-r3 are 32-35 (MSR[TGPR] as the core has followed it)
-	logic [63:0] fpr [0:31];
+	logic [32:0] fpr [0:31];            // (the bench's copies; bit 32: the value's an integer, see rtl/ppc_fps.sv)
 	logic [3:0]  crf [0:7];
 	logic [30:0] xer;                   // OV, CA, byte count (SO, bit 31, is xerso)
 	logic        xerso;
@@ -328,7 +328,7 @@ module ppc_pipe #(
 	mkind_t      m_kind;
 	logic [5:0]  m_rd;                  // the physical GPR, or the FPR
 	logic [3:0]  m_size;
-	logic [63:0] m_val;                 // MK_FMOV: the FPR's value
+	logic [32:0] m_val;                 // MK_FMOV: the FPR's value
 
 	// SEQ: the multi-access instructions
 	typedef enum logic [2:0] { Q_LMW, Q_STMW, Q_LSW, Q_STSW, Q_DCBZ, Q_STWCX } qkind_t;
@@ -355,10 +355,10 @@ module ppc_pipe #(
 	logic        x_madd;                // ... a multiply-add (its addend may come late)
 	logic        fpu_busy, fpu_start, fpu_done;
 	logic [4:0]  fpu_rd;
-	logic [63:0] fpu_res;
+	logic [32:0] fpu_res;
 	logic        fpp_issue, fpp_ok, fpp_dok, fpp_busy, fpp_ev, fpp_wv;
 	logic [4:0]  fpp_erd, fpp_wrd;
-	logic [63:0] fpp_evl, fpp_wval;
+	logic [32:0] fpp_evl, fpp_wval;
 	logic [31:0] fpp_pe, fpp_pw, fpp_pn, fpp_lb;   // FPRs it writes (ppc_fpp's pe / pw / pn), a late addend's (lb)
 
 	wire m_done = m_valid && (m_kind == MK_FMOV || d_valid);
@@ -369,14 +369,15 @@ module ppc_pipe #(
 	wire fp_free = x_slow ? fpu_free && !fpp_busy && fr.allow[FP_ID] && fr.ffree : fpp_ok && fpu_free;
 
 	// what's written this clock: M's load (to a GPR or an FPR) or move, the float units' results
-	logic [63:0] m_d, m_fv;
+	logic [63:0] m_d;
+	logic [32:0] m_fv;
 	logic [31:0] m_gv;
 	logic        m_gw, m_fw;
 	always_comb
 	begin
 		m_d = m_bswap ? bswapn(d_rdata[31:0], m_size) : d_rdata;
 		m_gv = m_sext ? {{16{m_d[15]}}, m_d[15:0]} : m_d[31:0];
-		m_fv = m_kind == MK_LFD ? d_rdata : m_kind == MK_LFS ? s2d(d_rdata[31:0]) : m_val;   // (never byte reversed)
+		m_fv = m_kind == MK_LFD ? d2f(d_rdata) : m_kind == MK_LFS ? {1'b0, d_rdata[31:0]} : m_val;   // (never byte reversed)
 		m_gw = m_done && m_kind == MK_LOAD && m_wr_en;
 		m_fw = m_done && (m_kind == MK_LFD || m_kind == MK_LFS || m_kind == MK_FMOV);
 	end
@@ -395,13 +396,13 @@ module ppc_pipe #(
 	endfunction
 	// the FPRs the same way (fr_a / fr_b / fr_c / fr_s for rA / rB / frC / rD), with the writes of the clock before (fu_*:
 	// the float units', fm_*: M's) and this one (FWD)
-	logic [63:0] fr_a, fr_b, fr_c, fr_s, fu_v, fm_v;
+	logic [32:0] fr_a, fr_b, fr_c, fr_s, fu_v, fm_v;
 	logic [4:0]  fu_r, fm_r;
 	logic        fu_en, fm_en;
 	logic        fu_we;                 // the units' write (or the bench's) this clock
 	logic [4:0]  fu_wa;
-	logic [63:0] fu_wd;
-	function automatic logic [63:0] fx(input logic [4:0] f, input logic [63:0] q);
+	logic [32:0] fu_wd;
+	function automatic logic [32:0] fx(input logic [4:0] f, input logic [32:0] q);
 		if (FWD && fpp_wv && fpp_wrd == f) return fpp_wval;
 		if (FWD && fpu_busy && fpu_done && fpu_rd == f) return fpu_res;
 		if (FWD && m_fw && m_rd[4:0] == f) return m_fv;
@@ -449,17 +450,17 @@ module ppc_pipe #(
 	endfunction
 
 	// the float units' operands, with the float pipeline's results as they leave it
-	function automatic logic [63:0] fxe(input logic [4:0] f, input logic [63:0] q);
+	function automatic logic [32:0] fxe(input logic [4:0] f, input logic [32:0] q);
 		return FWD && fpp_ev && fpp_erd == f ? fpp_evl : fx(f, q);
 	endfunction
-	wire [63:0] fa_u = fxe(op[20:16], fr_a), fb_u = fxe(op[15:11], fr_b), fc_u = fxe(op[10:6], fr_c);
+	wire [32:0] fa_u = fxe(op[20:16], fr_a), fb_u = fxe(op[15:11], fr_b), fc_u = fxe(op[10:6], fr_c);
 	logic [2:0]  fpp_bw;
-	ppc_fpp_ctl fpctl (
+	ppc_fps_ctl fpctl (
 		.clk, .rst, .allow(fr.allow[FP_ID]), .res_a(fr.res_a), .res_s(fr.res_s), .res_w(fr.res_w), .issue(fpp_issue), .op(xf.op),
 		.rd(op[25:21]), .rb(op[15:11]), .ok(fpp_ok), .dok(fpp_dok), .busy(fpp_busy), .bw(fpp_bw),
 		.pe(fpp_pe), .pw(fpp_pw), .pn(fpp_pn), .lb(fpp_lb)
 	);
-	assign fp_req = '{fpp_issue, fpu_start, xf.op, fmode, fa_u, fb_u, fc_u, op[25:21], fpp_bw};
+	assign fp_req = '{fpp_issue, fpu_start, xf.op, fmode, fa_u[31:0], fb_u[31:0], fc_u[31:0], op[25:21], fpp_bw};
 	assign fpp_ev = fr.ev && fr.ecpu == FP_ID;
 	assign fpp_erd = fr.erd;
 	assign fpp_evl = fr.evl;
@@ -467,7 +468,7 @@ module ppc_pipe #(
 	assign fpp_wrd = fr.wrd;
 	assign fpp_wval = fr.wval;
 	assign fpu_done = fr.fdone && fr.fcpu == FP_ID;
-	assign fpu_res = fr.fres;
+	assign fpu_res = {1'b0, fr.fres};
 	generate
 	if (FP_EXT) begin : g_fpext assign fr = fp_res; end
 	else begin : g_fpint ppc_fpx #(.TWO(1'b0)) fpx (.clk, .rst, .req0(fp_req), .req1('0), .res(fr)); end
@@ -482,29 +483,27 @@ module ppc_pipe #(
 	wire        rc = op[0];
 	wire        oe = op[10];
 	wire [31:0] ra_v = gx(pg(rA), gr_a), rb_v = gx(pg(rB), gr_b), rs_v = gx(pg(rD), gr_s);
-	wire [63:0] fs_v = fx(rD, fr_s);    // rD's FPR (a store's source, mffs)
+	wire [32:0] fs_v = fx(rD, fr_s);    // rD's FPR (a store's source, mffs)
 	wire [31:0] raz = rA == 0 ? 32'h0 : ra_v;
 	wire [9:0]  sprn = {op[15:11], op[20:16]};
 	wire [31:0] npc = ipc + 32'd4;
 
 	// the multiplies and fcmpu / fcmpo take two clocks in X: their results registered in the first, used in the second
-	// (mul_rdy). stfs takes five, its conversion to a single (31 ns routed, with the device this full) a multicycle path of 3 from cvt_x / cvt_m to cvt_r
-	// (the .sdc), which X waits for.
+	// (mul_rdy), and so does stfd, its FPR made a double.
 	logic [63:0] mulw;
 	logic [31:0] mulhwu;
 	logic        mul_rdy;
 	logic [3:0]  fcmp_r;
-	(* preserve *) logic [63:0] cvt_x;
-	(* preserve *) logic [1:0]  cvt_m;
-	(* preserve *) logic [31:0] cvt_r;
-	logic [1:0]  cvt_n;
+	logic [63:0] cvt_r;
+	wire [32:0]  fc_a = fx(rA, fr_a), fc_b = fx(rB, fr_b);
 	wire         x_mul = opc == 6'h07 || (opc == 6'h1f && (xo == 10'h00b || xo == 10'h04b || xo == 10'h0eb || xo == 10'h2eb)) ||
 		(opc == 6'h3f && !op[5] && (xo == 10'h000 || xo == 10'h020));
 	always_ff @(posedge clk)
 	begin
 		mulw <= $signed({{32{ra_v[31]}}, ra_v}) * $signed({{32{(opc == 6'h07) ? simm[31] : rb_v[31]}}, (opc == 6'h07) ? simm : rb_v});
 		mulhwu <= 32'(({32'h0, ra_v} * {32'h0, rb_v}) >> 32);
-		fcmp_r <= cmp(fx(rA, fr_a), fx(rB, fr_b));
+		fcmp_r <= cmp_s(fc_a[31:0], fc_b[31:0]);
+		cvt_r <= f2d(fs_v);
 	end
 
 	// a single access (xm_mem; the rest of the decode is for it) or a SEQ one (xm_seq)
@@ -541,10 +540,10 @@ module ppc_pipe #(
 			6'h31: begin xm_kind = MK_LFS; xm_ea = ra_v + simm; xm_upd = 1'b1; end
 			6'h32: begin xm_kind = MK_LFD; xm_size = 4'd8; end                                          // LFD
 			6'h33: begin xm_kind = MK_LFD; xm_size = 4'd8; xm_ea = ra_v + simm; xm_upd = 1'b1; end
-			6'h34: begin xm_kind = MK_ST; xm_wdata = {32'h0, cvt_r}; xm_cvt = 1'b1; end                         // STFS
-			6'h35: begin xm_kind = MK_ST; xm_wdata = {32'h0, cvt_r}; xm_cvt = 1'b1; xm_ea = ra_v + simm; xm_upd = 1'b1; end
-			6'h36: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = fs_v; end                       // STFD
-			6'h37: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = fs_v; xm_ea = ra_v + simm; xm_upd = 1'b1; end
+			6'h34: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; end                         // STFS
+			6'h35: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; xm_ea = ra_v + simm; xm_upd = 1'b1; end
+			6'h36: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; end                       // STFD
+			6'h37: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; xm_ea = ra_v + simm; xm_upd = 1'b1; end
 			6'h1f:
 			begin
 				xm_ea = ix;
@@ -567,16 +566,16 @@ module ppc_pipe #(
 					10'h0d7: begin xm_kind = MK_ST; xm_size = 4'd1; xm_wdata = {56'h0, rs_v[7:0]}; end  // STBX
 					10'h197: begin xm_kind = MK_ST; xm_size = 4'd2; xm_wdata = {48'h0, rs_v[15:0]}; end // STHX
 					10'h097: begin xm_kind = MK_ST; xm_wdata = {32'h0, rs_v}; end                       // STWX
-					10'h297: begin xm_kind = MK_ST; xm_wdata = {32'h0, cvt_r}; xm_cvt = 1'b1; end               // STFSX
+					10'h297: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; end               // STFSX
 					10'h3d7: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; end              // STFIWX
-					10'h2d7: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = fs_v; end             // STFDX
+					10'h2d7: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; end             // STFDX
 					10'h396: begin xm_kind = MK_ST; xm_size = 4'd2; xm_wdata = {48'h0, rs_v[7:0], rs_v[15:8]}; end // STHBRX
 					10'h296: begin xm_kind = MK_ST; xm_wdata = {32'h0, rs_v[7:0], rs_v[15:8], rs_v[23:16], rs_v[31:24]}; end // STWBRX
 					10'h0f7: begin xm_kind = MK_ST; xm_size = 4'd1; xm_wdata = {56'h0, rs_v[7:0]}; xm_ea = iu; xm_upd = 1'b1; end  // STBUX
 					10'h1b7: begin xm_kind = MK_ST; xm_size = 4'd2; xm_wdata = {48'h0, rs_v[15:0]}; xm_ea = iu; xm_upd = 1'b1; end // STHUX
 					10'h0b7: begin xm_kind = MK_ST; xm_wdata = {32'h0, rs_v}; xm_ea = iu; xm_upd = 1'b1; end                      // STWUX
-					10'h2b7: begin xm_kind = MK_ST; xm_wdata = {32'h0, cvt_r}; xm_cvt = 1'b1; xm_ea = iu; xm_upd = 1'b1; end           // STFSUX
-					10'h2f7: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = fs_v; xm_ea = iu; xm_upd = 1'b1; end           // STFDUX
+					10'h2b7: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; xm_ea = iu; xm_upd = 1'b1; end           // STFSUX
+					10'h2f7: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; xm_ea = iu; xm_upd = 1'b1; end           // STFDUX
 					10'h255, 10'h215, 10'h2d5, 10'h295, 10'h3f6, 10'h096: begin xm_mem = 1'b0; xm_seq = 1'b1; end // strings, DCBZ, STWCX.
 					default: xm_mem = 1'b0;
 				endcase
@@ -717,23 +716,8 @@ module ppc_pipe #(
 	end
 	always_ff @(posedge clk)
 		if (rst || x_exec || !(x_try && !x_int && xflt == 2'd0 && (x_mul || xm_cvt) && !x_haz0))
-		begin
 			mul_rdy <= 1'b0;
-			cvt_n <= 2'd0;
-		end
-		else if (!xm_cvt) mul_rdy <= 1'b1;
-		else if (cvt_n == 2'd0)
-		begin
-			cvt_x <= fs_v;
-			cvt_m <= fmode;
-			cvt_n <= 2'd3;
-		end
-		else if (cvt_n != 2'd1) cvt_n <= cvt_n - 2'd1;
-		else if (!mul_rdy)
-		begin
-			cvt_r <= d2s(cvt_x, cvt_m);
-			mul_rdy <= 1'b1;
-		end
+		else mul_rdy <= 1'b1;
 	function automatic logic seq_last();
 		case (sq_kind)
 			Q_LMW, Q_STMW: return sq_reg == 5'd31;
@@ -844,12 +828,12 @@ module ppc_pipe #(
 	// the FPRs: the float units' (and the bench's) writes win over M's (never the same one in a clock)
 	always_comb
 	begin
-		fu_we = 1'b0; fu_wa = dbg_idx[4:0]; fu_wd = dbg_val;
+		fu_we = 1'b0; fu_wa = dbg_idx[4:0]; fu_wd = d2f(dbg_val);
 		if (!rst && fpp_wv) begin fu_we = 1'b1; fu_wa = fpp_wrd; fu_wd = fpp_wval; end
 		else if (!rst && fpu_busy && fpu_done) begin fu_we = 1'b1; fu_wa = fpu_rd; fu_wd = fpu_res; end
 		else if (dbg_we && dbg_idx >= 32 && dbg_idx < 64 && (rst ? rst_q : x_run && !x_cons && hold_flush)) fu_we = 1'b1;
 	end
-	ppc_regs #(.W(64), .AW(5), .NR(4)) fregs (
+	ppc_regs #(.W(33), .AW(5), .NR(4)) fregs (
 		.clk,
 		.we0(m_fw && !rst), .wa0(m_rd[4:0]), .wd0(m_fv),
 		.we1(fu_we), .wa1(fu_wa), .wd1(fu_wd),
@@ -869,7 +853,7 @@ module ppc_pipe #(
 		for (int i = 0; i < 32; i++)
 		begin
 			gpr_o[32 * i +: 32] = BENCH ? gpr[pg(5'(i))] : 32'h0;
-			fpr_o[64 * i +: 64] = BENCH ? fpr[i] : 64'h0;
+			fpr_o[64 * i +: 64] = BENCH ? f2d(fpr[i]) : 64'h0;
 			// (and the rA an update form not yet retired has written: the access in its address clock)
 			gpr_pend_o[i] = gpend(pg(5'(i))) || (a_v && !a_seq && a_upd && a_ra == pg(5'(i)));
 			fpr_pend_o[i] = fpend(5'(i));
@@ -1199,7 +1183,7 @@ module ppc_pipe #(
 
 	task automatic dbg_write();
 		if (dbg_idx < 32) wg(dbg_idx[4:0], dbg_val[31:0]);
-		else if (dbg_idx < 64) fpr[dbg_idx[4:0]] <= dbg_val;
+		else if (dbg_idx < 64) fpr[dbg_idx[4:0]] <= d2f(dbg_val);
 		else if (dbg_idx == 64) pc <= dbg_val[31:0];
 		else if (dbg_idx == 65) for (int i = 0; i < 8; i++) crf[i] <= dbg_val[31 - 4 * i -: 4];
 		else if (dbg_idx == 66) begin xer <= dbg_val[30:0]; xerso <= dbg_val[31]; end
@@ -1565,7 +1549,7 @@ module ppc_pipe #(
 	endtask
 
 	// ---- floating point: to the float unit, or done here (the moves, through M) ---------------------------------------
-	task automatic fmov(input logic [63:0] v);
+	task automatic fmov(input logic [32:0] v);
 		m_valid <= 1'b1;
 		m_kind <= MK_FMOV;
 		m_rd <= {1'b0, rD};
@@ -1573,7 +1557,7 @@ module ppc_pipe #(
 	endtask
 
 	task automatic opfp();
-		logic [63:0] fa, fb;
+		logic [32:0] fa, fb;
 		fa = fx(rA, fr_a);
 		fb = fx(rB, fr_b);
 		if (xf.go)
@@ -1586,7 +1570,7 @@ module ppc_pipe #(
 		else if (xo[4])
 			case (op[5:1])
 				// FSEL: c if a >= 0.0 (not NaN, and positive or a zero), else b; no CR1 even with Rc (MAME)
-				5'h17: fmov(!(fa[62:52] == 11'h7ff && fa[51:0] != 0) && (!fa[63] || fa[62:0] == 0) ? fx(frC, fr_c) : fb);
+				5'h17: fmov(!snan(fa[31:0]) && (!fa[31] || fa[30:0] == 31'h0) ? fx(frC, fr_c) : fb);
 				default: raise(EX_PROGRAM, 32'h80000);
 			endcase
 		else
@@ -1597,10 +1581,10 @@ module ppc_pipe #(
 					fpscr[15:12] <= fcmp_r;
 				end
 				// these leave CR1 alone even with Rc (MAME)
-				10'h028: fmov(fb ^ 64'h8000000000000000);                                          // FNEG
+				10'h028: fmov(fb ^ 33'h080000000);                                          // FNEG
 				10'h048: fmov(fb);                                                                 // FMR
-				10'h088: fmov(fb | 64'h8000000000000000);                                          // FNABS
-				10'h108: fmov(fb & ~64'h8000000000000000);                                         // FABS
+				10'h088: fmov(fb | 33'h080000000);                                          // FNABS
+				10'h108: fmov(fb & ~33'h080000000);                                         // FABS
 				// the rounding mode the float unit uses (fmode) follows FPSCR[RN] only through these, as MAME's host mode
 				// does (mcrfs clearing RN leaves it)
 				10'h046: begin fpscr[31 - rD] <= 1'b0; if (rD == 5'd30) fmode <= {1'b0, fpscr[0]}; if (rD == 5'd31) fmode <= {fpscr[1], 1'b0}; end // MTFSB0
@@ -1610,7 +1594,7 @@ module ppc_pipe #(
 					crf[op[25:23]] <= fpscr[31 - 4 * op[20:18] -: 4];
 					fpscr <= fpscr & ~crmask(op[20:18]);
 				end
-				10'h247: fmov({fs_v[63:32], fpscr});                                            // MFFS (MAME: the low word)
+				10'h247: fmov({1'b1, fpscr});                                                     // MFFS: an integer, as the manual has it
 				10'h2c7:                                                                           // MTFSF
 				begin
 					logic [31:0] m, v;

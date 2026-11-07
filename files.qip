@@ -8,8 +8,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_vtiming.sv
 
 # the machine: ppc1 and its memory
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpu_pkg.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpu.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fps.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpx.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_regs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_pipe.sv

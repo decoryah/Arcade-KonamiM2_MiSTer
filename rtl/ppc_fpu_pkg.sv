@@ -66,7 +66,7 @@ package ppc_fpu_pkg;
 		logic        start;             // to the iterative unit
 		logic [4:0]  op;
 		logic [1:0]  rn;
-		logic [63:0] a, b, c;
+		logic [31:0] a, b, c;
 		logic [4:0]  rd;
 		logic [2:0]  bw;                // a multiply-add's addend: the clocks until it comes (ev), 0 if it's in b
 	} fp_req_t;
@@ -76,15 +76,15 @@ package ppc_fpu_pkg;
 		logic        ev;                // a result leaving its last stage: FPR erd = evl, ecpu's
 		logic        ecpu;
 		logic [4:0]  erd;
-		logic [63:0] evl;
+		logic [32:0] evl;
 		logic        wv;                // a result: FPR wrd = wval at the clock's end, wcpu's
 		logic        wcpu;
 		logic [4:0]  wrd;
-		logic [63:0] wval;
+		logic [32:0] wval;
 		logic        ffree;             // the iterative unit can start one
 		logic        fdone;             // it's done, fcpu's
 		logic        fcpu;
-		logic [63:0] fres;
+		logic [31:0] fres;
 	} fp_res_t;
 
 	// an unpacked finite value: (-1)^s * m * 2^(e - 52), m normalized (m[52] set) unless zero
@@ -436,6 +436,143 @@ package ppc_fpu_pkg;
 		kx = x[63] ? -$signed({2'b0, x[62:0]}) : $signed({2'b0, x[62:0]});
 		ky = y[63] ? -$signed({2'b0, y[62:0]}) : $signed({2'b0, y[62:0]});
 		return kx < ky ? 4'b1000 : kx > ky ? 4'b0100 : 4'b0010;
+	endfunction
+
+	// ---- single precision, as the chip has it (rtl/ppc_fps.sv) ------------------------------------------------------------
+	localparam int SLM = 3, SLA = 4, SLS = 3;   // its units' stages
+	localparam logic [31:0] SDNAN = 32'h7fc00000;
+	function automatic logic [3:0] sat_a(input cls_t k);
+		return k.mul ? 4'(SLM + 1) : 4'd1;
+	endfunction
+	function automatic logic [3:0] sat_s(input cls_t k);
+		return 4'd1 + (k.mul ? 4'(SLM) : 4'd0) + (k.add ? 4'(SLA) : 4'd0);
+	endfunction
+	function automatic logic [3:0] sat_w(input cls_t k);
+		return (k.mul ? 4'(SLM) : 4'd0) + (k.add ? 4'(SLA) : 4'd0) + 4'(SLS);
+	endfunction
+	function automatic logic snan(input logic [31:0] x);
+		return x[30:23] == 8'hff && x[22:0] != 23'h0;
+	endfunction
+	function automatic logic [31:0] squiet(input logic [31:0] x);
+		return x | 32'h00400000;
+	endfunction
+	function automatic logic [4:0] lz24(input logic [23:0] v);
+		logic [4:0] n;
+		n = 5'd24;
+		for (int i = 0; i < 24; i++) if (v[i]) n = 5'(23 - i);
+		return n;
+	endfunction
+	function automatic logic [5:0] lz51(input logic [50:0] v);
+		logic [5:0] n;
+		n = 6'd51;
+		for (int i = 0; i < 51; i++) if (v[i]) n = 6'(50 - i);
+		return n;
+	endfunction
+	// sig >> n, the bits shifted out or'd into the last
+	function automatic logic [50:0] shr51(input logic [50:0] sig, input logic [5:0] n);
+		logic st;
+		logic [50:0] v;
+		st = 1'b0;
+		for (int i = 0; i < 51; i++) if (i < int'(n) && sig[i]) st = 1'b1;
+		v = n >= 6'd51 ? 51'h0 : sig >> n;
+		return {v[50:1], v[0] | st};
+	endfunction
+	// an operand: (-1)^s * m * 2^(e - 47), m[47] set; a zero's e the lowest and m 0
+	typedef struct packed { logic nan, inf, zero, s; logic signed [9:0] e; logic [47:0] m; } sx_t;
+	function automatic sx_t sunpack(input logic [31:0] x);
+		sx_t u;
+		logic [4:0] k;
+		logic [23:0] d;
+		u = '0;
+		u.s = x[31];
+		k = lz24({1'b0, x[22:0]});
+		d = {1'b0, x[22:0]} << k;
+		if (x[30:23] == 8'hff) begin u.nan = x[22:0] != 23'h0; u.inf = x[22:0] == 23'h0; end
+		else if (x[30:0] == 31'h0) begin u.zero = 1'b1; u.e = -10'sd512; end
+		else if (x[30:23] == 8'h0) begin u.e = -10'sd126 - 10'($signed({1'b0, k})); u.m = {d, 24'h0}; end
+		else begin u.e = 10'($signed({2'b0, x[30:23]}) - 127); u.m = {1'b1, x[22:0], 24'h0}; end
+		return u;
+	endfunction
+	// the round: first below the normal range a shift into a denormal; then an increment at m's bit 24; then the pack
+	typedef struct packed { logic signed [9:0] e; logic [47:0] m; logic st; } sden_t;
+	function automatic sden_t sden(input logic signed [9:0] e, input logic [47:0] m, input logic st);
+		sden_t d;
+		logic [9:0] n;
+		logic lost;
+		d.e = e; d.m = m; d.st = st;
+		if (e < -10'sd126)
+		begin
+			n = 10'(-10'sd126 - e);
+			lost = 1'b0;
+			for (int i = 0; i < 48; i++) if (i < int'(n) && m[i]) lost = 1'b1;
+			d.m = n >= 10'd48 ? 48'h0 : m >> n;
+			d.st = st || lost;
+			d.e = -10'sd126;
+		end
+		return d;
+	endfunction
+	function automatic logic sinc(input logic s, input logic [47:0] m, input logic st, input logic [1:0] mode);
+		logic r, sk;
+		r = m[23];
+		sk = st || m[22:0] != 23'h0;
+		case (mode)
+			2'd0: return r && (sk || m[24]);
+			2'd1: return 1'b0;
+			2'd2: return !s && (r || sk);
+			default: return s && (r || sk);
+		endcase
+	endfunction
+	function automatic logic [31:0] spack(input logic s, input logic signed [9:0] e, input logic [23:0] kept, input logic inc,
+		input logic [1:0] mode);
+		logic [24:0] v;
+		logic signed [9:0] ee;
+		v = {1'b0, kept} + 25'(inc);
+		ee = e;
+		if (v[24]) begin v = v >> 1; ee = e + 10'sd1; end
+		if (ee > 10'sd127) return ovf_max(s, mode) ? {s, 31'h7f7fffff} : {s, 31'h7f800000};
+		return {s, v[23] ? 8'(ee + 10'sd127) : 8'h0, v[22:0]};
+	endfunction
+	function automatic logic [3:0] cmp_s(input logic [31:0] x, input logic [31:0] y);
+		logic signed [32:0] kx, ky;
+		if (snan(x) || snan(y)) return 4'b0001;
+		kx = x[31] ? -$signed({2'b0, x[30:0]}) : $signed({2'b0, x[30:0]});
+		ky = y[31] ? -$signed({2'b0, y[30:0]}) : $signed({2'b0, y[30:0]});
+		return kx < ky ? 4'b1000 : kx > ky ? 4'b0100 : 4'b0010;
+	endfunction
+	// lfd: the 602 "compresses" a double in the single range into its 32-bit FPR and traps anything else to software, which
+	// this core doesn't have: the nearest single (no denormals, those go to zero). A high word of zero is what stfd left of an
+	// integer (fctiwz, mffs): the integer back, with its bit 32
+	function automatic logic [32:0] d2f(input logic [63:0] d);
+		logic [10:0] e;
+		logic [30:0] v;
+		logic [22:0] f;
+		e = d[62:52];
+		if (d[63:32] == 32'h0) return {1'b1, d[31:0]};
+		if (e == 11'h7ff)
+		begin
+			f = d[51:29];
+			if (d[51:0] != 52'h0 && f == 23'h0) f = 23'h400000;
+			return {1'b0, d[63], 8'hff, f};
+		end
+		if (e <= 11'd896) return {1'b0, d[63], 31'h0};
+		if (e >= 11'd1151) return {1'b0, d[63], 31'h7f800000};
+		v = {8'(e - 11'd896), d[51:29]} + 31'(d[28] && (d[29] || d[27:0] != 28'h0));
+		return {1'b0, d[63], v};
+	endfunction
+	// stfd: the double of the same value; an integer (bit 32) as a word in the low half
+	function automatic logic [63:0] f2d(input logic [32:0] f);
+		logic [4:0] k;
+		logic [23:0] n;
+		if (f[32]) return {32'h0, f[31:0]};
+		if (f[30:23] == 8'hff) return {f[31], 11'h7ff, f[22:0], 29'h0};
+		if (f[30:0] == 31'h0) return {f[31], 63'h0};
+		if (f[30:23] == 8'h0)
+		begin
+			k = lz24({1'b0, f[22:0]});
+			n = {1'b0, f[22:0]} << k;
+			return {f[31], 11'(11'd897 - 11'(k)), n[22:0], 29'h0};
+		end
+		return {f[31], 11'({3'b0, f[30:23]} + 11'd896), f[22:0], 29'h0};
 	endfunction
 
 	// verilator lint_on UNUSEDSIGNAL

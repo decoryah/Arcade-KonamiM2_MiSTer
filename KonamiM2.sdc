@@ -6,5 +6,3 @@ derive_clock_uncertainty
 # the read capture's multicycle path, as the Gaelco 3D core's) come in with the SDRAM controller.
 
 # ppc_pipe's stfs: the conversion to a single, stable for two clocks and waited for
-set_multicycle_path -setup 3 -from [get_registers {*|cvt_x[*] *|cvt_m[*]}] -to [get_registers {*|cvt_r[*]}]
-set_multicycle_path -hold 2 -from [get_registers {*|cvt_x[*] *|cvt_m[*]}] -to [get_registers {*|cvt_r[*]}]
