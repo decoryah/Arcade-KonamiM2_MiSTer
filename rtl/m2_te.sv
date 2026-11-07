@@ -602,14 +602,20 @@ module m2_te (
 	wire  [9:0]  umask = tm_uvmask[25:16], vmask = tm_uvmask[9:0];
 	wire  [9:0]  umax = tm_uvmax[25:16] & umask, vmax = tm_uvmax[9:0] & vmask;
 	wire  [1:0]  lod_sh = tm_addr[1:0];     // ((lodmax - lod) & 3, lod 0)
-	wire         t_bil = tm_addr[5];
+	// The filter: the magnify one, or with more than a texel between this pixel and the next, the minify one (the BDA spec's; MAME 0.289 only ever
+	// read the magnify filter). No level of detail yet: LOD 0 only.
+	logic        t_min;
+	wire         t_bil = t_min ? tm_addr[11] : tm_addr[5];
 	wire         t_look = tm_addr[13] && !m_dtext;
 	wire         blen = db_user[6] && !m_dblend;
 	wire         sren = db_user[5] && blen;
 	wire  [3:0]  d_mask = db_user[3:0];
 
 	// the walker's pixel
-	logic        v1_v, v2_v, v3_v, v4_v, v5_v, v6_v, v7_v;
+	logic        v1_v, v2_v, v3_v, v4_v, v5_v, v6_v, v7_v, v8_v, v9_v;
+	logic [9:1]  wk;                    // these stages hold a pixel the walker stepped to, kept or not: in a row, the next pixel along the span
+	logic [13:0] t0_u, t0_v, t1_u, t1_v;
+	wire  [14:0] t_du = {1'b0, t0_u} - {1'b0, t1_u}, t_dv = {1'b0, t0_v} - {1'b0, t1_v};
 	logic        v1_zc;
 	logic [15:0] v1_w16;
 	logic [27:0] v1_z, v1_d, v1_s;
@@ -655,8 +661,14 @@ module m2_te (
 			w_inv <= w_z3 ? 21'd0 : 21'((30'(w_fg3) * 30'(w_m2)) >> 8);
 			u_r <= 37'(u_c[4]) * 37'(w_inv);
 			v_r <= 37'(v_c[4]) * 37'(w_inv);
-			tu <= persp_off ? u_c[5][13:0] : u_sh[42:29];
-			tv <= persp_off ? v_c[5][13:0] : v_sh[42:29];
+			t0_u <= persp_off ? u_c[5][13:0] : u_sh[42:29];
+			t0_v <= persp_off ? v_c[5][13:0] : v_sh[42:29];
+			t1_u <= t0_u; t1_v <= t0_v;
+			tu <= t1_u; tv <= t1_v;
+			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
+			if (wk[8] && wk[7])
+				t_min <= $signed(t_du) > 15'sd16 || $signed(t_du) < -15'sd16 || $signed(t_dv) > 15'sd16 || $signed(t_dv) < -15'sd16;
+			wk <= {wk[8:1], v0_go};
 
 			u_c[0] <= persp_off ? 16'(uw_in >> np_sh) : u_nv[22:7];
 			v_c[0] <= persp_off ? 16'(vw_in >> np_sh) : v_nv[22:7];
@@ -672,7 +684,7 @@ module m2_te (
 	logic        tk_i;
 	// (a sample with no fractions, or a point sample, is its one texel: much of what's drawn is copied, one to one)
 	wire         t_one = !t_bil || (tu[3:0] == 4'd0 && tv[3:0] == 4'd0);
-	assign       t_hold = v7_v && t_look && !t_one && !tk_i;
+	assign       t_hold = v9_v && t_look && !t_one && !tk_i;
 	logic        a1_o, a2_o, a3_o, a4_o, a5_o, d0_o, d1_o, d2_o, e1_o, e2_o, e3_o;
 	logic        a1_v, a2_v, a3_v, a4_v, a5_v, d0_v, d1_v, d2_v;
 	logic        a1_e, a2_e, a3_e, a4_e, a5_e, d0_e, d1_e, d2_e;    // the pixel's last, or a pixel without any
@@ -697,7 +709,7 @@ module m2_te (
 		if (pe)
 		begin
 			// (each valid is a clock behind the data it's named beside)
-			a1_f <= {tu[3:0], tv[3:0]};
+			a1_f <= t_bil ? {tu[3:0], tv[3:0]} : 8'h00;
 			a2_v0 <= k_v0 < vmax ? k_v0 : vmax;
 			a2_f <= a1_f;
 			a3_vo <= 21'(a2_v0) * 21'({1'b0, umax} + 11'd1);
@@ -711,8 +723,8 @@ module m2_te (
 			if (d2_e && !d2_o)
 			begin
 				bk[0] <= tx[0]; bk[1] <= tx[1]; bk[2] <= d3_a; bk[3] <= d3_b;
-				bk_uf <= t_bil ? d2_f[7:4] : 4'd0;
-				bk_vf <= t_bil ? d2_f[3:0] : 4'd0;
+				bk_uf <= d2_f[7:4];
+				bk_vf <= d2_f[3:0];
 			end
 		end
 
@@ -954,13 +966,13 @@ module m2_te (
 		|| db_sctl[0] != db_dctl[0] || (!db_dctl[0] && d_mask != 4'hf))) || (blen && db_da[1:0] == 2'd3);
 
 	// valids
-	assign       p_any = v1_v || v2_v || v3_v || v4_v || v5_v || v6_v || v7_v || a1_e || a2_e || a3_e || a4_e || a5_e || d0_e || d1_e || d2_e
+	assign       p_any = v1_v || v2_v || v3_v || v4_v || v5_v || v6_v || v7_v || v8_v || v9_v || a1_e || a2_e || a3_e || a4_e || a5_e || d0_e || d1_e || d2_e
 		|| e1_v || e2_v || e3_v || e4_v || t2_v || t3_v || t4_v || t5_v || t6_v || t7_v || t8_v;
 
 	always_ff @(posedge clk)
 		if (rst)
 		begin
-			v1_v <= 1'b0; v2_v <= 1'b0; v3_v <= 1'b0; v4_v <= 1'b0; v5_v <= 1'b0; v6_v <= 1'b0; v7_v <= 1'b0;
+			v1_v <= 1'b0; v2_v <= 1'b0; v3_v <= 1'b0; v4_v <= 1'b0; v5_v <= 1'b0; v6_v <= 1'b0; v7_v <= 1'b0; v8_v <= 1'b0; v9_v <= 1'b0;
 			a1_v <= 1'b0; a2_v <= 1'b0; a3_v <= 1'b0; a4_v <= 1'b0; a5_v <= 1'b0; d0_v <= 1'b0; d1_v <= 1'b0; d2_v <= 1'b0;
 			a1_e <= 1'b0; a2_e <= 1'b0; a3_e <= 1'b0; a4_e <= 1'b0; a5_e <= 1'b0; d0_e <= 1'b0; d1_e <= 1'b0; d2_e <= 1'b0;
 			e1_v <= 1'b0; e2_v <= 1'b0; e3_v <= 1'b0; e4_v <= 1'b0;
@@ -974,15 +986,15 @@ module m2_te (
 		begin
 			if (pu)
 			begin
-				v1_v <= v0_ok; v2_v <= v1_ok; v3_v <= v2_v; v4_v <= v3_v; v5_v <= v4_v; v6_v <= v5_v; v7_v <= v6_v;
+				v1_v <= v0_ok; v2_v <= v1_ok; v3_v <= v2_v; v4_v <= v3_v; v5_v <= v4_v; v6_v <= v5_v; v7_v <= v6_v; v8_v <= v7_v; v9_v <= v8_v;
 				if (f_push) fw <= fw + 5'd1;
 			end
 			if (pe)
 			begin
-				a1_v <= v7_v && t_look;
-				a1_e <= v7_v && (!t_look || t_one || tk_i);
-				a1_o <= v7_v && t_look && t_one;
-				if (v7_v && t_look && !t_one) tk_i <= !tk_i;
+				a1_v <= v9_v && t_look;
+				a1_e <= v9_v && (!t_look || t_one || tk_i);
+				a1_o <= v9_v && t_look && t_one;
+				if (v9_v && t_look && !t_one) tk_i <= !tk_i;
 				a2_o <= a1_o; a3_o <= a2_o; a4_o <= a3_o; a5_o <= a4_o; d0_o <= a5_o; d1_o <= d0_o; d2_o <= d1_o;
 				e1_o <= d2_o; e2_o <= e1_o; e3_o <= e2_o;
 				a2_v <= a1_v; a3_v <= a2_v; a4_v <= a3_v; a5_v <= a4_v; d0_v <= a5_v; d1_v <= d0_v; d2_v <= d1_v;
