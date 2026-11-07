@@ -299,7 +299,7 @@ module m2_te (
 	logic        vw_e;
 	logic [5:0]  vw_a, vr_a;
 	logic [31:0] vw_d, vr_q;
-	ppc_ram #(.W(32), .AW(6)) vram (.clk, .we(vw_e), .wa(vw_a), .wd(vw_d), .ra(vr_a), .rd(vr_q));
+	ppc_ram_s #(.W(32), .AW(6)) vram (.clk, .we(vw_e), .wa(vw_a), .wd(vw_d), .ra(vr_a), .rd(vr_q));
 	logic signed [13:0] xi [0:2];
 	logic signed [13:0] yi [0:2];
 	logic [7:0]  wexp [0:2];
@@ -2229,12 +2229,22 @@ module te_sh (
 	input  logic [15:0] ra,
 	output logic [7:0]  rd
 );
-	(* ramstyle = "no_rw_check" *) logic [7:0] mem [0:`Z_BLOCKS * 1024 - 1];
+`ifdef VERILATOR
+	logic [7:0] mem [0:`Z_BLOCKS * 1024 - 1];
 	always_ff @(posedge clk)
 	begin
 		if (we) mem[wa] <= wd;
 		rd <= mem[ra];
 	end
+`else
+	// (instantiated: Quartus turns what it infers past about 510 blocks into registers, and a big Z takes it there)
+	localparam int AW = $clog2(`Z_BLOCKS * 1024);
+	altsyncram #(
+		.operation_mode("DUAL_PORT"), .width_a(8), .widthad_a(AW), .numwords_a(`Z_BLOCKS * 1024), .width_b(8), .widthad_b(AW), .numwords_b(`Z_BLOCKS * 1024),
+		.address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
+		.read_during_write_mode_mixed_ports("DONT_CARE"), .power_up_uninitialized("TRUE")
+	) ram (.clock0(clk), .wren_a(we), .address_a(wa[AW-1:0]), .data_a(wd), .address_b(ra[AW-1:0]), .q_b(rd));
+`endif
 endmodule
 
 // a texel from its U, the row's offset given (T+3): its own memories, so a pixel's four take two clocks

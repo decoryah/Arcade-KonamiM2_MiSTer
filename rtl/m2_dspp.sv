@@ -68,8 +68,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	logic [5:0]  r_wa, r_ra;
 	logic [31:0] r_wd, r_q, hr_q, r_r, hr_r, r_bw;
 	logic        r_by, hr_by;
-	ppc_ram #(.W(32), .AW(6)) dregs  (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(r_ra), .rd(r_r));
-	ppc_ram #(.W(32), .AW(6)) hdregs (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(pre_a[5:0]), .rd(hr_r));
+	ppc_ram_s #(.W(32), .AW(6)) dregs  (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(r_ra), .rd(r_r));
+	ppc_ram_s #(.W(32), .AW(6)) hdregs (.clk, .we(r_we), .wa(r_wa), .wd(r_wd), .ra(pre_a[5:0]), .rd(hr_r));
 	assign r_q = r_by ? r_bw : r_r;
 	assign hr_q = hr_by ? r_bw : hr_r;
 	always_ff @(posedge clk)
@@ -87,7 +87,7 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	wire [1:0]   o_end = o_start + o_count[1:0];    // (full: the oldest, which goes)
 	wire [1:0]   o_ra = dac_tick && o_count != 3'd0 ? o_start + 2'd1 : o_start;
 	logic [31:0] o_q;
-	ppc_ram #(.W(32), .AW(2)) ofifo (.clk, .we(o_we), .wa(o_end), .wd({out1, out0}), .ra(o_ra), .rd(o_q));
+	ppc_ram_s #(.W(32), .AW(2)) ofifo (.clk, .we(o_we), .wa(o_end), .wd({out1, out0}), .ra(o_ra), .rd(o_q));
 
 	// ---- registers ----------------------------------------------------------------------------------------------------
 	logic        gwilling, audlock;

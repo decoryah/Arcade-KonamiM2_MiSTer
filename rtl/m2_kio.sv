@@ -39,11 +39,11 @@ module m2_kio (
 	logic [5:0]  e_wa;
 	logic [7:0]  e_hi;
 
-	ppc_ram #(.W(16), .AW(6)) mem (.clk, .we(e_we || (ee_wr && ee_a[0])), .wa(e_we ? e_wa : ee_a[6:1]), .wd(e_we ? e_wd : {e_hi, ee_d}), .ra(e_ra), .rd(e_q));
+	ppc_ram_s #(.W(16), .AW(6)) mem (.clk, .we(e_we || (ee_wr && ee_a[0])), .wa(e_we ? e_wa : ee_a[6:1]), .wd(e_we ? e_wd : {e_hi, ee_d}), .ra(e_ra), .rd(e_q));
 	// a copy for the upload, so it never gets in the way of the game's reads
 	logic [15:0] u_q;
 	logic        u_lo;
-	ppc_ram #(.W(16), .AW(6)) umem (.clk, .we(e_we || (ee_wr && ee_a[0])), .wa(e_we ? e_wa : ee_a[6:1]), .wd(e_we ? e_wd : {e_hi, ee_d}), .ra(ee_ua[6:1]), .rd(u_q));
+	ppc_ram_s #(.W(16), .AW(6)) umem (.clk, .we(e_we || (ee_wr && ee_a[0])), .wa(e_we ? e_wa : ee_a[6:1]), .wd(e_we ? e_wd : {e_hi, ee_d}), .ra(ee_ua[6:1]), .rd(u_q));
 	always_ff @(posedge clk) u_lo <= ee_ua[0];
 	assign ee_ud = u_lo ? u_q[7:0] : u_q[15:8];
 	assign ee_chg = e_we;
