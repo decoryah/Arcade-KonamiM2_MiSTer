@@ -15,7 +15,7 @@
 //           Then the response to a load (the GPR or FPR written the clock it comes); a store's acknowledge. One access
 //           out.
 //   FP:     rtl/ppc_fpp.sv beside X, the float pipeline (an op a clock, its FPR written at its end), and rtl/ppc_fpu.sv
-//           for divide and square root (with the pipeline empty, and stopping it); no FP op faults. fcmpu / fcmpo and
+//           for divide and square root (with the pipeline empty, and stopping it); with MSR[FP] clear an FP op takes the FP-unavailable exception (the kernel's lazy switch of the FPRs between tasks), otherwise no FP op faults. fcmpu / fcmpo and
 //           the moves are X's (the moves written through M). Single-precision loads and stores convert inline.
 // The GPRs and FPRs are in RAM (rtl/ppc_regs.sv), read the clock before X (for the instruction it will hold, or SEQ's
 // next register): X takes what was written since from the writes it keeps (a clock back; two for X's own, which go to
@@ -150,7 +150,7 @@ module ppc_pipe #(
 	localparam logic [31:0] MSR_AP = 32'h00800000, MSR_SA = 32'h00400000,
 		MSR_TGPR = 32'h00020000, MSR_EE = 32'h00008000, MSR_PR = 32'h00004000, MSR_IP = 32'h00000040,
 		MSR_IR = 32'h00000020, MSR_DR = 32'h00000010, MSR_LE = 32'h00000001;
-	localparam logic [4:0] EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_PROGRAM = 7, EX_DECREMENT = 9, EX_SYSCALL = 12,
+	localparam logic [4:0] EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_PROGRAM = 7, EX_FPU = 8, EX_DECREMENT = 9, EX_SYSCALL = 12,
 		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18;
 
 	// a GPR's physical register
@@ -496,6 +496,9 @@ module ppc_pipe #(
 	logic [3:0]  fcmp_r;
 	logic [63:0] cvt_r;
 	wire [32:0]  fc_a = fx(rA, fr_a), fc_b = fx(rB, fr_b);
+	// a float instruction with MSR[FP] clear: taken, it does nothing and comes back after the kernel's handler
+	wire         x_fpoff = !msr[13] && (opc == 6'h3b || opc == 6'h3f || opc[5:3] == 3'b110 || (opc == 6'h1f && (xo == 10'h217 ||
+		xo == 10'h237 || xo == 10'h257 || xo == 10'h277 || xo == 10'h297 || xo == 10'h2b7 || xo == 10'h2d7 || xo == 10'h2f7 || xo == 10'h3d7)));
 	wire         x_mul = opc == 6'h07 || (opc == 6'h1f && (xo == 10'h00b || xo == 10'h04b || xo == 10'h0eb || xo == 10'h2eb)) ||
 		(opc == 6'h3f && !op[5] && (xo == 10'h000 || xo == 10'h020));
 	always_ff @(posedge clk)
@@ -696,9 +699,9 @@ module ppc_pipe #(
 				(f_a && fpend_x(rA)) || (f_b && fpend_x(rB)) || (f_c && fpend_x(frC)) || (f_d && fpend_x(rD))) ||
 			((xm_mem || x_fmov) && !m_free) || (xm_seq && m_valid) || (xf.go && !fp_free);
 		x_haz = x_haz0 || ((x_mul || xm_cvt) && !mul_rdy);
-		x_ok = x_try && !x_int && xflt == 2'd0 && !x_haz;
+		x_ok = x_try && !x_int && xflt == 2'd0 && !x_fpoff && !x_haz;
 		x_exec = x_ok && (!xm_mem || d_rdy);
-		x_cons = x_try && (x_int || xflt != 2'd0 || x_exec);
+		x_cons = x_try && (x_int || xflt != 2'd0 || x_fpoff || x_exec);
 		fpu_start = x_exec && xf.go && x_slow;
 		fpp_issue = x_exec && xf.go && !x_slow;
 		sq_fin = xstate == XS_SEQ && sq_out && d_valid && seq_last();
@@ -715,7 +718,7 @@ module ppc_pipe #(
 		d_pa = atr.pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
 	end
 	always_ff @(posedge clk)
-		if (rst || x_exec || !(x_try && !x_int && xflt == 2'd0 && (x_mul || xm_cvt) && !x_haz0))
+		if (rst || x_exec || !(x_try && !x_int && xflt == 2'd0 && !x_fpoff && (x_mul || xm_cvt) && !x_haz0))
 			mul_rdy <= 1'b0;
 		else mul_rdy <= 1'b1;
 	function automatic logic seq_last();
@@ -1060,6 +1063,7 @@ module ppc_pipe #(
 							if (!int_ext) dec_irq <= 1'b0;
 						end
 						else if (xflt != 2'd0) raise(xflt == 2'd2 ? EX_ISI : EX_ITLBMISS, xflt == 2'd2 ? 32'h08000000 : 32'h0);
+						else if (x_fpoff) raise(EX_FPU, 32'h0);
 						else exec();
 					end
 					else if (hold_flush)
