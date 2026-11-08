@@ -618,8 +618,12 @@ module m2_te (
 	wire  [66:0] u_sh = 67'(u_r) << u_ls, v_sh = 67'(v_r) << v_ls;
 
 	wire  [9:0]  umask = tm_uvmask[25:16], vmask = tm_uvmask[9:0];
-	wire  [9:0]  umax = tm_uvmax[25:16] & umask, vmax = tm_uvmax[9:0] & vmask;
-	wire  [1:0]  lod_sh = tm_addr[1:0];     // ((lodmax - lod) & 3, lod 0)
+	// LOD 0's size, less 1 (the largest U and V): UVMAX is the coarsest level's (LODMAX's), each finer one twice it, and no more than UVMASK
+	// (the M2 emulator's addr_calc)
+	wire  [1:0]  lodmax = tm_addr[3:0] > 4'd3 ? 2'd3 : tm_addr[1:0];
+	wire  [13:0] u_full = 14'({1'b0, tm_uvmax[25:16]} + 11'd1) << lodmax, v_full = 14'({1'b0, tm_uvmax[9:0]} + 11'd1) << lodmax;
+	wire  [9:0]  umax = u_full > 14'({1'b0, umask} + 11'd1) ? umask : 10'(u_full - 14'd1);
+	wire  [9:0]  vmax = v_full > 14'({1'b0, vmask} + 11'd1) ? vmask : 10'(v_full - 14'd1);
 	// The filter: the magnify one, or with more than a texel between this pixel and the next, the minify one (the BDA spec's; MAME 0.289 only ever
 	// read the magnify filter). No level of detail yet: LOD 0 only.
 	logic        t_min;
@@ -714,9 +718,9 @@ module m2_te (
 	wire  [9:0]  k_u0 = tu[13:4] & umask, k_u1 = ku[13:4] & umask, k_v0 = kv[13:4] & vmask;
 	logic [32:0] d3_a, d3_b;
 	te_fetch fetch_a (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
-		.u(k_u0), .umax, .vo(a3_vo), .lod_sh, .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
+		.u(k_u0), .umax, .vo(a3_vo), .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
 	te_fetch fetch_b (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
-		.u(k_u1), .umax, .vo(a3_vo), .lod_sh, .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
+		.u(k_u1), .umax, .vo(a3_vo), .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
 
 	// the first two, then all four for the channels to work through while the next pixel's arrive
 	logic [32:0] tx [0:1];
@@ -2276,7 +2280,6 @@ module te_fetch (
 	input  logic [9:0]  u,              // masked
 	input  logic [9:0]  umax,
 	input  logic [20:0] vo,
-	input  logic [1:0]  lod_sh,
 	input  logic [23:0] lod0,
 	input  logic [31:0] exp,
 	input  logic [31:0] pip_c,
@@ -2290,15 +2293,17 @@ module te_fetch (
 	// (a literal texel's colour is three components)
 	wire  [5:0]  tdepth = (texp_col ? (texp_lit ? 6'(texp_c) * 6'd3 : 6'(texp_c)) : 6'd0) + (texp_alp ? {2'b00, texp_a} : 6'd0) + (texp_ssb ? 6'd1 : 6'd0);
 	logic [11:0] t_ra;
-	logic [31:0] t_q;
+	logic [10:0] t_ra0;                 // (the even half's word: t_ra's, or after an odd t_ra the next)
+	logic [31:0] t_qa, t_qb;            // the texel's word and the next (a texel can run on into it: 6 bits, 24, ...)
 	logic [7:0]  p_ra;
 	logic [31:0] p_q;
-	// (in halves, the even words and the odd, for ld_two)
+	// (in halves, the even words and the odd, for ld_two; and so a word and the next are read together)
 	logic [31:0] t_q0, t_q1;
 	logic        t_sel;
-	te_ram #(.W(32), .AW(11)) tram0 (.clk, .we(ld_tram && (ld_two || !ld_ta[0])), .wa(ld_ta[11:1]), .wd(ld_d), .re(pe), .ra(t_ra[11:1]), .rd(t_q0));
+	te_ram #(.W(32), .AW(11)) tram0 (.clk, .we(ld_tram && (ld_two || !ld_ta[0])), .wa(ld_ta[11:1]), .wd(ld_d), .re(pe), .ra(t_ra0), .rd(t_q0));
 	te_ram #(.W(32), .AW(11)) tram1 (.clk, .we(ld_tram && (ld_two || ld_ta[0])), .wa(ld_ta[11:1]), .wd(ld_two ? ld_d2 : ld_d), .re(pe), .ra(t_ra[11:1]), .rd(t_q1));
-	assign t_q = t_sel ? t_q1 : t_q0;
+	assign t_qa = t_sel ? t_q1 : t_q0;
+	assign t_qb = t_sel ? t_q0 : t_q1;
 	te_ram #(.W(32), .AW(8)) pip (.clk, .we(r_pip || ld_pip), .wa(r_pip ? r_a : ld_pa), .wd(r_pip ? r_d : ld_d), .re(pe), .ra(p_ra), .rd(p_q));
 
 	logic [9:0]  a2_u, a3_u;
@@ -2307,7 +2312,7 @@ module te_fetch (
 	logic [7:0]  d2_r, d2_g, d2_b, d3_r, d3_g, d3_b;
 	logic [7:0]  d2_at, d3_at;
 	logic        d2_st, d3_st;
-	wire  [23:0] a3_sum = (24'(vo) << lod_sh) + 24'(a3_u);
+	wire  [23:0] a3_sum = 24'(vo) + 24'(a3_u);
 	wire  [26:0] a4_ad = 27'({lod0, 3'b000}) + 27'(a4_off) * 27'(tdepth);
 
 	logic [31:0] d1_tx, d1_sh;
@@ -2380,13 +2385,14 @@ module te_fetch (
 		begin
 			a2_u <= u < umax ? u : umax;
 			a3_u <= a2_u;
-			a4_off <= 21'(a3_sum >> lod_sh);
+			a4_off <= 21'(a3_sum);
 			t_ra <= a4_ad[16:5];
+			t_ra0 <= 11'(a4_ad[16:6]) + 11'(a4_ad[5]);
 			t_sel <= t_ra[0];
 			a5_bit <= a4_ad[4:0];
 			d1_bit <= a5_bit;
 			// (the word's big-endian: a texel's bits run from its first bit down, whatever its size, and it ends in bit 0)
-			d1_sh <= {t_q[7:0], t_q[15:8], t_q[23:16], t_q[31:24]} >> (6'd32 - 6'(d1_bit) - tdepth);
+			d1_sh <= 32'({t_qa[7:0], t_qa[15:8], t_qa[23:16], t_qa[31:24], t_qb[7:0], t_qb[15:8], t_qb[23:16], t_qb[31:24]} >> (7'd64 - 7'(d1_bit) - 7'(tdepth)));
 			d2_r <= d1_rt; d2_g <= d1_gt; d2_b <= d1_bt; d2_at <= d1_at; d2_st <= d1_st;
 			p_ra <= pip_c[7:0] + d1_idx;
 			d3_r <= d2_r; d3_g <= d2_g; d3_b <= d2_b; d3_at <= d2_at; d3_st <= d2_st;
