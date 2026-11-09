@@ -50,7 +50,8 @@ assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign BUTTONS   = 0;
 
-// the SDRAM idle; DDR3: the bring-up's ROM and RAM (below)
+// DDR3: the bring-up's ROM and RAM (below). The SDRAM: the Triangle Engine's Z buffer with Z_SDRAM (rtl/m2_zmem.sv, below), else idle
+`ifndef Z_SDRAM
 assign SDRAM_DQ   = 'Z;
 assign SDRAM_A    = 13'd0;
 assign SDRAM_BA   = 2'd0;
@@ -58,6 +59,7 @@ assign {SDRAM_DQML, SDRAM_DQMH} = 2'b11;
 assign {SDRAM_nCS, SDRAM_nWE, SDRAM_nRAS, SDRAM_nCAS} = 4'b1111;
 assign SDRAM_CKE  = 1'b0;
 assign SDRAM_CLK  = 1'b0;
+`endif
 
 assign DDRAM_CLK      = clk_cpu;
 
@@ -98,6 +100,9 @@ localparam CONF_STR = {
 `ifndef PPC_CACHE_KB
 	"O[6:5],CPU caches (at reset),32 KB,16 KB,8 KB,4 KB as the 602;",  // (each side: rtl/ppc_cache.sv's size; a build that sets PPC_CACHE_KB has its own)
 `endif
+`ifdef Z_SDRAM
+	"O[4],SDRAM read timing,Normal,Late;",  // (the Z buffer's: its read data a clock later, for a module that answers slowly)
+`endif
 	"DIP;",
 	"R0,Reset;",
 	"J1,Button 1,Button 2,Button 3,Start,Coin;",
@@ -121,6 +126,15 @@ pll pll
 	.outclk_2(clk_sdram),
 	.locked(pll_locked)
 );
+
+`ifdef Z_SDRAM
+wire [15:0] sd_dq_o;
+wire        sd_dq_oe;
+assign SDRAM_DQ  = sd_dq_oe ? sd_dq_o : 16'bZ;
+assign SDRAM_nCS = 1'b0;
+assign SDRAM_CKE = 1'b1;
+assign SDRAM_CLK = clk_sdram;           // (as the Gaelco 3D core: the PLL's shifted output straight to the pin)
+`endif
 
 ///////////////////////////////////////////////////
 
@@ -273,6 +287,10 @@ m2_boot #(.TICK(8)) u_boot
 `endif
 	.ddr_busy(DDRAM_BUSY), .ddr_burstcnt(DDRAM_BURSTCNT), .ddr_addr(DDRAM_ADDR), .ddr_dout(DDRAM_DOUT),
 	.ddr_dout_ready(DDRAM_DOUT_READY), .ddr_rd(DDRAM_RD), .ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_we(DDRAM_WE),
+`ifdef Z_SDRAM
+	.clk_mem(clk_mem), .sd_late(status[4]), .sd_a(SDRAM_A), .sd_ba(SDRAM_BA), .sd_dqm({SDRAM_DQMH, SDRAM_DQML}),
+	.sd_nras(SDRAM_nRAS), .sd_ncas(SDRAM_nCAS), .sd_nwe(SDRAM_nWE), .sd_dq_o(sd_dq_o), .sd_dq_oe(sd_dq_oe), .sd_dq_i(SDRAM_DQ),
+`endif
 	.st_pc(), .st_count(), .st_exc(), .st_nexc(), .st_dev_a(), .st_dev_d(), .st_dev_w(), .st_ndev(),
 	.retire(), .retire2(), .ipc0_o(), .ipc_o(), .p2_retire(), .p2_retire2(), .p2_ipc0_o(), .p2_ipc_o()
 );

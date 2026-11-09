@@ -48,6 +48,21 @@ module m2_boot #(
 	output logic [7:0]  ddr_be,
 	output logic        ddr_we,
 
+`ifdef Z_SDRAM
+	// the Triangle Engine's Z buffer in the SDRAM (rtl/m2_zmem.sv): its clock (twice clk, in phase) and pins
+	input  logic        clk_mem,
+	input  logic        sd_late,
+	output logic [12:0] sd_a,
+	output logic [1:0]  sd_ba,
+	output logic [1:0]  sd_dqm,
+	output logic        sd_nras,
+	output logic        sd_ncas,
+	output logic        sd_nwe,
+	output logic [15:0] sd_dq_o,
+	output logic        sd_dq_oe,
+	input  logic [15:0] sd_dq_i,
+`endif
+
 	// video: the raster (rtl/m2_vtiming.sv), and the VDU's picture
 	input  logic [9:0]  hpos,
 	input  logic [8:0]  vpos,
@@ -422,6 +437,9 @@ module m2_boot #(
 		.a(u_pa[15:2]), .we(u_req && u_we && u_te), .wd(u_wdata[31:0]), .rd(te_rd),
 		.intr(te_int),
 		.m_rd(te_m_rd), .m_we(te_m_we), .m_a(te_m_a), .m_wd(te_m_wd), .m_be(te_m_be), .m_busy(te_m_busy), .m_ready(te_m_ready), .m_dout(ddr_dout),
+`ifdef Z_SDRAM
+		.clk_mem, .sd_late, .sd_ready(), .z_idle(), .sd_a, .sd_ba, .sd_dqm, .sd_nras, .sd_ncas, .sd_nwe, .sd_dq_o, .sd_dq_oe, .sd_dq_i,
+`endif
 		.busy(te_busy)
 	);
 	// verilator lint_on PINCONNECTEMPTY

@@ -54,6 +54,106 @@ static std::map<unsigned, uint64_t> regw_n;          // (TE_PROF: the list's reg
 static std::map<unsigned, uint64_t> regh_n, regh_w;  // (TE_PROF: register instructions by offset << 8 | count: how many, the clocks they waited for the pixels)  // I_FETCH waiting for the list's word, for the pixels; E_START for the walk, for the drain
 #endif
 
+#ifdef Z_SDRAM
+// The Z buffer's SDRAM (built with -DZ_SDRAM, the core's Z_SDRAM): a 32 MB chip at the pins of rtl/m2_zmem.sv, on clk_mem (twice clk). It takes a
+// command at the clock's falling edge (the PLL's shifted clock), and a READ's word is on DQ for the controller's edge ZCAP after the one that
+// sent the READ (4: CL3 and the board's delays; env ZCAP). Checked: the commands' order and spacing (tRCD, tRP, tRAS, tRC, tRFC, the refresh
+// interval), DQ driven for a WRITE. env ZLATE=1 sets the controller's read a clock later.
+static std::vector<uint8_t> zram(1u << 25);
+static uint64_t zreads, zwrites, mc, zerrs;
+static int zenv(const char *n, int d) { const char *s = getenv(n); return s ? atoi(s) : d; }
+static const int ZCAP = zenv("ZCAP", 4);
+struct ZBank { bool open; uint32_t row; int64_t t_act, t_pre; };
+static ZBank zb[4] = { { false, 0, -100, -100 }, { false, 0, -100, -100 }, { false, 0, -100, -100 }, { false, 0, -100, -100 } };
+static int64_t z_ref = -1, z_reft = -100;
+static bool z_mode;
+static uint16_t z_rd[64];
+static bool z_rv[64];
+static void zerr(const char *what)
+{
+	if (zerrs++ < 20) printf("  SDRAM: %s at mem clock %llu\n", what, (unsigned long long)mc);
+}
+// the chip's clock edge: the command the controller's last edge (mc) sent
+static void chip_edge()
+{
+	int c = (t->sd_nras << 2) | (t->sd_ncas << 1) | t->sd_nwe;
+	int64_t n = int64_t(mc);
+	unsigned a = t->sd_a, ba = t->sd_ba;
+	ZBank &k = zb[ba];
+	switch (c)
+	{
+	case 7: break;
+	case 3: // ACTIVE
+		if (!z_mode) zerr("ACTIVE before the mode's set");
+		if (k.open) zerr("ACTIVE on an open bank");
+		if (n - k.t_pre < 3) zerr("tRP");
+		if (n - k.t_act < 8) zerr("tRC");
+		if (n - z_reft < 9) zerr("tRFC");
+		k.open = true; k.row = a; k.t_act = n;
+		break;
+	case 5: case 4: // READ, WRITE
+	{
+		if (!k.open) { zerr("READ or WRITE on a closed bank"); break; }
+		if (n - k.t_act < 3) zerr("tRCD");
+		uint32_t ad = (k.row << 12) | (ba << 10) | ((a & 0x1ff) << 1);
+		if (c == 5)
+		{
+			z_rd[(n + ZCAP) & 63] = uint16_t(zram[ad] | (zram[ad + 1] << 8));
+			z_rv[(n + ZCAP) & 63] = true;
+			zreads++;
+		}
+		else
+		{
+			if (!t->sd_dq_oe) zerr("WRITE without DQ driven");
+			if (!(t->sd_dqm & 1)) zram[ad] = uint8_t(t->sd_dq_o);
+			if (!(t->sd_dqm & 2)) zram[ad + 1] = uint8_t(t->sd_dq_o >> 8);
+			zwrites++;
+			static FILE *fzl = getenv("TE_ZL") ? fopen(getenv("TE_ZL"), "w") : nullptr;
+			if (fzl) fprintf(fzl, "W %07x %llu\n", ad, (unsigned long long)mc);
+		}
+		if (a & 0x400)
+		{
+			// auto precharge: from the end of the burst of 1, after tWR for a write
+			k.open = false;
+			k.t_pre = n + (c == 4 ? 3 : 1);
+			if (k.t_pre - k.t_act < 6) zerr("tRAS");
+		}
+		break;
+	}
+	case 2: // PRECHARGE
+		for (int i = 0; i < 4; i++)
+			if ((a & 0x400) || unsigned(i) == ba)
+			{
+				if (zb[i].open && n - zb[i].t_act < 6) zerr("tRAS");
+				zb[i].open = false; zb[i].t_pre = n;
+			}
+		break;
+	case 1: // AUTO REFRESH
+		for (int i = 0; i < 4; i++)
+		{
+			if (zb[i].open) zerr("REFRESH with a bank open");
+			if (n - zb[i].t_pre < 3) zerr("REFRESH: tRP");
+		}
+		if (n - z_reft < 9) zerr("tRFC");
+		if (z_mode && z_ref >= 0 && n - z_ref > 1040) zerr("refresh late");
+		z_ref = z_reft = n;
+		break;
+	case 0: // LOAD MODE
+		if (a != 0x030) zerr("mode not burst 1, CL3");
+		z_mode = true;
+		break;
+	default: zerr("unknown command");
+	}
+}
+// the controller's edges: what's on DQ for it, then the edge
+static void mem_edge()
+{
+	t->sd_dq_i = z_rv[(mc + 1) & 63] ? z_rd[(mc + 1) & 63] : 0xdead;
+	z_rv[(mc + 1) & 63] = false;
+	t->clk_mem = 1;
+}
+#endif
+
 static void clock1()
 {
 	// what the bench shows this clock
@@ -67,7 +167,14 @@ static void clock1()
 		t->m_dout = rd64(r.a + r.beat * 8);
 		if (++r.beat == 4) rq.pop_front();
 	}
+#ifdef Z_SDRAM
+	t->clk_mem = 0;
+	t->sd_late = getenv("ZLATE") != nullptr;
+#endif
 	t->clk = 0; t->eval();
+#ifdef Z_SDRAM
+	chip_edge();
+#endif
 	if (!busy)
 	{
 		if (t->m_rd)
@@ -90,7 +197,18 @@ static void clock1()
 					}
 		}
 	}
+#ifdef Z_SDRAM
+	mem_edge();
+#endif
 	t->clk = 1; t->eval();
+#ifdef Z_SDRAM
+	mc++;
+	// the second half: clk_mem's falling edge (the chip's), its next rising edge
+	t->clk_mem = 0; t->eval();
+	chip_edge();
+	mem_edge(); t->eval();
+	mc++;
+#endif
 #ifdef TE_PROF
 	st_n[t->rootp->m2_te__DOT__st & 127]++;
 	if (t->rootp->m2_te__DOT__w_on) st_n[P_RUN_N]++;   // (the walk, beside the setup's states)
@@ -129,6 +247,27 @@ static void clock1()
 		static uint32_t watch = getenv("TE_WATCH") ? uint32_t(strtoul(getenv("TE_WATCH"), nullptr, 16)) : 0;
 		auto *q = t->rootp;
 		static int wtrace;
+		{
+			// every colour write, in order (TE_CW=file)
+			static FILE *fcw = getenv("TE_CW") ? fopen(getenv("TE_CW"), "w") : nullptr;
+			if (fcw && q->m2_te__DOT__cc__DOT__w_go)
+				fprintf(fcw, "%07x %08x\n", unsigned(q->m2_te__DOT__cc__DOT__w_a) << 1, unsigned(q->m2_te__DOT__c_wd));
+#ifdef Z_SDRAM
+			// every line put in the SDRAM's queue (TE_ZP=file), against what reaches the chip (TE_ZL)
+			static FILE *fzp = getenv("TE_ZP") ? fopen(getenv("TE_ZP"), "w") : nullptr;
+			if (fzp && q->m2_te__DOT__zmem__DOT__push) fprintf(fzp, "W %07x\n", unsigned(q->m2_te__DOT__zl_wa) << 5);
+#endif
+		}
+		// the watched pixel's Z test (V1), and every Z write to its Z address
+		if (watch && (q->m2_te__DOT__v1_d & 0xfffffff) == (watch & 0xfffffff) && q->m2_te__DOT__pu && q->m2_te__DOT__v1_v)
+			printf("  Z test at clock %llu: z %07x zc %d w16 %04x z_q %04x zp %d zb %d\n", (unsigned long long)clocks, unsigned(q->m2_te__DOT__v1_z), int(q->m2_te__DOT__v1_zc),
+				unsigned(q->m2_te__DOT__v1_w16), unsigned(q->m2_te__DOT__z_q), int(q->m2_te__DOT__zp), int(q->m2_te__DOT__zb));
+		{
+			static uint32_t wz = getenv("TE_WZ") ? uint32_t(strtoul(getenv("TE_WZ"), nullptr, 16)) : 0;
+			static int was_wn;
+			if (was_wn) printf("  Z write at clock %llu: %04x\n", (unsigned long long)clocks, unsigned(q->m2_te__DOT__z_wd));
+			was_wn = wz && q->m2_te__DOT__z_wn && (q->m2_te__DOT__z_wa & 0xfffffff) == (wz & 0xfffffff) && q->m2_te__DOT__pe;
+		}
 		if (watch && q->m2_te__DOT__d_addr == watch && q->m2_te__DOT__pu)
 		{
 			wtrace = 14;
@@ -152,6 +291,27 @@ static void clock1()
 				unsigned(q->m2_te__DOT__db_ssb), unsigned(q->m2_te__DOT__db_da), unsigned(q->m2_te__DOT__db_sa), unsigned(q->m2_te__DOT__db_discard), unsigned(q->m2_te__DOT__tm_tab), unsigned(q->m2_te__DOT__gc_master), unsigned(q->m2_te__DOT__db_zctl));
 	}
 	stalled += !t->rootp->m2_te__DOT__pe;
+#ifdef Z_SDRAM
+	{
+		// the Z cache's fetches, by what asked: a write's miss, a read's, the line ahead; and the clocks a read waited after each kind
+		static uint64_t zf[3], zw[3];
+		static int last = 2;
+		auto *r = t->rootp;
+		if (r->m2_te__DOT__zc__DOT__f_st == 0)
+		{
+			if (r->m2_te__DOT__zc__DOT__w_miss) last = 0, zf[0]++;
+			else if (r->m2_te__DOT__zc__DOT__r_miss) last = 1, zf[1]++;
+			else if (r->m2_te__DOT__zc__DOT__p_want) last = 2, zf[2]++;
+		}
+		if (r->m2_te__DOT__zr_stall) zw[last]++;
+		if (getenv("TE_ZF") && (r->m2_te__DOT__st & 127) == 0 && zf[0] + zf[1] + zf[2])
+		{
+			printf("  Z fetches: %llu for writes, %llu for reads, %llu ahead; read stalls after each %llu %llu %llu\n", (unsigned long long)zf[0], (unsigned long long)zf[1], (unsigned long long)zf[2],
+				(unsigned long long)zw[0], (unsigned long long)zw[1], (unsigned long long)zw[2]);
+			zf[0] = zf[1] = zf[2] = zw[0] = zw[1] = zw[2] = 0;
+		}
+	}
+#endif
 	{
 		static int was;
 		int s = t->rootp->m2_te__DOT__st & 127;
@@ -227,7 +387,7 @@ static void clock1()
 		if (!q->m2_te__DOT__pe)
 		{
 			p_stall++;
-			p_zr += 0; p_zw += q->m2_te__DOT__zw_stall; p_cr += q->m2_te__DOT__cr_stall; p_cw += q->m2_te__DOT__cw_stall;
+			p_zr += q->m2_te__DOT__zr_stall; p_zw += q->m2_te__DOT__zw_stall; p_cr += q->m2_te__DOT__cr_stall; p_cw += q->m2_te__DOT__cw_stall;
 		}
 		else if (!px_left) p_drain++;
 		else if (q->m2_te__DOT__t_hold)
@@ -318,6 +478,9 @@ int main(int argc, char **argv)
 	for (int i = 0; i < 10; i++) clock1();
 	t->rst = 0;
 	for (int i = 0; i < 300; i++) clock1();
+#ifdef Z_SDRAM
+	while (!t->sd_ready) clock1();
+#endif
 
 	wrote.resize(RAM_SIZE);
 	int bad = 0;
@@ -327,10 +490,16 @@ int main(int argc, char **argv)
 		// (the next dump after the last: else the RAM's changed behind the Z buffer's copy, as a master's write would tell it)
 		if (k != k_last + 1 && k_last != -2)
 		{
+#ifdef Z_SDRAM
+			std::fill(zram.begin(), zram.end(), 0);
+#endif
 			t->rst = 1;
 			for (int i = 0; i < 10; i++) clock1();
 			t->rst = 0;
 			for (int i = 0; i < 300; i++) clock1();
+#ifdef Z_SDRAM
+			while (!t->sd_ready) clock1();
+#endif
 		}
 		k_last = k;
 		std::vector<uint8_t> te, next, nte;
@@ -349,6 +518,9 @@ int main(int argc, char **argv)
 
 		uint64_t c0 = clocks;
 		writes = reads = 0;
+#ifdef Z_SDRAM
+		zreads = zwrites = 0;
+#endif
 		cpu_write(0x000c, 0x21);
 		while (t->busy && clocks - c0 < 60000000ull) clock1();
 		if (t->busy) { printf("k %d: still busy at %llu clocks\n", k, (unsigned long long)(clocks - c0)); 
@@ -356,6 +528,12 @@ int main(int argc, char **argv)
 		{ auto *r = t->rootp;
 			printf("  st %d m_owned %d c_req %d lb_rd %d lb_wait %d f_want %d f_ok %d rq %d m_rd %d m_we %d\n", int(r->m2_te__DOT__st), int(r->m2_te__DOT__m_owned), int(r->m2_te__DOT__c_req), int(r->m2_te__DOT__lb_rd), int(r->m2_te__DOT__lb_wait), int(r->m2_te__DOT__f_want), int(r->m2_te__DOT__f_ok), int(rq.size()), int(t->m_rd), int(t->m_we));
 			printf("  pe %d pu %d p_any %d serial %d px %d pxe %d nx %d zw %d cr %d cw %d ms_out %d ms_left %d mm_n %d\n", int(r->m2_te__DOT__pe), int(r->m2_te__DOT__pu), int(r->m2_te__DOT__p_any), int(r->m2_te__DOT__serial), int(r->m2_te__DOT__px), int(r->m2_te__DOT__pxe), int(r->m2_te__DOT__nx), int(r->m2_te__DOT__zw_stall), int(r->m2_te__DOT__cr_stall), int(r->m2_te__DOT__cw_stall), int(r->m2_te__DOT__ms_out), int(r->m2_te__DOT__ms_left), int(r->m2_te__DOT__mm_n));
+#ifdef Z_SDRAM
+			printf("  Z cache: f_st %d f_t %x f_i %x r_v %d r_a %06x r_hit %d tr_q %x w_v %d w_done %d w_a %06x k_hit %d f_kc %d f_got %d l_rbusy %d zk_walk %d\n", int(r->m2_te__DOT__zc__DOT__f_st),
+				unsigned(r->m2_te__DOT__zc__DOT__f_t), unsigned(r->m2_te__DOT__zc__DOT__f_i), int(r->m2_te__DOT__zc__DOT__r_v), unsigned(r->m2_te__DOT__zc__DOT__r_a) << 1,
+				int(r->m2_te__DOT__zc__DOT__r_hit), unsigned(r->m2_te__DOT__zc__DOT__tr_q), int(r->m2_te__DOT__zc__DOT__w_v), int(r->m2_te__DOT__zc__DOT__w_done), unsigned(r->m2_te__DOT__zc__DOT__w_a) << 1,
+				int(r->m2_te__DOT__zk_hit), int(r->m2_te__DOT__zc__DOT__f_kc), int(r->m2_te__DOT__zc__DOT__f_got), int(r->m2_te__DOT__zl_rbusy), int(r->m2_te__DOT__zk_walk));
+#endif
 			}
 #endif
 		return 3; }
@@ -385,6 +563,35 @@ int main(int argc, char **argv)
 		regh_n.clear(); regh_w.clear();
 #endif
 		while (!rq.empty()) clock1();
+#ifdef Z_SDRAM
+		while (!t->z_idle) clock1();
+		printf("  Z: %llu lines read, %llu written; SDRAM timing errors %llu\n", (unsigned long long)zreads / 16, (unsigned long long)zwrites / 16, (unsigned long long)zerrs);
+		if (getenv("TE_ZCMP"))
+		{
+			// the Z buffer, TE_ZCMP bytes from the list's Z base, against what MAME's RAM has there after it: by 16-pixel line, the first few
+			uint32_t zb = be32(te, 0x8000 + 0 * 4), n = uint32_t(strtoul(getenv("TE_ZCMP"), nullptr, 0)), nd = 0, nl = 0, shown = 0;
+			zb = getenv("TE_ZB") ? uint32_t(strtoul(getenv("TE_ZB"), nullptr, 16)) : zb;
+			// (a line the fast clear's map has is its value, whatever the SDRAM holds)
+			auto zbyte = [&](uint32_t a) -> uint8_t {
+#ifdef TE_PROF
+				auto *r = t->rootp;
+				uint32_t li = ((a >> 5) - (uint32_t(r->m2_te__DOT__db_zbase) >> 5)) & 0xfffff;
+				if (li < 32768 && !r->m2_te__DOT__zk_walk && r->m2_te__DOT__zk_z__DOT__mem[li])
+					return uint8_t((a & 1) ? r->m2_te__DOT__zk_c >> 8 : r->m2_te__DOT__zk_c);
+#endif
+				return zram[a & ((1u << 25) - 1)];
+			};
+			for (uint32_t o = 0; o < n; o += 32)
+			{
+				int d = 0;
+				for (uint32_t i = 0; i < 32; i++) d += zbyte(zb + o + i) != next[(zb - RAM_BASE + o + i) & (RAM_SIZE - 1)];
+				nd += d; nl += d != 0;
+				if (d && shown++ < 8) printf("    Z %08x: %d bytes differ (this %02x%02x MAME %02x%02x)\n", zb + o, d, zbyte(zb + o), zbyte(zb + o + 1),
+					next[(zb - RAM_BASE + o) & (RAM_SIZE - 1)], next[(zb - RAM_BASE + o + 1) & (RAM_SIZE - 1)]);
+			}
+			printf("  Z buffer at %08x: %u bytes differ from MAME's, in %u lines\n", zb, nd, nl);
+		}
+#endif
 
 		// the comparison
 		uint64_t nw = 0, nbad = 0;

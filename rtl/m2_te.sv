@@ -14,8 +14,18 @@
 
 // The Z buffer's size in 8 KB blocks, from the block a game's Z starts in (a qsf VERILOG_MACRO can change it). At 16 bits a pixel: Polystars 320 x 224,
 // Total Vice and Evil Night 320 x 240, all within 20. Heat of Eleven's Low Res 640 x 240 takes 38, Hell Night's 512 x 384 takes 48.
+// With Z_SDRAM the Z buffer's in the board's SDRAM instead, at RAM's own addresses, so any size and place: Z_BLOCKS is then only how much of what
+// a list clearing it draws goes there (1 MB).
+// The Z cache's size with Z_SDRAM: 2^Z_CACHE_IB lines of 32 bytes
+`ifndef Z_CACHE_IB
+`define Z_CACHE_IB 7
+`endif
 `ifndef Z_BLOCKS
+`ifdef Z_SDRAM
+`define Z_BLOCKS 128
+`else
 `define Z_BLOCKS 20
+`endif
 `endif
 module m2_te (
 	input  logic        clk,
@@ -38,6 +48,23 @@ module m2_te (
 	input  logic        m_busy,
 	input  logic        m_ready,
 	input  logic [63:0] m_dout,
+`ifdef Z_SDRAM
+
+	// the Z buffer's SDRAM (rtl/m2_zmem.sv): its clock, twice clk and in phase; the pins but its clock, chip select and clock enable
+	input  logic        clk_mem,
+	input  logic        sd_late,        // its read data a clock later
+	output logic        sd_ready,
+	output logic        z_idle,         // (nothing on its way to the SDRAM: the bench)
+	output logic [12:0] sd_a,
+	output logic [1:0]  sd_ba,
+	output logic [1:0]  sd_dqm,
+	output logic        sd_nras,
+	output logic        sd_ncas,
+	output logic        sd_nwe,
+	output logic [15:0] sd_dq_o,
+	output logic        sd_dq_oe,
+	input  logic [15:0] sd_dq_i,
+`endif
 
 	output logic        busy
 );
@@ -129,31 +156,127 @@ module m2_te (
 	logic [3:0]  c_wbe;
 	logic        z_rn;
 	logic [31:0] z_ra_full;
-	logic        zw_stall, cr_stall, cw_stall;
-	logic        c_flush, cc_flushed, c_fdone;
+	logic        zw_stall, zr_stall, cr_stall, cw_stall;
+	logic        c_flush, cc_flushed, c_fdone, zc_flushed, z_fdone;
 	logic        c_req, m_owned;
 	logic        cm_rd, cm_we;
 	logic [31:3] cm_a;
 	logic [63:0] cm_wd;
 	logic [7:0]  cm_be;
-	assign pe = !(zw_stall || cr_stall || cw_stall);
+	assign pe = !(zw_stall || zr_stall || cr_stall || cw_stall);
 	assign pu = pe && !t_hold;
-	// The Z buffer's here and nowhere else: nothing but this engine looks at one (the CPUs store only past its end), so memory needn't hear of it, and Z never waits.
-	// A list clearing it draws in its place through the colour cache: what that has for there comes here instead of going to memory
-	logic        cc_sink, x_v;
+	// The Z buffer's apart from RAM: nothing but this engine looks at one (the CPUs store only past its end), so memory needn't hear of it.
+	// A list clearing it draws in its place through the colour cache: what that has for there goes to the Z buffer instead of to memory
+	logic        cc_sink, sink_wait;
+	wire         cc_sinks = db_dbase == db_zbase && 15'(cm_a[27:13] - db_zbase[27:13]) < 15'(`Z_BLOCKS);
+	logic [15:0] z_q;
+`ifdef Z_SDRAM
+	// in the SDRAM, at RAM's addresses, through a cache of its own (te_zc). Both caches are emptied when a list stops, so a clearing list (no Z
+	// of its own) finds none of the Z buffer in the Z cache, and the lines it draws go straight to the SDRAM
+	logic        z_fwd, z_more, z_more2, z_nv;
+	logic [31:0] z_naddr;
+	logic        zl_rd, zl_rbusy, zl_ready, zl_we, zl_wfull, zc_we;
+	logic [24:5] zl_ra, zl_wa, zc_wa, zk_ln;
+	logic        zk_hit;
+	logic [255:0] zl_rdata, zl_wdata, zc_wd;
+	logic [31:0] zl_wbe;
+	te_zc #(.IB(`Z_CACHE_IB)) zc (.clk, .rst, .r_n(z_rn), .r_na(z_ra_full[24:1]), .r_adv(pu), .q(z_q), .r_stall(zr_stall),
+		.w_n(z_wn), .w_na(z_wa[24:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall), .fwd(z_fwd), .more(z_more), .more2(z_more2), .nr_v(z_nv), .nr_ln(z_naddr[24:5]), .flush(c_flush), .flushed(zc_flushed),
+		.l_rd(zl_rd), .l_ra(zl_ra), .l_rbusy(zl_rbusy), .l_ready(zl_ready), .l_rdata(zl_rdata),
+		.l_we(zc_we), .l_wa(zc_wa), .l_wdata(zc_wd), .l_wfull(zl_wfull), .k_ln(zk_ln), .k_hit(zk_hit), .k_c(zk_c));
+
+	// The fast clear: a line a clearing list fills with one value (all of a Z buffer but its edges) isn't written. A bit says so, in a map of the
+	// 32 K lines from the Z base, and the Z cache takes such a line as that value without reading the SDRAM. A line written to the SDRAM clears its
+	// bit, one partly written is first made whole with the value. The value's the first such line's; a reset or a new Z base clears the map (32 K
+	// clocks: meanwhile no bit's set or used). Two copies of the map: the Z cache's look, and the clearing list's.
+	logic        zk_walk, zk_cv, zk_we, zk_wd, zk_q, zk_sq, zk_in, zk_inq;
+	logic [14:0] zk_wi, zk_wa;
+	logic [15:0] zk_c;
+	logic [31:0] zk_base;
+	wire  [19:0] zk_d = zk_ln - db_zbase[24:5];
+	te_ram #(.W(1), .AW(15)) zk_z (.clk, .we(zk_we), .wa(zk_wa), .wd(zk_wd), .re(1'b1), .ra(zk_d[14:0]), .rd(zk_q));
+	always_ff @(posedge clk) zk_inq <= zk_d[19:15] == 5'd0;
+	assign zk_hit = zk_q && zk_inq && !zk_walk;
+
+	// a clearing list's line, the colour cache's four words of it: its bit looked at, then the bit set, or the line to the queue when the Z
+	// cache isn't putting one there
+	logic [255:0] sk_d;
+	logic [31:0] sk_be;
+	logic [24:5] sk_a;
+	logic        sk_full, sk_look;
+	wire  [19:0] sk_off = sk_a - db_zbase[24:5];
+	wire         sk_in = sk_off[19:15] == 5'd0;
+	te_ram #(.W(1), .AW(15)) zk_s (.clk, .we(zk_we), .wa(zk_wa), .wd(zk_wd), .re(1'b1), .ra(sk_off[14:0]), .rd(zk_sq));
+	logic        sk_one;                // one value all through
+	always_comb
+	begin
+		sk_one = sk_be == 32'hffffffff;
+		for (int i = 1; i < 16; i++) if (sk_d[16 * i +: 16] != sk_d[15:0]) sk_one = 1'b0;
+	end
+	wire         sk_fast = sk_one && sk_in && !zk_walk && (!zk_cv || sk_d[15:0] == zk_c);
+	wire         sk_old = zk_sq && sk_in && !zk_walk;  // (the line's the value: what isn't written here is that)
+	logic [255:0] sk_m;
+	always_comb for (int i = 0; i < 32; i++) sk_m[8 * i +: 8] = sk_be[i] ? sk_d[8 * i +: 8] : i[0] ? zk_c[15:8] : zk_c[7:0];
+	wire         sk_go = sk_full && !sk_look && !zc_we && (sk_fast || !zl_wfull);
+	assign sink_wait = sk_full;
+	wire  [19:0] zc_off = zc_wa - db_zbase[24:5];
+	always_ff @(posedge clk)
+	begin
+		zk_we <= 1'b0;
+		if (rst) begin sk_full <= 1'b0; sk_look <= 1'b0; zk_walk <= 1'b1; zk_wi <= 15'd0; zk_cv <= 1'b0; zk_base <= db_zbase; end
+		else
+		begin
+			sk_look <= 1'b0;
+			if (cc_sink && !sk_full)
+			begin
+				sk_d[64 * cm_a[4:3] +: 64] <= cm_wd;
+				sk_be <= (cm_a[4:3] == 2'd0 ? 32'h0 : sk_be) | (32'(cm_be) << {cm_a[4:3], 3'b000});
+				sk_a <= cm_a[24:5];
+				if (cm_a[4:3] == 2'd3) begin sk_full <= 1'b1; sk_look <= 1'b1; end
+			end
+			if (sk_go) sk_full <= 1'b0;
+			// the map's one write a clock: the walk, a line the Z cache puts out, a clearing list's line
+			if (zk_walk)
+			begin
+				zk_we <= 1'b1; zk_wa <= zk_wi; zk_wd <= 1'b0;
+				zk_wi <= zk_wi + 15'd1;
+				if (zk_wi == 15'h7fff) zk_walk <= 1'b0;
+			end
+			else if (zc_we && !zl_wfull) begin zk_we <= zc_off[19:15] == 5'd0; zk_wa <= zc_off[14:0]; zk_wd <= 1'b0; end
+			else if (sk_go && sk_in)
+			begin
+				zk_we <= 1'b1; zk_wa <= sk_off[14:0]; zk_wd <= sk_fast;
+				if (sk_fast) begin zk_c <= sk_d[15:0]; zk_cv <= 1'b1; end
+			end
+			if (db_zbase != zk_base) begin zk_base <= db_zbase; zk_walk <= 1'b1; zk_wi <= 15'd0; zk_cv <= 1'b0; end
+		end
+	end
+	assign zl_we = zc_we || (sk_go && !sk_fast);
+	assign zl_wa = zc_we ? zc_wa : sk_a;
+	assign zl_wdata = zc_we ? zc_wd : sk_old ? sk_m : sk_d;
+	assign zl_wbe = zc_we || sk_old ? 32'hffffffff : sk_be;
+	m2_zmem zmem (.clk, .rst, .clk_mem, .rd_late(sd_late), .ready(sd_ready),
+		.l_rd(zl_rd), .l_ra(zl_ra), .l_rbusy(zl_rbusy), .l_ready(zl_ready), .l_rdata(zl_rdata),
+		.l_we(zl_we), .l_wa(zl_wa), .l_wdata(zl_wdata), .l_wbe(zl_wbe), .l_wfull(zl_wfull), .idle(z_idle),
+		.sd_a, .sd_ba, .sd_dqm, .sd_nras, .sd_ncas, .sd_nwe, .sd_dq_o, .sd_dq_oe, .sd_dq_i);
+`else
+	// here, in block RAM, which never waits
+	logic        x_v;
 	logic [27:3] x_a;
 	logic [63:0] x_wd;
 	logic [7:0]  x_be;
-	wire         cc_sinks = db_dbase == db_zbase && 15'(cm_a[27:13] - db_zbase[27:13]) < 15'(`Z_BLOCKS);
 	always_ff @(posedge clk)
 	begin
 		x_v <= cc_sink;
 		x_a <= cm_a[27:3]; x_wd <= cm_wd; x_be <= cm_be;
 	end
-	logic [15:0] z_q;
+	assign sink_wait = 1'b0;
+	assign zr_stall = 1'b0;
+	assign zc_flushed = 1'b1;
 	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:13]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
 		.w_n(z_wn), .w_na(z_wa[27:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall));
-	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
+`endif
+	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .sink_wait, .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
 		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_nfour(fc_q[74]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
 		.flush(c_flush), .flushed(cc_flushed), .m_req(c_req), .m_gnt(m_owned),
 		.m_rd(cm_rd), .m_we(cm_we), .m_a(cm_a), .m_wd(cm_wd), .m_be(cm_be), .m_busy, .m_ready, .m_dout);
@@ -341,6 +464,9 @@ module m2_te (
 	logic signed [13:0] wk_x2, wk_y2, wk_y3, wk_xst1, wk_xstl, wk_xys1, wk_xysl, wk_dy1, wk_dyl;
 	logic        wk_lr, wk_flat;
 	logic [1:0]  wk_wr;
+`ifdef Z_SDRAM
+	assign       z_fwd = wk_lr;
+`endif
 	logic [31:0] fa_aria;
 	logic signed [13:0] fc_c;
 	logic signed [13:0] xstep0, xstep1, xstepl, dy0, dy1, dyl;
@@ -478,6 +604,13 @@ module m2_te (
 	// ---- the walk --------------------------------------------------------------------------------------------------------
 	logic signed [13:0] y, xs, xe, cf_short, cf_long, xystep, xstep, dy;
 	logic signed [13:0] px, pxe;
+`ifdef Z_SDRAM
+	// (the span goes on past the Z line of its pixel: so the Z cache fetches the next)
+	wire  signed [13:0] z_rem = wk_lr ? pxe - px : px - pxe;
+	wire  signed [13:0] z_left = $signed({9'd0, wk_lr ? 5'd16 - 5'(z_ra_full[4:1]) : 5'(z_ra_full[4:1]) + 5'd1});
+	assign       z_more = z_rem > z_left;
+	assign       z_more2 = z_rem > z_left + 14'sd16;
+`endif
 	logic        omit_right, step_back;
 	// the next line's worked out while this one's pixels run, and taken up as soon as they're out
 	typedef enum logic [2:0] { NX_N1, NX_N2, NX_A1, NX_A2, NX_LINE, NX_ROW, NX_DONE } nx_t;
@@ -520,6 +653,13 @@ module m2_te (
 		&& y >= $signed({3'b000, db_ywin[26:16]}) && y < $signed({3'b000, db_ywin[10:0]});
 	wire         winclipdis = (db_user[8] && win_in) || (db_user[7] && !win_in);
 	wire         zon = !m_dzbuf && db_user[10];
+`ifdef Z_SDRAM
+	// (the Z address the next span starts at, once the walker has it, while this span's drawn: so the Z cache fetches its line)
+	wire signed [13:0] z_npx = (omit_right && !wk_lr) ? xs - 14'sd1 : xs;
+	wire signed [27:0] z_noff = row_zn + 28'(15'($signed(db_zoff[27:16])) + 15'(z_npx));
+	assign       z_naddr = db_zbase + {3'(z_noff[27] ? 3'b111 : 3'b000), z_noff, 1'b0};
+	assign       z_nv = w_on && nx == NX_DONE && !nx_last && zon;
+`endif
 	wire         zclip = zon && (z_xo < 0 || z_yo < 0 || z_xo >= $signed({4'b0000, db_zclip[26:16]}) || z_yo >= $signed({4'b0000, db_zclip[10:0]}));
 	wire         zclipdis = zclip && db_discard[3];
 	wire signed [27:0] z_off = row_z + 28'(z_xo);
@@ -1202,6 +1342,7 @@ module m2_te (
 		lb_inv <= 1'b0;
 		c_flush <= 1'b0;
 		c_fdone <= !c_flush && (c_fdone || cc_flushed);
+		z_fdone <= !c_flush && (z_fdone || zc_flushed);
 		ist_set <= 32'h0;
 		rf_we <= 1'b0;
 		// the fixed-point value of the last clock's float
@@ -1227,7 +1368,7 @@ module m2_te (
 			case (st)
 				I_STOP: ;
 				I_FLUSH:
-					if (!c_flush && c_fdone)
+					if (!c_flush && c_fdone && z_fdone)
 					begin
 						ist_set <= end_set;
 						end_set <= 32'h0;
@@ -1926,6 +2067,7 @@ module te_cache (
 
 	input  logic        sink_in,        // the line in hand needn't go to memory
 	output logic        m_sink,         // it isn't: its word's on m_wd for the copy
+	input  logic        sink_wait,      // (which isn't taken this clock)
 
 	input  logic        r_n,
 	input  logic [27:1] r_na,
@@ -2027,7 +2169,7 @@ module te_cache (
 	wire  [31:0] q_mask = q_m[31:0];
 	wire  [7:0]  q_be = q_n == 2'd0 ? q_mask[7:0] : q_n == 2'd1 ? q_mask[15:8] : q_n == 2'd2 ? q_mask[23:16] : q_mask[31:24];
 	logic        q_sink;
-	wire         q_go = q_st == Q_WR && (q_be == 8'h0 || q_sink || (m_gnt && !m_busy));
+	wire         q_go = q_st == Q_WR && (q_sink ? !sink_wait : q_be == 8'h0 || (m_gnt && !m_busy));
 	wire         q_end = q_go && q_n == 2'd3;
 	wire         q_push = b_go && b_n == 2'd3;
 	te_ram #(.W(64), .AW(6)) q_data (.clk, .we(b_go), .wa({q_wp, b_n}), .wd(d2_q), .re(1'b1), .ra({q_rp, q_n + 2'(q_go)}), .rd(q_d));
@@ -2250,6 +2392,217 @@ module te_cache (
 			endcase
 		end
 	end
+endmodule
+
+// the Z buffer's cache, for a Z buffer in the SDRAM (Z_SDRAM): 128 lines of 32 bytes (16 pixels), direct mapped, written back. A pixel's Z is
+// read and written in a clock each when its line's here. The line after the one being read, the way the walker goes, is fetched while the
+// pixels go on, so a span seldom waits; the line it replaces goes to the SDRAM's write queue (m2_zmem). A line in a byte's order in memory: the
+// byte at line offset j in bits 8j+7:8j.
+module te_zc #(
+	parameter int IB = 7                // 2^IB lines
+) (
+	input  logic         clk,
+	input  logic         rst,
+
+	input  logic         r_n,
+	input  logic [24:1]  r_na,
+	input  logic         r_adv,
+	output logic [15:0]  q,
+	output logic         r_stall,
+
+	input  logic         w_n,
+	input  logic [24:1]  w_na,
+	input  logic         w_adv,
+	input  logic [15:0]  wd,             // in the clock after the address
+	output logic         w_stall,
+
+	input  logic         fwd,            // the walker's going left to right
+	input  logic         more,           // with r_na: the span goes on into the next line
+	input  logic         more2,          // and the one after
+	input  logic         nr_v,           // the next span starts in this line
+	input  logic [24:5]  nr_ln,
+	input  logic         flush,          // (a clock long) every line to the queue, then none here
+	output logic         flushed,
+
+	output logic         l_rd,           // a line read: one at a time, taken when l_rbusy is low; l_ready with its data
+	output logic [24:5]  l_ra,
+	input  logic         l_rbusy,
+	input  logic         l_ready,
+	input  logic [255:0] l_rdata,
+	output logic         l_we,           // a line written, taken unless the queue's full
+	output logic [24:5]  l_wa,
+	output logic [255:0] l_wdata,
+	input  logic         l_wfull,
+
+	output logic [24:5]  k_ln,           // the line to be fetched: is it the fast clear's value (k_hit, a clock later)?
+	input  logic         k_hit,
+	input  logic [15:0]  k_c
+);
+	localparam int N = 1 << IB, TW = 20 - IB;
+	logic [N-1:0] vld, drt;
+	// the fetcher: one line at a time, what a pixel waits for first (a write before a read: the write's the older pixel, and one line may be
+	// both's place), else the line ahead. The read's asked for first; the line it replaces goes to the queue while it comes
+	typedef enum logic [3:0] { F_IDLE, F_EV0, F_EV1, F_EV2, F_REQ, F_WAIT, F_SET, F_WALK, F_END } fst_t;
+	fst_t         f_st;
+	logic         r_v, w_v, w_done, w_go;
+	logic [24:1]  r_a, w_a;
+	always_ff @(posedge clk)
+		if (rst) begin r_v <= 1'b0; w_v <= 1'b0; w_done <= 1'b0; end
+		else
+		begin
+			if (r_adv) begin r_v <= r_n; r_a <= r_na; end
+			else if (f_st == F_END) r_v <= 1'b0;    // (no pixel's left after a flush: nothing then to fetch)
+			if (w_adv) begin w_v <= w_n; w_a <= w_na; w_done <= 1'b0; end
+			else if (w_go) w_done <= 1'b1;
+		end
+
+	logic [IB-1:0] f_i;                   // the line's place
+	logic [TW-1:0]  f_t;                   // its tag
+	logic         f_walk;                // the flush's
+	logic         f_pend;
+	logic         v_d;
+	logic [TW-1:0]  v_t;
+	logic         f_got;                 // the read's come while the line it replaces went
+	logic         f_kc;                  // the line's the fast clear's value: no read
+
+	// the tags, a RAM for each look: the read's, the write's, the fetcher's, the fetcher's two lines ahead
+	logic         t_we;
+	logic [TW-1:0]  tr_q, tw_q, tp_q, t2_q;
+	logic [IB-1:0] tp_ra;
+	wire  [IB-1:0] r_ix = r_adv ? r_na[IB+4:5] : r_a[IB+4:5];
+	wire  [IB-1:0] w_ix = w_adv ? w_na[IB+4:5] : w_a[IB+4:5];
+	te_ram #(.W(TW), .AW(IB)) tag_r (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(r_ix), .rd(tr_q));
+	te_ram #(.W(TW), .AW(IB)) tag_w (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(w_ix), .rd(tw_q));
+	te_ram #(.W(TW), .AW(IB)) tag_p (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(tp_ra), .rd(tp_q));
+	wire          r_hit = vld[r_a[IB+4:5]] && tr_q == r_a[24:IB+5];
+	wire          w_hit = vld[w_a[IB+4:5]] && tw_q == w_a[24:IB+5];
+
+	// the data, a copy for the pixels' reads and one for the lines put out. A pixel's write and a line's arrival share the write port, the line first
+	wire          f_we = f_st == F_WAIT && (l_ready || f_got || f_kc);
+	assign        w_go = w_v && !w_done && w_hit && !f_we;
+	assign        w_stall = w_v && !w_done && !w_go;
+	assign        r_stall = r_v && !r_hit;
+	wire  [15:0]  d_le = f_we ? 16'hffff : w_go ? 16'(1) << w_a[4:1] : 16'h0000;
+	wire  [255:0] d_wd = f_we ? (f_kc ? {16{k_c}} : l_rdata) : {16{wd[7:0], wd[15:8]}};
+	wire  [IB-1:0] d_wa = f_we ? f_i : w_a[IB+4:5];
+	logic [255:0] dr_q, dv_q;
+	te_lram #(.AW(IB)) d_r (.clk, .le(d_le), .wa(d_wa), .wd(d_wd), .ra(r_ix), .rd(dr_q));
+	te_lram #(.AW(IB)) d_v (.clk, .le(d_le), .wa(d_wa), .wd(d_wd), .ra(f_i), .rd(dv_q));
+	wire  [15:0]  q16 = dr_q[16 * r_a[4:1] +: 16];
+	assign        q = {q16[7:0], q16[15:8]};
+
+	// the lines ahead: the one after the line the reads will be on, then the one after that, looked for in the fetcher's tags a clock before
+	wire  [24:5]  r_ln = r_adv ? r_na[24:5] : r_a[24:5];
+	logic         r_more, r_more2;
+	always_ff @(posedge clk) if (r_adv) begin r_more <= more; r_more2 <= more2; end
+	wire  [24:5]  p_nx = fwd ? r_ln + 20'd1 : r_ln - 20'd1;
+	wire  [24:5]  p_nx2 = fwd ? r_ln + 20'd2 : r_ln - 20'd2;
+	te_ram #(.W(TW), .AW(IB)) tag_2 (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(p_nx2[IB+4:5]), .rd(t2_q));
+	logic [24:5]  p_ln, p_ln2;
+	logic         p_look, p_look2;
+	assign        tp_ra = f_st == F_IDLE ? p_nx[IB+4:5] : f_i;
+	always_ff @(posedge clk)
+	begin
+		p_ln <= p_nx; p_ln2 <= p_nx2;
+		p_look <= f_st == F_IDLE && (r_adv ? r_n && more : r_v && r_more);
+		p_look2 <= f_st == F_IDLE && (r_adv ? r_n && more2 : r_v && r_more2);
+	end
+	wire          p_have = vld[p_ln[IB+4:5]] && tp_q == p_ln[24:IB+5];
+	wire          p_want1 = p_look && !p_have && !(w_v && w_a[IB+4:5] == p_ln[IB+4:5]);
+	wire          p_want2 = p_look2 && p_have && !(vld[p_ln2[IB+4:5]] && t2_q == p_ln2[24:IB+5]) && !(w_v && w_a[IB+4:5] == p_ln2[IB+4:5]);
+	// the line the next span starts in
+	logic [TW-1:0] tn_q;
+	logic [24:5]  n_ln;
+	logic         n_look;
+	te_ram #(.W(TW), .AW(IB)) tag_n (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(nr_ln[IB+4:5]), .rd(tn_q));
+	always_ff @(posedge clk) begin n_ln <= nr_ln; n_look <= nr_v && f_st == F_IDLE; end
+	wire          n_want = n_look && !(vld[n_ln[IB+4:5]] && tn_q == n_ln[24:IB+5]) && !(w_v && w_a[IB+4:5] == n_ln[IB+4:5])
+		&& !(r_v && r_a[IB+4:5] == n_ln[IB+4:5]);
+	wire          p_want = p_want1 || p_want2 || n_want;
+	wire          r_miss = r_v && !r_hit;
+	wire          w_miss = w_v && !w_done && !w_hit;
+
+	assign l_rd = f_st == F_REQ && !k_hit;
+	wire  [24:5]  f_nx = w_miss ? w_a[24:5] : r_miss ? r_a[24:5] : p_want1 ? p_ln : n_want ? n_ln : p_ln2;
+	assign k_ln = f_st == F_IDLE ? f_nx : {f_t, f_i};
+	assign l_ra = {f_t, f_i};
+	assign l_we = f_st == F_EV2 && v_d;
+	assign l_wa = {v_t, f_i};
+	assign l_wdata = dv_q;
+	assign t_we = f_we;
+
+	always_ff @(posedge clk)
+	begin
+		flushed <= 1'b0;
+		if (rst) begin f_st <= F_IDLE; vld <= '0; drt <= '0; f_walk <= 1'b0; f_pend <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0; end
+		else
+		begin
+			if (flush) f_pend <= 1'b1;
+			if (w_go) drt[w_a[IB+4:5]] <= 1'b1;
+			case (f_st)
+				F_IDLE:
+					if (f_pend || flush) begin f_pend <= 1'b0; f_walk <= 1'b1; f_i <= '0; f_st <= F_WALK; end
+					else if (r_miss || w_miss || p_want)
+					begin
+						{f_t, f_i} <= f_nx;
+						f_st <= F_REQ;
+					end
+				// (the line there goes: no pixel writes it from the next clock, and the one it may have this clock is in the RAM for the read
+				// after; its tag's read meanwhile)
+				F_REQ: begin vld[f_i] <= 1'b0; f_kc <= k_hit; if (k_hit || !l_rbusy) f_st <= F_EV1; end
+				F_EV0: begin vld[f_i] <= 1'b0; f_st <= F_EV1; end
+				F_EV1: begin v_d <= drt[f_i]; drt[f_i] <= 1'b0; v_t <= tp_q; f_st <= F_EV2; if (l_ready) f_got <= 1'b1; end
+				F_EV2:
+				begin
+					if (l_ready) f_got <= 1'b1;
+					if (!v_d || !l_wfull)
+					begin
+						if (f_walk) f_st <= f_i == IB'(N - 1) ? F_END : F_WALK;
+						else f_st <= F_WAIT;
+						if (f_walk) f_i <= f_i + 1'b1;
+					end
+				end
+				F_WAIT: if (l_ready || f_got || f_kc) f_st <= F_SET;
+				F_SET: begin vld[f_i] <= 1'b1; if (f_kc) drt[f_i] <= 1'b1; f_got <= 1'b0; f_kc <= 1'b0; f_st <= F_IDLE; end   // (the fast clear's: not in the SDRAM)   // (a clock after the RAMs, so a read sees what they now hold)
+				F_WALK:
+					if (drt[f_i]) f_st <= F_EV0;
+					else if (f_i == IB'(N - 1)) f_st <= F_END;
+					else f_i <= f_i + 1'b1;
+				F_END: begin vld <= '0; f_walk <= 1'b0; flushed <= 1'b1; f_st <= F_IDLE; end
+				default: f_st <= F_IDLE;
+			endcase
+		end
+	end
+endmodule
+
+// 128 lines of 256 bits, written by 16-bit lanes, read a clock after the address
+module te_lram #(
+	parameter int AW = 7
+) (
+	input  logic         clk,
+	input  logic [15:0]  le,
+	input  logic [AW-1:0] wa,
+	input  logic [255:0] wd,
+	input  logic [AW-1:0] ra,
+	output logic [255:0] rd
+);
+`ifdef VERILATOR
+	logic [255:0] mem [0:(1 << AW) - 1];
+	always_ff @(posedge clk)
+	begin
+		for (int i = 0; i < 16; i++) if (le[i]) mem[wa][16 * i +: 16] <= wd[16 * i +: 16];
+		rd <= mem[ra];
+	end
+`else
+	wire  [31:0] be;
+	genvar i;
+	generate for (i = 0; i < 16; i++) begin : g_be assign be[2 * i +: 2] = {2{le[i]}}; end endgenerate
+	altsyncram #(
+		.operation_mode("DUAL_PORT"), .width_a(256), .widthad_a(AW), .numwords_a(1 << AW), .width_b(256), .widthad_b(AW), .numwords_b(1 << AW),
+		.width_byteena_a(32), .byte_size(8), .address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
+		.read_during_write_mode_mixed_ports("DONT_CARE"), .power_up_uninitialized("TRUE")
+	) ram (.clock0(clk), .wren_a(|le), .byteena_a(be), .address_a(wa), .data_a(wd), .address_b(ra), .q_b(rd));
+`endif
 endmodule
 
 // the Z buffer: 8 KB blocks from the one it starts in, Z_BLOCKS of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
