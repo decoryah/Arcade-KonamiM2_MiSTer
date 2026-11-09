@@ -1034,10 +1034,10 @@ module m2_te (
 	always_ff @(posedge clk)
 		if (pe)
 		begin
-			// E6: T1
-			tp1_r <= 16'(~tb_t[23:16]) * 16'(tb_a[23:16]);
-			tp1_g <= 16'(~tb_t[15:8]) * 16'(tb_a[15:8]);
-			tp1_b <= 16'(~tb_t[7:0]) * 16'(tb_a[7:0]);
+			// E6: T1 (255 - t: a cast would widen t before the ~, so the 8 bits are taken first)
+			tp1_r <= {8'h00, ~tb_t[23:16]} * 16'(tb_a[23:16]);
+			tp1_g <= {8'h00, ~tb_t[15:8]} * 16'(tb_a[15:8]);
+			tp1_b <= {8'h00, ~tb_t[7:0]} * 16'(tb_a[7:0]);
 			tp2_r <= 16'(t_mul ? tb_a[23:16] : tb_t[23:16]) * 16'(tb_b[23:16]);
 			tp2_g <= 16'(t_mul ? tb_a[15:8] : tb_t[15:8]) * 16'(tb_b[15:8]);
 			tp2_b <= 16'(t_mul ? tb_a[7:0] : tb_t[7:0]) * 16'(tb_b[7:0]);
