@@ -766,8 +766,10 @@ module m2_te (
 	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
 	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
 	logic        tri_flat, v1_four;
-	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:5] == 6'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
-	wire         v0_four = f4_on && px[1:0] == (wk_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
+	// (a window that clips what's outside it, as Battle Tryst's clear has, takes four only where all four are inside it)
+	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:8] == 3'd0 && db_user[6:5] == 2'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
+	wire         win4 = !db_user[7] || ($signed({px[13:2], 2'b00}) >= $signed({3'b000, db_xwin[26:16]}) && $signed(px[13:2]) < $signed({3'b000, db_xwin[10:2]}));
+	wire         v0_four = f4_on && win4 && px[1:0] == (wk_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
 	assign       z_rn = v0_ok && zon && !zclip;
 	assign       z_ra_full = z_addr;
 
