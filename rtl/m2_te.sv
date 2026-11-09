@@ -87,6 +87,7 @@ module m2_te (
 	logic [31:0] gc_master, gc_idata, gc_ddata, gc_dcntl, gc_iwp, gc_irp, gc_ien, gc_ist;
 	logic [2:0]  es_cntl;
 	logic [31:0] tm_cntl, tm_ldcntl, tm_addr, tm_pip, tm_tab, tm_lod0, tm_src, tm_count, tm_uvmax, tm_uvmask, tm_exp;
+	logic [31:0] tm_lod1, tm_lod2, tm_lod3; // the coarser levels' places in TRAM (bytes)
 	logic [31:0] tm_c0, tm_c1, tm_c2, tm_c3;
 	logic [31:0] tm_st01, tm_st23;      // a compressed load's source texel formats: types 0 and 1, 2 and 3 (16 bits each, the low half first)
 	logic [31:0] db_super, db_user, db_discard, db_fbclip, db_xwin, db_ywin, db_dctl, db_dbase, db_dstride, db_sctl, db_sbase, db_sstride,
@@ -815,13 +816,24 @@ module m2_te (
 	wire  [9:0]  umask = tm_uvmask[25:16], vmask = tm_uvmask[9:0];
 	// LOD 0's size, less 1 (the largest U and V): UVMAX is the coarsest level's (LODMAX's), each finer one twice it, and no more than UVMASK
 	// (the M2 emulator's addr_calc)
-	wire  [1:0]  lodmax = tm_addr[3:0] > 4'd3 ? 2'd3 : tm_addr[1:0];
-	wire  [13:0] u_full = 14'({1'b0, tm_uvmax[25:16]} + 11'd1) << lodmax, v_full = 14'({1'b0, tm_uvmax[9:0]} + 11'd1) << lodmax;
+	// Mip-maps only with TE_MIPMAP (the console's build): no Konami M2 game has a texture with LODMAX above 0, and without them the levels'
+	// logic goes (the level always LOD 0). LOD 0's size comes from LODMAX in every build (lod_max).
+	wire  [1:0]  lod_max = tm_addr[3:0] > 4'd3 ? 2'd3 : tm_addr[1:0];
+`ifdef TE_MIPMAP
+	wire  [1:0]  lodmax = lod_max;
+`else
+	wire  [1:0]  lodmax = 2'd0;
+`endif
+	wire  [13:0] u_full = 14'({1'b0, tm_uvmax[25:16]} + 11'd1) << lod_max, v_full = 14'({1'b0, tm_uvmax[9:0]} + 11'd1) << lod_max;
 	wire  [9:0]  umax = u_full > 14'({1'b0, umask} + 11'd1) ? umask : 10'(u_full - 14'd1);
 	wire  [9:0]  vmax = v_full > 14'({1'b0, vmask} + 11'd1) ? vmask : 10'(v_full - 14'd1);
 	// The filter: the magnify one, or with more than a texel between this pixel and the next, the minify one (the BDA spec's; MAME 0.289 only ever
-	// read the magnify filter). No level of detail yet: LOD 0 only.
+	// read the magnify filter). The level of detail: log2 of that step in texels, no more than LODMAX (the M2 emulator's lod_calc); a level's
+	// size is LOD 0's halved for each (UVMAX's doubling and UVMASK's halving both make it so), u and v in its texels are LOD 0's shifted down.
 	logic        t_min;
+	logic [1:0]  t_lod;
+	// (a pixel with no next one in its span keeps the last pixel's step, which can be another texture's: no more than this one's LODMAX)
+	wire  [1:0]  t_lodc = t_lod > lodmax ? lodmax : t_lod;
 	wire         t_bil = t_min ? tm_addr[11] : tm_addr[5];
 	wire         t_look = tm_addr[13] && !m_dtext;
 	wire         blen = db_user[6] && !m_dblend;
@@ -885,7 +897,14 @@ module m2_te (
 			tu <= t1_u; tv <= t1_v;
 			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
 			if (wk[8] && wk[7] && wy[8] == wy[7])
-				t_min <= $signed(t_du) > 15'sd16 || $signed(t_du) < -15'sd16 || $signed(t_dv) > 15'sd16 || $signed(t_dv) < -15'sd16;
+			begin
+				logic [14:0] au, av, st;    // (15 bits: the step's magnitude, -16384's too)
+				au = t_du[14] ? 15'(-t_du) : t_du;
+				av = t_dv[14] ? 15'(-t_dv) : t_dv;
+				st = au > av ? au : av;
+				t_min <= st > 15'd16;
+				t_lod <= st[14:7] != 8'd0 ? (lodmax > 2'd2 ? 2'd3 : lodmax) : st[6] ? (lodmax > 2'd1 ? 2'd2 : lodmax) : st[5] && lodmax != 2'd0 ? 2'd1 : 2'd0;
+			end
 			wk <= {wk[8:1], v0_go};
 			wy <= {wy[8:1], y[0]};
 
@@ -902,7 +921,8 @@ module m2_te (
 	// ---- texels: four asked for in T, a stage a clock from there -----------------------------------------------------------
 	logic        tk_i;
 	// (a sample with no fractions, or a point sample, is its one texel: much of what's drawn is copied, one to one)
-	wire         t_one = !t_bil || (tu[3:0] == 4'd0 && tv[3:0] == 4'd0);
+	wire  [13:0] tu_l = tu >> t_lodc, tv_l = tv >> t_lodc;   // (for the fractions)
+	wire         t_one = !t_bil || (tu_l[3:0] == 4'd0 && tv_l[3:0] == 4'd0);
 	assign       t_hold = v9_v && t_look && !t_one && !tk_i;
 	logic        a1_o, a2_o, a3_o, a4_o, a5_o, d0_o, d1_o, d2_o, e1_o, e2_o, e3_o;
 	logic        a1_v, a2_v, a3_v, a4_v, a5_v, d0_v, d1_v, d2_v;
@@ -910,14 +930,20 @@ module m2_te (
 	logic [7:0]  a1_f, a2_f, a3_f, a4_f, a5_f, d0_f, d1_f, d2_f;    // its fractions
 	logic [9:0]  a2_v0;
 	logic [20:0] a3_vo;
-	wire  [13:0] ku = tu + 14'h10;
-	wire  [13:0] kv = tv + (tk_i ? 14'h10 : 14'h0);
-	wire  [9:0]  k_u0 = tu[13:4] & umask, k_u1 = ku[13:4] & umask, k_v0 = kv[13:4] & vmask;
+	logic [1:0]  a2_lod, a3_lod;
+	logic [23:0] a4_base;               // the level's place in TRAM, beside a4_off
+	wire  [13:0] t_st = 14'h10 << t_lodc;    // the next texel, in LOD 0's
+	wire  [13:0] ku = tu + t_st;
+	wire  [13:0] kv = tv + (tk_i ? t_st : 14'h0);
+	wire  [9:0]  k_u0 = (tu[13:4] & umask) >> t_lodc, k_u1 = (ku[13:4] & umask) >> t_lodc, k_v0 = (kv[13:4] & vmask) >> t_lodc;
+	wire  [10:0] uw_l = (11'(umax) + 11'd1) >> t_lodc, vw_l = (11'(vmax) + 11'd1) >> t_lodc;   // the level's size
+	wire  [10:0] uw_a2 = (11'(umax) + 11'd1) >> a2_lod;
+	wire  [9:0]  umax_l = 10'(uw_l - 11'd1), vmax_l = 10'(vw_l - 11'd1);
 	logic [32:0] d3_a, d3_b;
 	te_fetch fetch_a (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
-		.u(k_u0), .umax, .vo(a3_vo), .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
+		.u(k_u0), .umax(umax_l), .vo(a3_vo), .lod0(a4_base), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
 	te_fetch fetch_b (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
-		.u(k_u1), .umax, .vo(a3_vo), .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
+		.u(k_u1), .umax(umax_l), .vo(a3_vo), .lod0(a4_base), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
 
 	// the first two, then all four for the channels to work through while the next pixel's arrive
 	logic [32:0] tx [0:1];
@@ -928,10 +954,13 @@ module m2_te (
 		if (pe)
 		begin
 			// (each valid is a clock behind the data it's named beside)
-			a1_f <= t_bil ? {tu[3:0], tv[3:0]} : 8'h00;
-			a2_v0 <= k_v0 < vmax ? k_v0 : vmax;
+			a1_f <= t_bil ? {tu_l[3:0], tv_l[3:0]} : 8'h00;
+			a2_v0 <= k_v0 < vmax_l ? k_v0 : vmax_l;
+			a2_lod <= t_lodc;
 			a2_f <= a1_f;
-			a3_vo <= 21'(a2_v0) * 21'({1'b0, umax} + 11'd1);
+			a3_vo <= 21'(a2_v0) * 21'(uw_a2);
+			a3_lod <= a2_lod;
+			a4_base <= a3_lod == 2'd0 ? tm_lod0[23:0] : a3_lod == 2'd1 ? tm_lod1[23:0] : a3_lod == 2'd2 ? tm_lod2[23:0] : tm_lod3[23:0];
 			a3_f <= a2_f;
 			a4_f <= a3_f;
 			a5_f <= a4_f;
@@ -983,9 +1012,25 @@ module m2_te (
 			if (e3_o) ts_c[2] <= one_q[32];
 			one_ra <= one_ra + 3'd1;
 		end
+`ifdef TE_LODDEBUG
+	// (the bench only: texels in the colour of the level they came from, as the M2 emulator's "Mip-map levels" debug setting: LOD 0 red,
+	// 1 green, 2 blue, 3 yellow; the level carried from a3_lod to where rt.. are, e4)
+	logic [1:0]  ldbg [1:10];
+	always_ff @(posedge clk)
+		if (pe)
+		begin
+			ldbg[1] <= a3_lod;
+			for (int i = 2; i <= 10; i++) ldbg[i] <= ldbg[i - 1];
+		end
+	wire  [23:0] ldbg_c = ldbg[10] == 2'd0 ? 24'hff2020 : ldbg[10] == 2'd1 ? 24'h20ff20 : ldbg[10] == 2'd2 ? 24'h2040ff : 24'hffff20;
+	wire  [7:0]  rt = t_look ? ldbg_c[23:16] : 8'h0;
+	wire  [7:0]  gt = t_look ? ldbg_c[15:8] : 8'h0;
+	wire  [7:0]  bt = t_look ? ldbg_c[7:0] : 8'h0;
+`else
 	wire  [7:0]  rt = t_look ? bx_r : 8'h0;
 	wire  [7:0]  gt = t_look ? bx_g : 8'h0;
 	wire  [7:0]  bt = t_look ? bl_oa[15:8] : 8'h0;
+`endif
 	wire  [7:0]  at = t_look ? bl_ob[15:8] : 8'h0;
 	wire         ts = t_look && ts_c[2];
 
@@ -2188,6 +2233,9 @@ module m2_te (
 								8'd3: tm_pip <= md(tm_pip, r_d, r_mode);
 								8'd4: tm_tab <= md(tm_tab, r_d, r_mode);
 								8'd5: tm_lod0 <= md(tm_lod0, r_d, r_mode);
+								8'd6: tm_lod1 <= md(tm_lod1, r_d, r_mode);
+								8'd7: tm_lod2 <= md(tm_lod2, r_d, r_mode);
+								8'd8: tm_lod3 <= md(tm_lod3, r_d, r_mode);
 								8'd9: tm_src <= md(tm_src, r_d, r_mode);
 								8'd10: tm_count <= md(tm_count, r_d, r_mode);
 								8'd11: tm_uvmax <= md(tm_uvmax, r_d, r_mode);
