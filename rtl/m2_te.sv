@@ -988,10 +988,34 @@ module m2_te (
 	assign c_wbe = d_mask;
 	assign c_wwait = old8;
 
-	// a source other than the place written, or something handed from pixel to pixel later than it's taken, or both of the colour RAM's
-	// reads: a pixel at a time
-	assign       serial = (sren && (db_sbase != db_dbase || db_soff[27:16] != 12'd0 || db_soff[11:0] != 12'd0 || db_sstride != db_dstride
-		|| db_sctl[0] != db_dctl[0] || (!db_dctl[0] && d_mask != 4'hf))) || (blen && db_da[1:0] == 2'd3);
+	// a source other than the place written (unless the two can't meet: below), or something handed from pixel to pixel later than it's
+	// taken, or both of the colour RAM's reads: a pixel at a time
+	//
+	// Where they can't meet: a pixel is only written inside the frame buffer clip (fbclipdis), so at destination offsets 0 up to
+	// (yclip - 1) * dstride + xclip pixels; the source is read at (yoff + y) * sstride + xoff + x for the same x and y. If those two byte
+	// ranges are apart, no pixel can read what another writes, and the source is read in the pipeline as the destination would be (Battle
+	// Tryst blends its stages' backdrops in from a picture elsewhere, most of a frame's pixels). A read for a pixel the clip then discards
+	// doesn't matter. Worked out over two clocks from the registers: a triangle's set-up takes longer.
+	logic signed [33:0] ov_dn, ov_sn0, ov_sn1;     // pixels: the destination's end; the source's first row's and last row's start
+	logic        ov_apart;
+	always_ff @(posedge clk)
+	begin
+		logic signed [33:0] dlo, dhi, slo, shi;
+		logic signed [13:0] yc, xc, yo, xo;
+		yc = 14'(db_fbclip[10:0]); xc = 14'(db_fbclip[26:16]);
+		yo = 14'($signed(db_soff[11:0])); xo = 14'($signed(db_soff[27:16]));
+		ov_dn <= 34'(yc - 14'sd1) * 34'(db_dstride[10:0]) + 34'(xc);
+		ov_sn0 <= 34'(yo) * 34'(db_sstride[10:0]) + 34'(xo);
+		ov_sn1 <= 34'(yo + yc - 14'sd1) * 34'(db_sstride[10:0]) + 34'(xo) + 34'(xc);
+		dlo = 34'(db_dbase);
+		dhi = 34'(db_dbase) + (db_dctl[0] ? ov_dn <<< 2 : ov_dn <<< 1);
+		slo = 34'(db_sbase) + (db_sctl[0] ? ov_sn0 <<< 2 : ov_sn0 <<< 1);
+		shi = 34'(db_sbase) + (db_sctl[0] ? ov_sn1 <<< 2 : ov_sn1 <<< 1);
+		// (apart, and neither past the address space's ends, where the core's sums would wrap)
+		ov_apart <= (shi <= dlo || slo >= dhi) && slo >= 34'sd0 && shi <= 34'sh100000000 && dhi <= 34'sh100000000 && yc > 14'sd0 && xc > 14'sd0;
+	end
+	assign       serial = (sren && !ov_apart && (db_sbase != db_dbase || db_soff[27:16] != 12'd0 || db_soff[11:0] != 12'd0 || db_sstride != db_dstride
+		|| db_sctl[0] != db_dctl[0])) || (sren && !db_dctl[0] && d_mask != 4'hf) || (blen && db_da[1:0] == 2'd3);
 
 	// valids
 	assign       p_any = v1_v || v2_v || v3_v || v4_v || v5_v || v6_v || v7_v || v8_v || v9_v || a1_e || a2_e || a3_e || a4_e || a5_e || d0_e || d1_e || d2_e
