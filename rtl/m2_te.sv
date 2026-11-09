@@ -108,6 +108,8 @@ module m2_te (
 	wire         m_dshade = gc_master[2];
 	wire         m_dblend = gc_master[3];
 	wire         m_dzbuf = gc_master[4];
+	wire         m_ddith = gc_master[5];   // DDith: no dither, whatever DBUSERGENCTL asks (BDA spec 6.10)
+	wire         dith_on = db_user[4] && !m_ddith;
 
 	// ---- TRAM and the palette --------------------------------------------------------------------------------------------
 	logic        ld_tram, ld_pip;
@@ -533,7 +535,7 @@ module m2_te (
 	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
 	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
 	logic        tri_flat, v1_four;
-	wire         f4_on = tri_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:4] == 7'd0 && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
+	wire         f4_on = tri_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:5] == 6'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
 	wire         v0_four = f4_on && px[1:0] == (scan_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
 	assign       z_rn = v0_ok && zon && !zclip;
 	assign       z_ra_full = z_addr;
@@ -1117,9 +1119,9 @@ module m2_te (
 			da6 <= da5; dsb6 <= dsb5; ts6 <= ts5; dx6 <= dx5;
 			taz6 <= taz5; tcz6 <= tcz5;
 			// T6: the ALU, the dither
-			ds_r <= db_user[4] ? dith(bl_ro, dith_v) : bl_ro;
-			ds_g <= db_user[4] ? dith(bl_go, dith_v) : bl_go;
-			ds_b <= db_user[4] ? dith(bl_bo, dith_v) : bl_bo;
+			ds_r <= dith_on ? dith(bl_ro, dith_v) : bl_ro;
+			ds_g <= dith_on ? dith(bl_go, dith_v) : bl_go;
+			ds_b <= dith_on ? dith(bl_bo, dith_v) : bl_bo;
 			da7 <= blen && db_da[1:0] == 2'd3 ? bl_ro : da6; dsb7 <= dsb6; ts7 <= ts6;
 			taz7 <= taz6; tcz7 <= tcz6;
 			// T7: on to the writes
