@@ -1,4 +1,4 @@
-// ppc_fpx: the float units (rtl/ppc_fpp.sv, rtl/ppc_fpu.sv), for one CPU or shared by two.
+// ppc_fpx: the float units (rtl/ppc_fps.sv), for one CPU or shared by two.
 //
 // Shared, the clocks are the CPUs' in turn (allow): an op can go only in its CPU's clock, so neither CPU's stall depends on the
 // other's that clock and nothing long runs between them. The pipeline takes an op a clock, so it's about half a clock an op; the
@@ -24,18 +24,15 @@ module ppc_fpx #(
 	fp_req_t r;
 	assign r = turn ? req1 : req0;
 
-	ppc_fpp_dp dp (
+	ppc_fps_dp dp (
 		.clk, .rst, .issue(r.issue), .cpu(turn), .op(r.op), .rn(r.rn), .a(r.a), .b(r.b), .c(r.c), .rd(r.rd), .i_bw(r.bw),
 		.res_a(res.res_a), .res_s(res.res_s), .res_w(res.res_w),
 		.ev(res.ev), .ecpu(res.ecpu), .erd(res.erd), .evl(res.evl), .wv(res.wv), .wcpu(res.wcpu), .wrd(res.wrd), .wval(res.wval)
 	);
 
 	logic f_busy, f_cpu;
-	// verilator lint_off UNUSEDSIGNAL
-	logic [3:0] f_crf;                  // (its compare: fcmpu is X's)
-	// verilator lint_on UNUSEDSIGNAL
-	ppc_fpu #(.FULL(1'b0)) fpu (
-		.clk, .rst, .start(r.start), .op(r.op), .rn(r.rn), .a(r.a), .b(r.b), .c(r.c), .done(res.fdone), .res(res.fres), .crf(f_crf)
+	ppc_fps_it fpu (
+		.clk, .rst, .start(r.start), .op(r.op), .rn(r.rn), .a(r.a), .b(r.b), .done(res.fdone), .res(res.fres)
 	);
 	always_ff @(posedge clk)
 		if (rst) f_busy <= 1'b0;

@@ -13,7 +13,7 @@ mkdir -p $B
 if [ -z "$NOBUILD" ]; then
 verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTH --top-module $TOP -Mdir $B \
   -CFLAGS "-O2 -std=c++17 -ffp-contract=off -frounding-math $DEF" \
-  $R/rtl/ppc_fpu_pkg.sv $R/rtl/ppc_fpu.sv $R/rtl/ppc_fpp.sv $R/rtl/ppc_fpx.sv $R/rtl/ppc_regs.sv $EXTRA $R/sim/ppccore/tb_ppccore.cpp $R/tools/ref/ppc602/ppc602.cpp \
+  $R/rtl/ppc_fpu_pkg.sv $R/rtl/ppc_fpu.sv $R/rtl/ppc_fps.sv $R/rtl/ppc_fpx.sv $R/rtl/ppc_regs.sv $EXTRA $R/sim/ppccore/tb_ppccore.cpp $R/tools/ref/ppc602/ppc602.cpp \
   > $B/build.log 2>&1 || { grep -E "%Error|error:" $B/build.log | head -40; exit 1; }
 fi
 $B/V$TOP "$@"

@@ -15,7 +15,7 @@ if [ -n "$RTL" ]; then
 	if [ -z "$NOBUILD" ]; then
 	verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTH --top-module $TOP -Mdir $BR -o tb_ppcreplay \
 	  -CFLAGS "-O2 -std=c++17 -ffp-contract=off -frounding-math -DWITH_RTL $DEF" \
-	  $R/rtl/ppc_fpu_pkg.sv $R/rtl/ppc_fpu.sv $R/rtl/ppc_fpp.sv $R/rtl/ppc_fpx.sv $R/rtl/ppc_regs.sv $R/rtl/$TOP.sv $R/sim/ppcreplay/tb_ppcreplay.cpp $R/tools/ref/ppc602/ppc602.cpp \
+	  $R/rtl/ppc_fpu_pkg.sv $R/rtl/ppc_fpu.sv $R/rtl/ppc_fps.sv $R/rtl/ppc_fpx.sv $R/rtl/ppc_regs.sv $R/rtl/$TOP.sv $R/sim/ppcreplay/tb_ppcreplay.cpp $R/tools/ref/ppc602/ppc602.cpp \
 	  > $BR/build.log 2>&1 || { grep -E "%Error|error:" $BR/build.log | head -40; exit 1; }
 	fi
 	EXE=$BR/tb_ppcreplay

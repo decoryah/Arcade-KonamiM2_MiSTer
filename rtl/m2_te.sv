@@ -11,6 +11,12 @@
 // Only the texture loads that the game's lists use: MMDMA, PIPLOAD. No compressed load (not seen in a list so far). A value that a span's
 // first pixel has made negative goes to the texture sums as if 0, where MAME's are unsigned.
 `default_nettype none
+
+// The Z buffer's size in 8 KB blocks, from the block a game's Z starts in (a qsf VERILOG_MACRO can change it). At 16 bits a pixel: Polystars 320 x 224,
+// Total Vice and Evil Night 320 x 240, all within 20. Heat of Eleven's Low Res 640 x 240 takes 38, Hell Night's 512 x 384 takes 48.
+`ifndef Z_BLOCKS
+`define Z_BLOCKS 20
+`endif
 module m2_te (
 	input  logic        clk,
 	input  logic        rst,
@@ -136,14 +142,14 @@ module m2_te (
 	logic [27:3] x_a;
 	logic [63:0] x_wd;
 	logic [7:0]  x_be;
-	wire         cc_sinks = db_dbase == db_zbase && 14'(cm_a[27:14] - db_zbase[27:14]) < 14'd10;
+	wire         cc_sinks = db_dbase == db_zbase && 15'(cm_a[27:13] - db_zbase[27:13]) < 15'(`Z_BLOCKS);
 	always_ff @(posedge clk)
 	begin
 		x_v <= cc_sink;
 		x_a <= cm_a[27:3]; x_wd <= cm_wd; x_be <= cm_be;
 	end
 	logic [15:0] z_q;
-	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:14]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
+	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:13]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
 		.w_n(z_wn), .w_na(z_wa[27:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall));
 	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
 		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_nfour(fc_q[74]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
@@ -596,14 +602,20 @@ module m2_te (
 	wire  [9:0]  umask = tm_uvmask[25:16], vmask = tm_uvmask[9:0];
 	wire  [9:0]  umax = tm_uvmax[25:16] & umask, vmax = tm_uvmax[9:0] & vmask;
 	wire  [1:0]  lod_sh = tm_addr[1:0];     // ((lodmax - lod) & 3, lod 0)
-	wire         t_bil = tm_addr[5];
+	// The filter: the magnify one, or with more than a texel between this pixel and the next, the minify one (the BDA spec's; MAME 0.289 only ever
+	// read the magnify filter). No level of detail yet: LOD 0 only.
+	logic        t_min;
+	wire         t_bil = t_min ? tm_addr[11] : tm_addr[5];
 	wire         t_look = tm_addr[13] && !m_dtext;
 	wire         blen = db_user[6] && !m_dblend;
 	wire         sren = db_user[5] && blen;
 	wire  [3:0]  d_mask = db_user[3:0];
 
 	// the walker's pixel
-	logic        v1_v, v2_v, v3_v, v4_v, v5_v, v6_v, v7_v;
+	logic        v1_v, v2_v, v3_v, v4_v, v5_v, v6_v, v7_v, v8_v, v9_v;
+	logic [9:1]  wk;                    // these stages hold a pixel the walker stepped to, kept or not: in a row, the next pixel along the span
+	logic [13:0] t0_u, t0_v, t1_u, t1_v;
+	wire  [14:0] t_du = {1'b0, t0_u} - {1'b0, t1_u}, t_dv = {1'b0, t0_v} - {1'b0, t1_v};
 	logic        v1_zc;
 	logic [15:0] v1_w16;
 	logic [27:0] v1_z, v1_d, v1_s;
@@ -649,8 +661,14 @@ module m2_te (
 			w_inv <= w_z3 ? 21'd0 : 21'((30'(w_fg3) * 30'(w_m2)) >> 8);
 			u_r <= 37'(u_c[4]) * 37'(w_inv);
 			v_r <= 37'(v_c[4]) * 37'(w_inv);
-			tu <= persp_off ? u_c[5][13:0] : u_sh[42:29];
-			tv <= persp_off ? v_c[5][13:0] : v_sh[42:29];
+			t0_u <= persp_off ? u_c[5][13:0] : u_sh[42:29];
+			t0_v <= persp_off ? v_c[5][13:0] : v_sh[42:29];
+			t1_u <= t0_u; t1_v <= t0_v;
+			tu <= t1_u; tv <= t1_v;
+			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
+			if (wk[8] && wk[7])
+				t_min <= $signed(t_du) > 15'sd16 || $signed(t_du) < -15'sd16 || $signed(t_dv) > 15'sd16 || $signed(t_dv) < -15'sd16;
+			wk <= {wk[8:1], v0_go};
 
 			u_c[0] <= persp_off ? 16'(uw_in >> np_sh) : u_nv[22:7];
 			v_c[0] <= persp_off ? 16'(vw_in >> np_sh) : v_nv[22:7];
@@ -666,7 +684,7 @@ module m2_te (
 	logic        tk_i;
 	// (a sample with no fractions, or a point sample, is its one texel: much of what's drawn is copied, one to one)
 	wire         t_one = !t_bil || (tu[3:0] == 4'd0 && tv[3:0] == 4'd0);
-	assign       t_hold = v7_v && t_look && !t_one && !tk_i;
+	assign       t_hold = v9_v && t_look && !t_one && !tk_i;
 	logic        a1_o, a2_o, a3_o, a4_o, a5_o, d0_o, d1_o, d2_o, e1_o, e2_o, e3_o;
 	logic        a1_v, a2_v, a3_v, a4_v, a5_v, d0_v, d1_v, d2_v;
 	logic        a1_e, a2_e, a3_e, a4_e, a5_e, d0_e, d1_e, d2_e;    // the pixel's last, or a pixel without any
@@ -691,7 +709,7 @@ module m2_te (
 		if (pe)
 		begin
 			// (each valid is a clock behind the data it's named beside)
-			a1_f <= {tu[3:0], tv[3:0]};
+			a1_f <= t_bil ? {tu[3:0], tv[3:0]} : 8'h00;
 			a2_v0 <= k_v0 < vmax ? k_v0 : vmax;
 			a2_f <= a1_f;
 			a3_vo <= 21'(a2_v0) * 21'({1'b0, umax} + 11'd1);
@@ -705,8 +723,8 @@ module m2_te (
 			if (d2_e && !d2_o)
 			begin
 				bk[0] <= tx[0]; bk[1] <= tx[1]; bk[2] <= d3_a; bk[3] <= d3_b;
-				bk_uf <= t_bil ? d2_f[7:4] : 4'd0;
-				bk_vf <= t_bil ? d2_f[3:0] : 4'd0;
+				bk_uf <= d2_f[7:4];
+				bk_vf <= d2_f[3:0];
 			end
 		end
 
@@ -948,13 +966,13 @@ module m2_te (
 		|| db_sctl[0] != db_dctl[0] || (!db_dctl[0] && d_mask != 4'hf))) || (blen && db_da[1:0] == 2'd3);
 
 	// valids
-	assign       p_any = v1_v || v2_v || v3_v || v4_v || v5_v || v6_v || v7_v || a1_e || a2_e || a3_e || a4_e || a5_e || d0_e || d1_e || d2_e
+	assign       p_any = v1_v || v2_v || v3_v || v4_v || v5_v || v6_v || v7_v || v8_v || v9_v || a1_e || a2_e || a3_e || a4_e || a5_e || d0_e || d1_e || d2_e
 		|| e1_v || e2_v || e3_v || e4_v || t2_v || t3_v || t4_v || t5_v || t6_v || t7_v || t8_v;
 
 	always_ff @(posedge clk)
 		if (rst)
 		begin
-			v1_v <= 1'b0; v2_v <= 1'b0; v3_v <= 1'b0; v4_v <= 1'b0; v5_v <= 1'b0; v6_v <= 1'b0; v7_v <= 1'b0;
+			v1_v <= 1'b0; v2_v <= 1'b0; v3_v <= 1'b0; v4_v <= 1'b0; v5_v <= 1'b0; v6_v <= 1'b0; v7_v <= 1'b0; v8_v <= 1'b0; v9_v <= 1'b0;
 			a1_v <= 1'b0; a2_v <= 1'b0; a3_v <= 1'b0; a4_v <= 1'b0; a5_v <= 1'b0; d0_v <= 1'b0; d1_v <= 1'b0; d2_v <= 1'b0;
 			a1_e <= 1'b0; a2_e <= 1'b0; a3_e <= 1'b0; a4_e <= 1'b0; a5_e <= 1'b0; d0_e <= 1'b0; d1_e <= 1'b0; d2_e <= 1'b0;
 			e1_v <= 1'b0; e2_v <= 1'b0; e3_v <= 1'b0; e4_v <= 1'b0;
@@ -968,15 +986,15 @@ module m2_te (
 		begin
 			if (pu)
 			begin
-				v1_v <= v0_ok; v2_v <= v1_ok; v3_v <= v2_v; v4_v <= v3_v; v5_v <= v4_v; v6_v <= v5_v; v7_v <= v6_v;
+				v1_v <= v0_ok; v2_v <= v1_ok; v3_v <= v2_v; v4_v <= v3_v; v5_v <= v4_v; v6_v <= v5_v; v7_v <= v6_v; v8_v <= v7_v; v9_v <= v8_v;
 				if (f_push) fw <= fw + 5'd1;
 			end
 			if (pe)
 			begin
-				a1_v <= v7_v && t_look;
-				a1_e <= v7_v && (!t_look || t_one || tk_i);
-				a1_o <= v7_v && t_look && t_one;
-				if (v7_v && t_look && !t_one) tk_i <= !tk_i;
+				a1_v <= v9_v && t_look;
+				a1_e <= v9_v && (!t_look || t_one || tk_i);
+				a1_o <= v9_v && t_look && t_one;
+				if (v9_v && t_look && !t_one) tk_i <= !tk_i;
 				a2_o <= a1_o; a3_o <= a2_o; a4_o <= a3_o; a5_o <= a4_o; d0_o <= a5_o; d1_o <= d0_o; d2_o <= d1_o;
 				e1_o <= d2_o; e2_o <= e1_o; e3_o <= e2_o;
 				a2_v <= a1_v; a3_v <= a2_v; a4_v <= a3_v; a5_v <= a4_v; d0_v <= a5_v; d1_v <= d0_v; d2_v <= d1_v;
@@ -2122,11 +2140,11 @@ module te_cache (
 	end
 endmodule
 
-// the Z buffer: 16 KB blocks from the one it starts in, ten of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
+// the Z buffer: 8 KB blocks from the one it starts in, Z_BLOCKS of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
 module te_z (
 	input  logic        clk,
 	input  logic        rst,
-	input  logic [27:14] z_base,
+	input  logic [27:13] z_base,
 	input  logic        x_v,
 	input  logic [27:3] x_a,
 	input  logic [63:0] x_wd,
@@ -2140,8 +2158,8 @@ module te_z (
 	input  logic [15:0] wd,             // in the clock after the address
 	output logic        w_stall
 );
-	function automatic logic [3:0] blk(input logic [27:14] a);
-		return a[17:14] - z_base[17:14];
+	function automatic logic [5:0] blk(input logic [27:13] a);
+		return a[18:13] - z_base[18:13];
 	endfunction
 	logic        w_v, w_done, w_win;
 	logic [27:1] w_a;
@@ -2156,15 +2174,15 @@ module te_z (
 			if (w_adv)
 			begin
 				w_v <= w_n; w_a <= w_na; w_done <= 1'b0;
-				w_win <= 14'(w_na[27:14] - z_base) < 14'd10;
+				w_win <= 15'(w_na[27:13] - z_base) < 15'(`Z_BLOCKS);
 			end
 			else if (w_go) w_done <= 1'b1;
 		end
-	logic [14:0] ra_r;
-	wire  [14:0] ra = r_adv ? {blk(r_na[27:14]), r_na[13:3]} : ra_r;
+	logic [15:0] ra_r;
+	wire  [15:0] ra = r_adv ? {blk(r_na[27:13]), r_na[12:3]} : ra_r;
 	always_ff @(posedge clk) ra_r <= ra;
 	wire  [7:0]  wbe = {w_a[2] && w_a[1], w_a[2] && w_a[1], w_a[2] && !w_a[1], w_a[2] && !w_a[1], !w_a[2] && w_a[1], !w_a[2] && w_a[1], !w_a[2] && !w_a[1], !w_a[2] && !w_a[1]};
-	wire  [14:0] wa = x_v ? {blk(x_a[27:14]), x_a[13:3]} : {blk(w_a[27:14]), w_a[13:3]};
+	wire  [15:0] wa = x_v ? {blk(x_a[27:13]), x_a[12:3]} : {blk(w_a[27:13]), w_a[12:3]};
 	wire  [63:0] d = x_v ? x_wd : {4{wd[7:0], wd[15:8]}};
 	wire  [7:0]  be = x_v ? x_be : (w_go && w_win) ? wbe : 8'h00;
 	logic [63:0] m;
@@ -2183,12 +2201,12 @@ endmodule
 module te_sh (
 	input  logic        clk,
 	input  logic        we,
-	input  logic [14:0] wa,
+	input  logic [15:0] wa,
 	input  logic [7:0]  wd,
-	input  logic [14:0] ra,
+	input  logic [15:0] ra,
 	output logic [7:0]  rd
 );
-	(* ramstyle = "no_rw_check" *) logic [7:0] mem [0:20479];
+	(* ramstyle = "no_rw_check" *) logic [7:0] mem [0:`Z_BLOCKS * 1024 - 1];
 	always_ff @(posedge clk)
 	begin
 		if (we) mem[wa] <= wd;
