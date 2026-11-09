@@ -407,7 +407,8 @@ module m2_boot #(
 	// verilator lint_off PINCONNECTEMPTY
 	// the board, from the download (kept through a reset)
 	logic        ram8 = 1'b0;
-	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) ram8 <= ld_data[0];
+	logic        cd_stream = 1'b0;      // (bit 1: the CD's data sectors from the mounted image, not memory)
+	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[1]; end
 	m2_bda bda
 	(
 		.clk, .rst, .vpos,
@@ -484,12 +485,25 @@ module m2_boot #(
 	// verilator lint_off UNUSEDSIGNAL
 	logic [15:0] cda_l, cda_r;
 	// verilator lint_on UNUSEDSIGNAL
+	// the mounted image's SD port: the audio's and the drive's (a data sector, when it streams them) in turn, each until its read's done
+	logic [31:0] cda_sd_lba, ata_sd_lba;
+	logic        cda_sd_rd, ata_sd_rd, sd_ack1;
+	logic [1:0]  sd_own;                // nobody, the audio, the drive
+	always_ff @(posedge clk)
+	begin
+		sd_ack1 <= sd_ack;
+		if (rst) sd_own <= 2'd0;
+		else if (sd_own == 2'd0) sd_own <= ata_sd_rd ? 2'd2 : cda_sd_rd ? 2'd1 : 2'd0;
+		else if (sd_ack1 && !sd_ack) sd_own <= 2'd0;
+	end
+	assign sd_lba = sd_own == 2'd2 ? ata_sd_lba : cda_sd_lba;
+	assign sd_rd = (sd_own == 2'd1 && cda_sd_rd) || (sd_own == 2'd2 && ata_sd_rd);
 	// (the image hasn't the 2 s between the data track and the first of the audio; the data track's own sectors are never played)
 	m2_cdda #(.LBA0(24'd150)) cdda
 	(
 		.clk, .rst, .tick(dac_tick),
 		.play(cd_play), .lba(cd_lba), .len(cd_len), .stop(cd_stop), .paused(cd_paused), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
-		.mounted(cd_mounted), .sd_lba, .sd_rd, .sd_ack, .sd_wr, .sd_d,
+		.mounted(cd_mounted), .sd_lba(cda_sd_lba), .sd_rd(cda_sd_rd), .sd_ack(sd_ack && sd_own == 2'd1), .sd_wr(sd_wr && sd_own == 2'd1), .sd_d,
 		.l(cda_l), .r(cda_r)
 	);
 	// the mix, as MAME's: the DSP at full, the CD at half and at the game's volume
@@ -542,6 +556,7 @@ module m2_boot #(
 		.a(u_pa[4:1]), .re(u_req && !u_we && u_ata), .we(u_req && u_we && u_ata), .wd(u_wdata[15:0]), .rd(atapi_rd), .intrq(cd_int),
 		.ata_rd(cd_rd), .ata_valid(cd_valid), .ata_d(cd_d),
 		.m_rd(ata_m_rd), .m_a(ata_m_a), .m_busy(ata_m_busy), .m_ready(ata_m_ready), .m_dout(ddr_dout),
+		.stream(cd_stream && cd_mounted), .sd_lba(ata_sd_lba), .sd_rd(ata_sd_rd), .sd_ack(sd_ack && sd_own == 2'd2), .sd_wr(sd_wr && sd_own == 2'd2), .sd_d,
 		.play(cd_play), .play_stop(cd_stop), .play_lba(cd_lba), .play_len(cd_len), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
 		.paused(cd_paused), .vol_l(cd_vol_l), .vol_r(cd_vol_r)
 	);
