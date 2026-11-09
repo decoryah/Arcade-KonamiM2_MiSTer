@@ -248,6 +248,8 @@ module m2_boot #(
 	logic [31:3] ata_m_a;
 	logic        dsp_m_rd, dsp_m_busy, dsp_m_ready;
 	logic [31:3] dsp_m_a;
+	logic        mpg_m_rd, mpg_m_busy, mpg_m_ready;
+	logic [31:3] mpg_m_a;
 	logic        te_m_rd, te_m_we, te_m_busy, te_m_ready, te_busy;
 	logic [23:0] v_rgb;
 	logic [31:3] te_m_a;
@@ -270,6 +272,7 @@ module m2_boot #(
 		.ata_rd(ata_m_rd), .ata_a(ata_m_a), .ata_busy(ata_m_busy), .ata_ready(ata_m_ready),
 		.dsp_rd(dsp_m_rd), .dsp_a(dsp_m_a), .dsp_busy(dsp_m_busy), .dsp_ready(dsp_m_ready),
 		.ymz_rd(ymz_m_rd), .ymz_a(ymz_m_a), .ymz_busy(ymz_m_busy), .ymz_ready(ymz_m_ready),
+		.mpg_rd(mpg_m_rd), .mpg_a(mpg_m_a), .mpg_busy(mpg_m_busy), .mpg_ready(mpg_m_ready),
 		.vdu_rd(vdu_m_rd), .vdu_four(vdu_m_four), .vdu_a(vdu_m_a), .vdu_busy(vdu_m_busy), .vdu_ready(vdu_m_ready),
 		.te_rd(te_m_rd), .te_we(te_m_we), .te_a(te_m_a), .te_wd(te_m_wd), .te_be(te_m_be), .te_busy(te_m_busy), .te_ready(te_m_ready),
 		.ddr_busy, .ddr_dout_ready,
@@ -392,10 +395,11 @@ module m2_boot #(
 	wire         u_ata = u_pa[31:24] == 8'h3f;
 	wire         u_te = u_pa[31:16] == 16'h0004;
 	wire         u_dsp = u_pa[31:16] == 16'h0006;
+	wire         u_mpg = u_pa[31:16] == 16'h0008;
 	wire         u_tk = u_pa[31:14] == 18'h0db00;       // 0x36c00000-0x36c03fff
 	wire         u_ymz = u_pa[31:4] == 28'h3e80000;     // 0x3e800000-0x3e80000f: the YMZ280B, on Evil Night's sub board
-	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd;
-	logic        dsp_int;
+	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd, mpg_rd;
+	logic        dsp_int, mpg_int;
 	logic [15:0] kio_rd, atapi_rd;
 	logic        cde_int;
 	logic        cd_rd, cd_valid, cd_int;
@@ -409,7 +413,7 @@ module m2_boot #(
 		.clk, .rst, .vpos,
 		.mcfg0(ram8 ? 32'h0000b400 : 32'h00004800),     // (5: 8 MB, 2: 4 MB, as MAME's ramsize_to_mcfg_field)
 		.a(u_pa[19:2]), .we(u_req && u_we && u_bda), .wd(u_wdata[31:0]), .rd(bda_rd),
-		.lines({te_int, 1'b0, dsp_int, 21'h0, cde_int, 3'b000}),
+		.lines({te_int, mpg_int, dsp_int, 21'h0, cde_int, 3'b000}),
 		.ppc1_int, .ppc2_int, .line()
 	);
 	// verilator lint_on PINCONNECTEMPTY
@@ -455,6 +459,13 @@ module m2_boot #(
 `else
 	assign rgb = v_rgb;
 `endif
+	// the MPEG unit: its control, no pictures (rtl/m2_mpeg.sv)
+	m2_mpeg mpeg
+	(
+		.clk, .rst,
+		.a(u_pa[9:2]), .we(u_req && u_we && u_mpg), .wd(u_wdata[31:0]), .rd(mpg_rd), .intr(mpg_int),
+		.m_rd(mpg_m_rd), .m_a(mpg_m_a), .m_busy(mpg_m_busy), .m_ready(mpg_m_ready), .m_dout(ddr_dout)
+	);
 	// 44.1 kHz, from 66.67 MHz
 	logic [10:0] dac_n;
 	logic [15:0] dac_l, dac_r;
@@ -613,6 +624,7 @@ module m2_boot #(
 			if (u_cde) w = cde_rd;
 			if (u_te) w = te_rd;
 			else if (u_dsp) w = dsp_rd;
+			else if (u_mpg) w = mpg_rd;
 			else if (u_bda) w = bda_rd;
 			if (u_kio) w = {2{kio_rd}};
 			if (u_ata) w = {2{atapi_rd}};
