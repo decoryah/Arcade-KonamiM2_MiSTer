@@ -31,12 +31,37 @@ module ppc_regs #(
 	begin : g_rd
 		logic [W-1:0] q0, q1;
 		logic sel;
-		ppc_ram #(.W(W), .AW(AW)) b0 (.clk, .we(we0), .wa(wa0), .wd(wd0), .ra(ra[i]), .rd(q0));
-		ppc_ram #(.W(W), .AW(AW)) b1 (.clk, .we(we1), .wa(wa1), .wd(wd1), .ra(ra[i]), .rd(q1));
+		ppc_ram_s #(.W(W), .AW(AW)) b0 (.clk, .we(we0), .wa(wa0), .wd(wd0), .ra(ra[i]), .rd(q0));
+		ppc_ram_s #(.W(W), .AW(AW)) b1 (.clk, .we(we1), .wa(wa1), .wd(wd1), .ra(ra[i]), .rd(q1));
 		always_ff @(posedge clk) sel <= lvt[ra[i]];
 		assign rd[i] = sel ? q1 : q0;
 	end
 	endgenerate
+endmodule
+
+// A small memory: ppc_ram, or with SMALL_MEMS the logic's small memories. Those leave block RAM for a big Z buffer (Heat of Eleven's build)
+// and cost logic for their output registers, so the default stays in block RAM.
+module ppc_ram_s #(
+	parameter int W = 32,
+	parameter int AW = 5
+) (
+	input  logic          clk,
+	input  logic          we,
+	input  logic [AW-1:0] wa,
+	input  logic [W-1:0]  wd,
+	input  logic [AW-1:0] ra,
+	output logic [W-1:0]  rd
+);
+`ifdef SMALL_MEMS
+	(* ramstyle = "MLAB, no_rw_check" *) logic [W-1:0] mem [0:(1 << AW) - 1];
+	always_ff @(posedge clk)
+	begin
+		if (we) mem[wa] <= wd;
+		rd <= mem[ra];
+	end
+`else
+	ppc_ram #(.W(W), .AW(AW)) m (.clk, .we, .wa, .wd, .ra, .rd);
+`endif
 endmodule
 
 // one bank's copy: a simple dual-port RAM, the read registered

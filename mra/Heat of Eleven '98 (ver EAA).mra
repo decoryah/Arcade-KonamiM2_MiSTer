@@ -1,0 +1,38 @@
+<misterromdescription>
+    <name>Heat of Eleven '98 (ver EAA)</name>
+    <setname>heatof11</setname>
+    <mameversion>0289</mameversion>
+    <year>1998</year>
+    <manufacturer>Konami</manufacturer>
+    <rbf>KonamiM2Heat</rbf>
+
+    <!--
+      Heat of Eleven's own build (KonamiM2.qsf's Heat of Eleven lines, its 38 blocks of Z), as KonamiM2Heat_<date>.rbf in
+      _Arcade/cores: not KonamiM2_..., which the other MRAs' "KonamiM2" would also find.
+
+      As Tobe! Polystars' MRA, with the 636a01 boot ROM, RAM 2 x 8 MB and an M48T58 (dallas.5e): index 3 is its 8 KB, then
+      a byte for the board, whose bit 0 asks for the larger RAM. The core shows the game's low resolution.
+
+      heatof11_cd.zip isn't in a MAME set: make it from the set's 703eaa02.chd with tools/cdimage.py, the file in it named
+      heatof11_cd.bin (25 MB), and put it beside heatof11.zip. The music streams from heatof11_full.bin in games/heatof11.
+    -->
+
+    <file delay="1" type="s" index="0" path="heatof11_full.bin"/>
+
+    <rom index="0" zip="heatof11.zip" md5="964a0026327759767647049c30781af6" address="0x30000000">
+        <part name="636a01.8q" crc="7b1dc738"/>
+    </rom>
+    <rom index="1" zip="heatof11_cd.zip" md5="none" address="0x32000000">
+        <part name="heatof11_cd.bin"/>
+    </rom>
+    <rom index="2" zip="heatof11.zip" md5="none">
+        <part name="93c46.7k"/>
+    </rom>
+    <!-- the EEPROM, the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
+    <nvram index="2" size="128"/>
+
+    <rom index="3" zip="heatof11.zip" md5="none">
+        <part name="dallas.5e"/>
+        <part>01</part>
+    </rom>
+</misterromdescription>

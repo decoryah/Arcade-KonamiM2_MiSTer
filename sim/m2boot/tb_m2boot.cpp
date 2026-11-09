@@ -51,7 +51,7 @@ int main(int argc, char **argv)
 	bool board = false;
 	std::map<uint32_t, uint32_t> hist[2];
 	FILE *fata = nullptr;                  // -ata file: each access to the CD drive, as work/lua/cd_ata.lua logs MAME's
-	std::vector<uint8_t> cd, ee;
+	std::vector<uint8_t> cd, ee, tk;
 	FILE *fpc = nullptr;
 	long npc = 0;
 	for (int i = 3; i < argc; i++)
@@ -67,6 +67,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-board")) board = true;                             // memory about as the board's
 		else if (!strcmp(argv[i], "-hist") && i + 1 < argc) hist_from = atoi(argv[++i]); // from this frame, every 120 frames, the PCs most retired
 		else if (!strcmp(argv[i], "-ee") && i + 1 < argc) ee = slurp(argv[++i]);
+		else if (!strcmp(argv[i], "-tk") && i + 1 < argc) { tk = slurp(argv[++i]); tk.push_back(1); }  // the M48T58, then the board's byte: RAM 2 x 8 MB
 		else if (!strcmp(argv[i], "-ata") && i + 1 < argc) fata = fopen(argv[++i], "w");
 		else if (!strcmp(argv[i], "-full") && i + 1 < argc) ffull = fopen(argv[++i], "rb");     // the disc's raw image, as the SD card has it
 		else if (!strcmp(argv[i], "-audio") && i + 1 < argc) faudio = fopen(argv[++i], "wb");   // what comes out: 16-bit stereo at 44.1 kHz
@@ -247,6 +248,13 @@ int main(int argc, char **argv)
 	for (size_t i = 0; i < ee.size(); i++)
 	{
 		t.ld_wr = 1; t.ld_addr = uint32_t(i); t.ld_data = ee[i];
+		clock();
+		t.ld_wr = 0;
+	}
+	t.ld_sel = 3;
+	for (size_t i = 0; i < tk.size(); i++)
+	{
+		t.ld_wr = 1; t.ld_addr = uint32_t(i); t.ld_data = tk[i];
 		clock();
 		t.ld_wr = 0;
 	}

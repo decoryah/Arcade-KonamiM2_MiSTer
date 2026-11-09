@@ -20,7 +20,8 @@ module m2_boot #(
 	input  logic        clk,
 	input  logic        rst,
 
-	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM
+	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM,
+	// 3 the M48T58's 8 KB then a byte for the board (bit 0: RAM 2 x 8 MB, not 2 x 4 MB); a game without an M48T58 has no index 3
 	input  logic        ld_wr,
 	input  logic [1:0]  ld_sel,
 	input  logic [24:0] ld_addr,
@@ -273,7 +274,7 @@ module m2_boot #(
 	// ---- the download -------------------------------------------------------------------------------------------------
 	assign ld_wait = ld_pend;
 	always_ff @(posedge clk)
-		if (ld_wr && ld_sel != 2'd2) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; ld_cd <= ld_sel[0]; end
+		if (ld_wr && !ld_sel[1]) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; ld_cd <= ld_sel[0]; end
 		else if (!ddr_busy) ld_pend <= 1'b0;
 
 	// ---- the registers: one CPU's access at a time: the choice, the access, the answer, a clock each ----------------------
@@ -328,6 +329,7 @@ module m2_boot #(
 	wire         u_ata = u_pa[31:24] == 8'h3f;
 	wire         u_te = u_pa[31:16] == 16'h0004;
 	wire         u_dsp = u_pa[31:16] == 16'h0006;
+	wire         u_tk = u_pa[31:14] == 18'h0db00;       // 0x36c00000-0x36c03fff
 	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd;
 	logic        dsp_int;
 	logic [15:0] kio_rd, atapi_rd;
@@ -335,9 +337,13 @@ module m2_boot #(
 	logic        cd_rd, cd_valid, cd_int;
 	logic [15:0] cd_d;
 	// verilator lint_off PINCONNECTEMPTY
+	// the board, from the download (kept through a reset)
+	logic        ram8 = 1'b0;
+	always_ff @(posedge clk) if (ld_wr && ld_sel == 2'd3 && ld_addr == 25'h2000) ram8 <= ld_data[0];
 	m2_bda bda
 	(
 		.clk, .rst, .vpos,
+		.mcfg0(ram8 ? 32'h0000b400 : 32'h00004800),     // (5: 8 MB, 2: 4 MB, as MAME's ramsize_to_mcfg_field)
 		.a(u_pa[19:2]), .we(u_req && u_we && u_bda), .wd(u_wdata[31:0]), .rd(bda_rd),
 		.lines({te_int, 1'b0, dsp_int, 21'h0, cde_int, 3'b000}),
 		.ppc1_int, .ppc2_int, .line()
@@ -421,6 +427,16 @@ module m2_boot #(
 		.play(cd_play), .play_stop(cd_stop), .play_lba(cd_lba), .play_len(cd_len), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
 		.paused(cd_paused), .vol_l(cd_vol_l), .vol_r(cd_vol_r)
 	);
+	// the M48T58: 8 KB, a byte in bits 15:8 of each 16-bit address. Read from the address coming up, as the DSP's are. Its clock doesn't run: its
+	// registers read as the memory they're in
+	logic [7:0]  tk_q;
+	wire         tk_ld = ld_wr && ld_sel == 2'd3 && !ld_addr[13];
+	wire         tk_we = u_req && u_we && u_tk;
+	ppc_ram #(.W(8), .AW(13)) tk
+	(
+		.clk, .we(tk_ld || tk_we), .wa(tk_ld ? ld_addr[12:0] : u_pa[13:1]), .wd(tk_ld ? ld_data : u_wdata[15:8]),
+		.ra(c_u_pa[n_s][13:1]), .rd(tk_q)
+	);
 	m2_kio kio
 	(
 		.clk, .rst,
@@ -454,8 +470,9 @@ module m2_boot #(
 			else if (u_bda) w = bda_rd;
 			if (u_kio) w = {2{kio_rd}};
 			if (u_ata) w = {2{atapi_rd}};
+			if (u_tk) w = {2{tk_q, 8'h00}};
 			if (!u_we && fixed_rd(u_pa[31:2], u_s, fv)) w = fv;
-			if (u_we && (u_cde || u_bda || u_kio || u_ata || u_dsp)) a_w <= 32'h0;
+			if (u_we && (u_cde || u_bda || u_kio || u_ata || u_dsp || u_tk)) a_w <= 32'h0;
 			else if (u_we)
 			begin
 				for (int j = 0; j < 4; j++)

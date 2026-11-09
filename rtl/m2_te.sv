@@ -198,12 +198,23 @@ module m2_te (
 	wire         ms_have = ms_wpd != ms_rp;
 	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have;
 	// (a whole word in one clock, when source and place are in step and it's the texture memory)
-	wire         ms_two = ms_skip == 2'd0 && !mm_pip && !mm_src[2] && !mm_dst[2] && mm_n >= 28'd8;
+	wire         ms_two = ms_skip == 2'd0 && !mm_pip && mm_src[2:0] == 3'd0 && !mm_dst[2] && mm_n >= 28'd8;
 	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2] || ms_two);
 	wire [4:0]   ms_rn = ms_rp + 5'(ms_pop);
 	logic [63:0] ms_q;
 	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && m_ready), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
 	wire [31:0]  ms_raw = mm_src[2] ? ms_q[63:32] : ms_q[31:0];
+	// a source not on a word boundary: each word out is the end of one read and the start of the next (the first byte's in bits 7:0)
+	logic        ms_arm;
+	logic [31:0] ms_prev;
+	logic [31:0] ms_w;
+	always_comb
+		case (mm_src[1:0])
+			2'd1: ms_w = {ms_raw[7:0], ms_prev[31:8]};
+			2'd2: ms_w = {ms_raw[15:0], ms_prev[31:16]};
+			2'd3: ms_w = {ms_raw[23:0], ms_prev[31:24]};
+			default: ms_w = ms_raw;
+		endcase
 
 	assign m_other = lb_rd || lb_wait || st == T_MM;
 	// (the list goes before the caches' write-backs, between their lines)
@@ -288,7 +299,7 @@ module m2_te (
 	logic        vw_e;
 	logic [5:0]  vw_a, vr_a;
 	logic [31:0] vw_d, vr_q;
-	ppc_ram #(.W(32), .AW(6)) vram (.clk, .we(vw_e), .wa(vw_a), .wd(vw_d), .ra(vr_a), .rd(vr_q));
+	ppc_ram_s #(.W(32), .AW(6)) vram (.clk, .we(vw_e), .wa(vw_a), .wd(vw_d), .ra(vr_a), .rd(vr_q));
 	logic signed [13:0] xi [0:2];
 	logic signed [13:0] yi [0:2];
 	logic [7:0]  wexp [0:2];
@@ -822,7 +833,7 @@ module m2_te (
 	logic [7:0]  sr, sg, sb, sa;        // the source pixel
 	logic        dsb_s;                 // its destination bit
 	logic [7:0]  tp_a;                  // MAME's texpath.a and blend.r keep what they had when they aren't set
-	logic [7:0]  bl_r_old;
+	logic        taz5, taz6, taz7, tcz5, tcz6, tcz7;    // the texture unit's alpha (after the clamp controls), its colour: zero, for the discards
 
 	logic [7:0]  tp_an;
 	always_comb
@@ -870,7 +881,7 @@ module m2_te (
 		return cmp ? ~v : v;
 	endfunction
 
-	// the alpha's constant and the destination bit: what select_alpha_dsb does before the colours (and their coefficients) see it
+	// the alpha's constant and the destination bit
 	wire         da_sel = db_da[3:2] == 2'd0 ? ts4 : db_da[3:2] == 2'd1 ? dsb_s : 1'b0;
 	wire  [7:0]  da_const = da_sel ? db_dac[7:0] : db_dac[23:16];
 	logic        dsb_n;
@@ -882,8 +893,9 @@ module m2_te (
 				default: dsb_n = dsb_s;
 			endcase
 		else dsb_n = ts4;
-	wire         tcs = db_tmul[3:2] == 2'd0 ? ts4 : db_tmul[3:2] == 2'd1 ? dsb_n : 1'b0;
-	wire         scs = db_smul[3:2] == 2'd0 ? ts4 : db_smul[3:2] == 2'd1 ? dsb_n : 1'b0;
+	// (the colour coefficients' constants go by the source pixel's destination bit, not the one to be written: BDA spec)
+	wire         tcs = db_tmul[3:2] == 2'd0 ? ts4 : db_tmul[3:2] == 2'd1 ? dsb_s : 1'b0;
+	wire         scs = db_smul[3:2] == 2'd0 ? ts4 : db_smul[3:2] == 2'd1 ? dsb_s : 1'b0;
 	wire  [31:0] tcc = tcs ? db_tc1 : db_tc0;
 	wire  [31:0] scc = scs ? db_sc1 : db_sc0;
 
@@ -941,8 +953,9 @@ module m2_te (
 
 	wire         c_zp = fc_q[73], c_zb = fc_q[72];
 	wire         ssbdis = db_discard[2] && !ts7;
-	wire         adis = db_discard[0] && da7 == 8'd0;
-	wire         rgbdis = db_discard[1] && ds_r == 8'd0 && ds_g == 8'd0 && ds_b == 8'd0;
+	// (the texture unit's output, not the blend's: BDA spec)
+	wire         adis = db_discard[0] && taz7;
+	wire         rgbdis = db_discard[1] && tcz7;
 	wire         dis = ssbdis || adis || rgbdis;
 	wire         c_wr = t7_v && !dis && c_zp && db_super[0];
 	wire         old7 = c_wr && !db_dctl[0] && d_mask != 4'hf;
@@ -1032,7 +1045,7 @@ module m2_te (
 			case (tm_tab[16:15])
 				2'd0: ti_a <= i_d[7:0];
 				2'd1: ti_a <= t_d[7:0];
-				2'd2: ti_a <= t_mul ? tbl_a : 8'h0;
+				2'd2: ti_a <= tbl_a;     // (its own multiplier, whichever the colours' function)
 				default: ti_a <= 8'h0;
 			endcase
 			ts3 <= ts2;
@@ -1045,17 +1058,16 @@ module m2_te (
 			else if (db_sctl[0])
 			begin
 				sr <= c_q[23:16]; sg <= c_q[15:8]; sb <= c_q[7:0];
-				sa <= {c_q[30:24], db_sctl[1] && c_q[29]};
+				sa <= {c_q[30:24], db_sctl[1] && c_q[30]};
 				dsb_s <= c_q[31];
 			end
 			else
 			begin
-				// (MAME's bit, a byte, can't hold it)
 				sr <= {c_q[14:10], db_sctl[1] ? c_q[14:12] : 3'b000};
 				sg <= {c_q[9:5], db_sctl[1] ? c_q[9:7] : 3'b000};
 				sb <= {c_q[4:0], db_sctl[1] ? c_q[4:2] : 3'b000};
 				sa <= 8'h0;
-				dsb_s <= 1'b0;
+				dsb_s <= c_q[15];
 			end
 			// T4: the operands
 			if (t4_v) tp_a <= tp_an;
@@ -1064,15 +1076,17 @@ module m2_te (
 					2'd0: da5 <= tp_an;
 					2'd1: da5 <= da_const;
 					2'd2: da5 <= sa;
-					default: da5 <= bl_r_old;
+					default: da5 <= 8'h0;   // (this pixel's red ALU, T6)
 				endcase
 			else da5 <= tp_an;
 			dsb5 <= dsb_n;
+			taz5 <= tp_an == 8'd0;
+			tcz5 <= td_r == 8'd0 && td_g == 8'd0 && td_b == 8'd0;
 			ts5 <= ts4;
 			dx5 <= dx4;
-			o_tr <= blen ? tin(db_tmul[7:6], td_r, db_constin[23:16], sr, td_a, db_tmul[0]) : td_r;
-			o_tg <= blen ? tin(db_tmul[7:6], td_g, db_constin[15:8], sg, td_a, db_tmul[0]) : td_g;
-			o_tb <= blen ? tin(db_tmul[7:6], td_b, db_constin[7:0], sb, td_a, db_tmul[0]) : td_b;
+			o_tr <= blen ? tin(db_tmul[7:6], td_r, db_constin[23:16], sr, tp_an, db_tmul[0]) : td_r;
+			o_tg <= blen ? tin(db_tmul[7:6], td_g, db_constin[15:8], sg, tp_an, db_tmul[0]) : td_g;
+			o_tb <= blen ? tin(db_tmul[7:6], td_b, db_constin[7:0], sb, tp_an, db_tmul[0]) : td_b;
 			o_sr <= sin(db_smul[7:6], sr, db_constin[23:16], td_r, sa, db_smul[0]);
 			o_sg <= sin(db_smul[7:6], sg, db_constin[15:8], td_g, sa, db_smul[0]);
 			o_sb <= sin(db_smul[7:6], sb, db_constin[7:0], td_b, sa, db_smul[0]);
@@ -1090,12 +1104,13 @@ module m2_te (
 			b_sg <= pick(o_dg, o_sg, o_dg * o_sg);
 			b_sb <= pick(o_db, o_sb, o_db * o_sb);
 			da6 <= da5; dsb6 <= dsb5; ts6 <= ts5; dx6 <= dx5;
+			taz6 <= taz5; tcz6 <= tcz5;
 			// T6: the ALU, the dither
-			if (t6_v) bl_r_old <= bl_ro;
 			ds_r <= db_user[4] ? dith(bl_ro, dith_v) : bl_ro;
 			ds_g <= db_user[4] ? dith(bl_go, dith_v) : bl_go;
 			ds_b <= db_user[4] ? dith(bl_bo, dith_v) : bl_bo;
-			da7 <= da6; dsb7 <= dsb6; ts7 <= ts6;
+			da7 <= blen && db_da[1:0] == 2'd3 ? bl_ro : da6; dsb7 <= dsb6; ts7 <= ts6;
+			taz7 <= taz6; tcz7 <= tcz6;
 			// T7: on to the writes
 			ds8_r <= ds_r; ds8_g <= ds_g; ds8_b <= ds_b;
 			da8 <= da7; dsb8 <= dsb7;
@@ -1212,6 +1227,7 @@ module m2_te (
 					mm_src <= tm_src; mm_dst <= tm_lod0[13:0]; mm_n <= tm_count[27:0];
 					ms_a <= tm_src[31:5]; ms_left <= 29'(tm_count[27:0]) + 29'(tm_src[4:0]); ms_skip <= tm_src[4:3];
 					ms_req <= 5'd0; ms_wp <= 5'd0; ms_wpd <= 5'd0; ms_rp <= 5'd0;
+					ms_arm <= tm_src[1:0] != 2'd0;
 					if (tm_ldcntl[9:8] == 2'd1)
 					begin
 						mm_pip <= !tm_cntl[2];
@@ -1238,9 +1254,16 @@ module m2_te (
 					else if (ms_take)
 					begin
 						if (ms_skip != 2'd0) ms_skip <= ms_skip - 2'd1;
+						else if (ms_arm)
+						begin
+							ms_arm <= 1'b0;
+							ms_prev <= ms_raw;
+							mm_src <= mm_src + 32'd4;
+						end
 						else
 						begin
-							ld_d <= mm_pip ? {ms_raw[7:0], ms_raw[15:8], ms_raw[23:16], ms_raw[31:24]} : ms_raw;
+							ms_prev <= ms_raw;
+							ld_d <= mm_pip ? {ms_w[7:0], ms_w[15:8], ms_w[23:16], ms_w[31:24]} : ms_w;
 							ld_d2 <= ms_q[63:32];
 							ld_two <= ms_two;
 							ld_ta <= mm_dst[13:2];
@@ -2206,12 +2229,22 @@ module te_sh (
 	input  logic [15:0] ra,
 	output logic [7:0]  rd
 );
-	(* ramstyle = "no_rw_check" *) logic [7:0] mem [0:`Z_BLOCKS * 1024 - 1];
+`ifdef VERILATOR
+	logic [7:0] mem [0:`Z_BLOCKS * 1024 - 1];
 	always_ff @(posedge clk)
 	begin
 		if (we) mem[wa] <= wd;
 		rd <= mem[ra];
 	end
+`else
+	// (instantiated: Quartus turns what it infers past about 510 blocks into registers, and a big Z takes it there)
+	localparam int AW = $clog2(`Z_BLOCKS * 1024);
+	altsyncram #(
+		.operation_mode("DUAL_PORT"), .width_a(8), .widthad_a(AW), .numwords_a(`Z_BLOCKS * 1024), .width_b(8), .widthad_b(AW), .numwords_b(`Z_BLOCKS * 1024),
+		.address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
+		.read_during_write_mode_mixed_ports("DONT_CARE"), .power_up_uninitialized("TRUE")
+	) ram (.clock0(clk), .wren_a(we), .address_a(wa[AW-1:0]), .data_a(wd), .address_b(ra[AW-1:0]), .q_b(rd));
+`endif
 endmodule
 
 // a texel from its U, the row's offset given (T+3): its own memories, so a pixel's four take two clocks
@@ -2242,7 +2275,8 @@ module te_fetch (
 	wire  [3:0]  texp_c = exp[3:0];
 	wire  [3:0]  texp_a = exp[7:4];
 	wire         texp_ssb = exp[9], texp_col = exp[10], texp_alp = exp[11], texp_lit = exp[12];
-	wire  [5:0]  tdepth = (texp_col ? {2'b00, texp_c} : 6'd0) + (texp_alp ? {2'b00, texp_a} : 6'd0) + (texp_ssb ? 6'd1 : 6'd0);
+	// (a literal texel's colour is three components)
+	wire  [5:0]  tdepth = (texp_col ? (texp_lit ? 6'(texp_c) * 6'd3 : 6'(texp_c)) : 6'd0) + (texp_alp ? {2'b00, texp_a} : 6'd0) + (texp_ssb ? 6'd1 : 6'd0);
 	logic [11:0] t_ra;
 	logic [31:0] t_q;
 	logic [7:0]  p_ra;
@@ -2312,7 +2346,7 @@ module te_fetch (
 			3'd2: d3_os = pv[31];
 			default: d3_os = 1'b0;
 		endcase
-		c = d3_os ? c1 : c0;
+		c = d3_st ? c1 : c0;
 		case (pip_c[10:8])
 			3'd0: begin d3_or = c[23:16]; d3_og = c[15:8]; d3_ob = c[7:0]; end
 			3'd1: begin d3_or = d3_r; d3_og = d3_g; d3_ob = d3_b; end
@@ -2339,7 +2373,8 @@ module te_fetch (
 			t_sel <= t_ra[0];
 			a5_bit <= a4_ad[4:0];
 			d1_bit <= a5_bit;
-			d1_sh <= (t_q >> {d1_bit[4:3], 3'b000}) >> (d1_bit[2:0] ^ (3'd0 - tdepth[2:0]));
+			// (the word's big-endian: a texel's bits run from its first bit down, whatever its size, and it ends in bit 0)
+			d1_sh <= {t_q[7:0], t_q[15:8], t_q[23:16], t_q[31:24]} >> (6'd32 - 6'(d1_bit) - tdepth);
 			d2_r <= d1_rt; d2_g <= d1_gt; d2_b <= d1_bt; d2_at <= d1_at; d2_st <= d1_st;
 			p_ra <= pip_c[7:0] + d1_idx;
 			d3_r <= d2_r; d3_g <= d2_g; d3_b <= d2_b; d3_at <= d2_at; d3_st <= d2_st;

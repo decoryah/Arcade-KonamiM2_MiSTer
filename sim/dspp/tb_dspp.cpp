@@ -335,6 +335,8 @@ static void run_random(int prog, long n)
 	t->pre_a = t->a = 0x6070 >> 2; t->we = 1; t->wd = 1; tick(); t->we = 0;     // (it starts the clock after)
 	long ins = 0;
 	bool frame_last = true;
+	uint64_t frame_clock = 0;
+	uint32_t last_t = 0;
 	while (ins < n)
 	{
 		tr_on = prog == tr_p;
@@ -344,8 +346,10 @@ static void run_random(int prog, long n)
 		t->a = 0x400 + 0x3ef; t->pre_a = 0x400 + 0x3ef; t->wd = 0; t->we = poke;
 		t->dac_tick = 0;
 		t->eval();
-		if (R->m2_dspp__DOT__s == 0 && !poke)
+		if ((R->m2_dspp__DOT__s == 0 || R->m2_dspp__DOT__w_then_op) && !poke)
 		{
+			// (an instruction starting on the clock of the last one's write: what that write sets shows a clock later, checked below)
+			const bool wthen = R->m2_dspp__DOT__w_then_op;
 			uint32_t pc = R->m2_dspp__DOT__pc, acc = R->m2_dspp__DOT__acc & 0xfffff;
 			if (pc != m.pc) fail("pc", pc, m.pc, prog, ins);
 			if (acc != (uint32_t(m.acc) & 0xfffff)) fail("acc", acc, uint32_t(m.acc) & 0xfffff, prog, ins);
@@ -353,9 +357,9 @@ static void run_random(int prog, long n)
 			uint32_t fm = m.c << 4 | m.z << 3 | m.n << 2 | m.v << 1 | m.x;
 			if (fl != fm) fail("flags", fl, fm, prog, ins);
 			if (R->m2_dspp__DOT__sp != m.sp) fail("sp", R->m2_dspp__DOT__sp, m.sp, prog, ins);
-			if (uint32_t(R->m2_dspp__DOT__o_count) * 2 != m.ocount) fail("out count", R->m2_dspp__DOT__o_count * 2, m.ocount, prog, ins);
-			if (R->m2_dspp__DOT__partial_int != m.partial) fail("int", R->m2_dspp__DOT__partial_int, m.partial, prog, ins);
-			if (R->m2_dspp__DOT__up_time != m.time) fail("time", R->m2_dspp__DOT__up_time, m.time, prog, ins);
+			if (!wthen && uint32_t(R->m2_dspp__DOT__o_count) * 2 != m.ocount) fail("out count", R->m2_dspp__DOT__o_count * 2, m.ocount, prog, ins);
+			if (!wthen && R->m2_dspp__DOT__partial_int != m.partial) fail("int", R->m2_dspp__DOT__partial_int, m.partial, prog, ins);
+			if (!wthen && R->m2_dspp__DOT__up_time != m.time) fail("time", R->m2_dspp__DOT__up_time, m.time, prog, ins);
 			if (bool(R->m2_dspp__DOT__wb_v) != (m.wb >= 0)) fail("wb", R->m2_dspp__DOT__wb_v, m.wb, prog, ins);
 			if (m.wb >= 0 && R->m2_dspp__DOT__wb_a != uint32_t(m.wb)) fail("wb a", R->m2_dspp__DOT__wb_a, m.wb, prog, ins);
 			if (R->m2_dspp__DOT__osc_phase != (m.phase & 0xffff)) fail("phase", R->m2_dspp__DOT__osc_phase, m.phase, prog, ins);
@@ -367,17 +371,20 @@ static void run_random(int prog, long n)
 			for (int i = 0; i < 4; i++) if (R->m2_dspp__DOT__rbase[i] != m.rbase[i]) fail("rbase", R->m2_dspp__DOT__rbase[i], m.rbase[i], prog, ins);
 			// the DACs, in step with the instructions
 			bool want_dac = false; uint16_t l = 0, r = 0;
-			if (ins % 16 == 0 && !frame_last && m.ocount)
+			if (ins % 16 == 0 && !frame_last && clocks > frame_clock + 1 && m.ocount)
 			{
 				t->dac_tick = 1; want_dac = true;
 				l = m.ofifo[m.ostart]; r = m.ofifo[(m.ostart + 1) & 7];
 				m.ostart = (m.ostart + 2) & 7; m.ocount -= 2;
 			}
+			const uint32_t x_oc = m.ocount, x_pi = m.partial, x_tm = m.time;
 			uint32_t t0 = m.time, pc0 = m.pc, wb0 = m.wb >= 0;
 			uint16_t w0 = m.code[m.pc];
 			uint32_t d0[16]; for (int i = 0; i < 16; i++) d0[i] = m.ch[i].depth;
 			m.step();
 			frame_last = m.time != t0;
+			if (wthen && t0 != last_t) frame_clock = clocks;
+			last_t = t0;
 			ins++;
 			c_ins++;
 			if (!(w0 & 0x8000))
@@ -393,6 +400,12 @@ static void run_random(int prog, long n)
 			if (m.pc == pc0 && w0 == m.code[pc0] && (w0 & 0xfc00) == 0x8000 && ((w0 >> 7) & 7) == 7) { c_sleepstop++; ins = n; }
 			if (ins >= n) { t->pre_a = t->a = 0x6070 >> 2; t->we = 1; t->wd = 0; }     // (stopped now: this is the last it starts)
 			tick();
+			if (wthen)
+			{
+				if (uint32_t(R->m2_dspp__DOT__o_count) * 2 != x_oc) fail("out count", R->m2_dspp__DOT__o_count * 2, x_oc, prog, ins);
+				if (R->m2_dspp__DOT__partial_int != x_pi) fail("int", R->m2_dspp__DOT__partial_int, x_pi, prog, ins);
+				if (R->m2_dspp__DOT__up_time != x_tm) fail("time", R->m2_dspp__DOT__up_time, x_tm, prog, ins);
+			}
 			t->dac_tick = 0;
 			if (want_dac)
 			{
