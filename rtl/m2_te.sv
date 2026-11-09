@@ -339,7 +339,7 @@ module m2_te (
 	logic        scan_lr;
 	logic        w_on;                  // a triangle's being walked
 	logic signed [13:0] wk_x2, wk_y2, wk_y3, wk_xst1, wk_xstl, wk_xys1, wk_xysl, wk_dy1, wk_dyl;
-	logic        wk_lr;
+	logic        wk_lr, wk_flat;
 	logic [1:0]  wk_wr;
 	logic [31:0] fa_aria;
 	logic signed [13:0] fc_c;
@@ -539,11 +539,28 @@ module m2_te (
 		endcase
 	wire [15:0]  w16 = w16_s[22:7];
 
-	wire         v0_go = w_on && px != pxe && pu && !(serial && p_any);
+	// Pixels the frame buffer clip or a window clipping what's outside it would throw away aren't walked: in a row outside them, or past their
+	// far side, the span ends (past the far side after one such pixel, so the last kept one still has its neighbor for the minify step);
+	// before their near side a flat triangle's walk jumps to it, as nothing changes along its span. Either takes a clock with no pixel.
+	wire         k_wout = db_user[7];
+	wire signed [13:0] k_fbw = $signed({3'b000, db_fbclip[26:16]});
+	wire signed [13:0] k_wlo = $signed({3'b000, db_xwin[26:16]}), k_whi = $signed({3'b000, db_xwin[10:0]});
+	wire signed [13:0] k_lo = (k_wout && k_wlo > 14'sd0) ? k_wlo : 14'sd0;
+	wire signed [13:0] k_hi = (k_wout && k_whi < k_fbw) ? k_whi : k_fbw;
+	wire         k_yout = y < 0 || y >= $signed({3'b000, db_fbclip[10:0]})
+		|| (k_wout && (y < $signed({3'b000, db_ywin[26:16]}) || y >= $signed({3'b000, db_ywin[10:0]})));
+	wire         k_after = wk_lr ? px >= k_hi : px < k_lo;
+	wire         k_before = wk_lr ? px < k_lo : px >= k_hi;
+	wire signed [13:0] k_to = wk_lr ? (k_lo < pxe ? k_lo : pxe) : (k_hi - 14'sd1 > pxe ? k_hi - 14'sd1 : pxe);
+	logic        k_prev;                // the last pixel walked in this span was outside them
+	wire         v0_try = w_on && px != pxe && pu && !(serial && p_any);
+	wire         k_end = v0_try && (k_yout || (k_prev && k_after));
+	wire         k_jump = v0_try && wk_flat && k_before && !k_end;
+	wire         v0_go = v0_try && !k_end && !k_jump;
 	wire         v0_ok = v0_go && !(fbclipdis || winclipdis || zclipdis);
 	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
 	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
-	logic        tri_flat, wk_flat, v1_four;
+	logic        tri_flat, v1_four;
 	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:5] == 6'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
 	wire         v0_four = f4_on && px[1:0] == (wk_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
 	assign       z_rn = v0_ok && zon && !zclip;
@@ -1676,6 +1693,7 @@ module m2_te (
 							// a line's start (walk_span's copies of the edge's)
 							y <= y_n;
 							row_d <= row_dn; row_z <= row_zn; row_s <= row_sn;
+							k_prev <= 1'b0;
 							for (int i = 0; i < 7; i++) s_v[i] <= (omit_right && !wk_lr) ? e_v[i] - ddx[i] : e_v[i];
 							px <= (omit_right && !wk_lr) ? xs - 14'sd1 : xs;
 							pxe <= omit_right ? (wk_lr ? xe : xe - 14'sd1) : (wk_lr ? xe + 14'sd1 : xe - 14'sd1);
@@ -1683,8 +1701,11 @@ module m2_te (
 						end
 					end
 				end
+				else if (k_end) px <= pxe;
+				else if (k_jump) px <= k_to;
 				else if (v0_go)
 				begin
+					k_prev <= fbclipdis || (k_wout && !win_in);
 					for (int i = 0; i < 4; i++) s_v[i] <= clamp19(wk_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
 					for (int i = 4; i < 7; i++) s_v[i] <= clamp23(wk_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
 					px <= wk_lr ? px + (v0_four ? 14'sd4 : 14'sd1) : px - (v0_four ? 14'sd4 : 14'sd1);
