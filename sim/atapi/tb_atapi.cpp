@@ -52,7 +52,7 @@ static uint16_t rd(int a) { t->a = a; t->re = 1; t->eval(); uint16_t v = t->rd; 
 
 int main(int argc, char **argv)
 {
-	int cmds = argc > 1 ? atoi(argv[1]) : 100;
+	int cmds = argc > 1 ? atoi(argv[1]) : 3000;     // (a seek in the clock a read-ahead fetch starts took about a thousand to show)
 	rnd = argc > 2 ? uint32_t(atoi(argv[2])) : 1;
 	image.resize(2048 + SECTORS * 2048);
 	raw.resize(SECTORS * 2352);

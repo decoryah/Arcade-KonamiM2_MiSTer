@@ -127,6 +127,9 @@ module m2_atapi #(
 	wire           c_we = g_st == G_DATA && sd_wr && !g_n[12] && !g_drop;
 	ppc_ram #(.W(8), .AW(CW)) cache (.clk, .we(c_we), .wa(g_wa), .wd(sd_d), .ra(s_r), .rd(cq));
 	wire           s_take = f_st == F_COPY && s_rv;
+	// a fetch starts this clock (F_CHK's restart must count it as on its way: it's for the ring's old place)
+	wire           g_go = g_st == G_IDLE && stream && c_v && !playing && c_fill <= (CW + 1)'(2 ** CW - 4096);
+	wire [CW-1:0]  g_go_end = c_head + CW'(c_fill) + CW'(4096);
 	assign sd_rd = g_st == G_REQ;
 	assign sd_lba = {9'h0, g_lba};
 	assign bw = (f_st == F_WAIT && m_ready) || f_st == F_Q0 || f_st == F_Q1 || (s_take && s_n[2:0] == 3'd7);
@@ -221,11 +224,11 @@ module m2_atapi #(
 			if (!stream) c_v <= 1'b0;
 			case (g_st)
 				G_IDLE:
-					if (stream && c_v && !playing && c_fill <= (CW + 1)'(2 ** CW - 4096))
+					if (g_go)
 					begin
 						g_lba <= c_base + 23'(c_fill[CW:9]);
 						g_wa <= c_head + CW'(c_fill);
-						g_end <= c_head + CW'(c_fill) + CW'(4096);
+						g_end <= g_go_end;
 						g_n <= 13'd0; g_drop <= 1'b0;
 						g_st <= G_REQ;
 					end
@@ -264,11 +267,13 @@ module m2_atapi #(
 					if (!c_v || s_o < bb || rel > 32'(nf) + 32'd4096)
 					begin
 						// not in it nor on its way: the ring starts again at the sector (past where a fetch on its way writes)
+						// (a fetch on its way, or starting this clock, is for the old place: dropped, and the ring starts past
+						// where it writes)
 						c_v <= 1'b1;
 						c_base <= s_o[31:9];
-						c_head <= g_st != G_IDLE ? g_end : c_head;
+						c_head <= g_go ? g_go_end : g_st != G_IDLE ? g_end : c_head;
 						nf = '0;
-						if (g_st != G_IDLE) g_drop <= 1'b1;
+						if (g_go || g_st != G_IDLE) g_drop <= 1'b1;
 					end
 					else if (rel[31:9] != 23'd0 && nf[CW:9] != '0)
 					begin
