@@ -27,6 +27,43 @@
 `define Z_BLOCKS 20
 `endif
 `endif
+// Features a build can leave out (a qsf VERILOG_MACRO), for room: the registers' bits for them are kept 0 as they're written, so what they'd
+// drive goes. By the M2 emulator's census of what the games draw with (scratch census_apply.py), none of these is used by Battle Tryst:
+//   TE_NO_FB32         32-bit destination and source pixels (DBDESTCNTL / DBSRCCNTL bit 0)
+//   TE_NO_ALPHACTL     the source and destination alpha controls (DBSRCALPHACNTL, DBDESTALPHACNTL)
+//   TE_NO_WCLIPIN      the W clip's inside discard (DBUSERGENCTL bit 8)
+//   TE_NO_DISCARD_A, TE_NO_DISCARD_RGB, TE_NO_DISCARD_Z   the alpha, RGB and Z-clip discards (DBDISCARDCTL bits 0, 1, 3)
+`ifdef TE_NO_FB32
+`define TE_M_FB32 32'hfffffffe
+`else
+`define TE_M_FB32 32'hffffffff
+`endif
+`ifdef TE_NO_WCLIPIN
+`define TE_M_USER 32'hfffffeff
+`else
+`define TE_M_USER 32'hffffffff
+`endif
+`ifdef TE_NO_DISCARD_A
+`define TE_M_DA 32'h1
+`else
+`define TE_M_DA 32'h0
+`endif
+`ifdef TE_NO_DISCARD_RGB
+`define TE_M_DRGB 32'h2
+`else
+`define TE_M_DRGB 32'h0
+`endif
+`ifdef TE_NO_DISCARD_Z
+`define TE_M_DZ 32'h8
+`else
+`define TE_M_DZ 32'h0
+`endif
+`define TE_M_DISCARD (~(`TE_M_DA | `TE_M_DRGB | `TE_M_DZ))
+`ifdef TE_NO_ALPHACTL
+`define TE_M_ALPHA 32'h0
+`else
+`define TE_M_ALPHA 32'hffffffff
+`endif
 module m2_te (
 	input  logic        clk,
 	input  logic        rst,
@@ -2252,15 +2289,15 @@ module m2_te (
 					3'd4:
 						case (r_reg)
 							9'd1: db_super <= md(db_super, r_d, r_mode);
-							9'd2: db_user <= md(db_user, r_d, r_mode);
-							9'd3: db_discard <= md(db_discard, r_d, r_mode);
+							9'd2: db_user <= md(db_user, r_d, r_mode) & `TE_M_USER;
+							9'd3: db_discard <= md(db_discard, r_d, r_mode) & `TE_M_DISCARD;
 							9'd6: db_fbclip <= md(db_fbclip, r_d, r_mode);
 							9'd7: db_xwin <= md(db_xwin, r_d, r_mode);
 							9'd8: db_ywin <= md(db_ywin, r_d, r_mode);
-							9'd9: db_dctl <= md(db_dctl, r_d, r_mode);
+							9'd9: db_dctl <= md(db_dctl, r_d, r_mode) & `TE_M_FB32;
 							9'd10: db_dbase <= md(db_dbase, r_d, r_mode);
 							9'd11: db_dstride <= md(db_dstride, r_d, r_mode);
-							9'd12: db_sctl <= md(db_sctl, r_d, r_mode);
+							9'd12: db_sctl <= md(db_sctl, r_d, r_mode) & `TE_M_FB32;
 							9'd13: db_sbase <= md(db_sbase, r_d, r_mode);
 							9'd14: db_sstride <= md(db_sstride, r_d, r_mode);
 							9'd15: db_soff <= md(db_soff, r_d, r_mode);
@@ -2277,8 +2314,8 @@ module m2_te (
 							9'd26: db_sc0 <= md(db_sc0, r_d, r_mode);
 							9'd27: db_sc1 <= md(db_sc1, r_d, r_mode);
 							9'd28: db_alu <= md(db_alu, r_d, r_mode);
-							9'd29: db_sa <= md(db_sa, r_d, r_mode);
-							9'd30: db_da <= md(db_da, r_d, r_mode);
+							9'd29: db_sa <= md(db_sa, r_d, r_mode) & `TE_M_ALPHA;
+							9'd30: db_da <= md(db_da, r_d, r_mode) & `TE_M_ALPHA;
 							9'd31: db_dac <= md(db_dac, r_d, r_mode);
 							9'd32: db_dma <= md(db_dma, r_d, r_mode);
 							9'd33: db_dmb <= md(db_dmb, r_d, r_mode);

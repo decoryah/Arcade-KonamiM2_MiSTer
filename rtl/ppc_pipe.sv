@@ -1,3 +1,8 @@
+// Instructions a build can leave out (a qsf VERILOG_MACRO), for room; left out, they take the program exception (illegal
+// instruction), as anything not decoded does. None is in the code the M2 emulator compiles for Battle Tryst (scratch census_apply.py):
+//   PPC_NO_FPDOUBLE   lfd, lfdu, lfdx, lfdux, stfd, stfdu, stfdx, stfdux (and the conversions between single and double)
+//   PPC_NO_STRING     lswi, lswx, stswi, stswx
+//   PPC_NO_TRAP       tw, twi
 // PowerPC 602 as MAME 0.289 runs it, pipelined: the same instruction semantics as rtl/ppc_core.sv (checked against the
 // reference model, tools/ref/ppc602, by sim/ppccore and sim/ppcreplay), an instruction a clock when nothing stalls.
 //
@@ -424,7 +429,11 @@ module ppc_pipe #(
 	begin
 		m_d = m_bswap ? bswapn(d_rdata[31:0], m_size) : d_rdata;
 		m_gv = m_sext ? {{16{m_d[15]}}, m_d[15:0]} : m_d[31:0];
+`ifndef PPC_NO_FPDOUBLE
 		m_fv = m_kind == MK_LFD ? d2f(d_rdata) : m_kind == MK_LFS ? {1'b0, d_rdata[31:0]} : m_val;   // (never byte reversed)
+`else
+		m_fv = m_kind == MK_LFS ? {1'b0, d_rdata[31:0]} : m_val;
+`endif
 		m_gw = m_done && m_kind == MK_LOAD && m_wr_en;
 		m_fw = m_done && (m_kind == MK_LFD || m_kind == MK_LFS || m_kind == MK_FMOV);
 	end
@@ -886,12 +895,16 @@ module ppc_pipe #(
 			6'h2e, 6'h2f: begin xm_mem = 1'b0; xm_seq = 1'b1; end                                       // LMW, STMW
 			6'h30: xm_kind = MK_LFS;                                                                    // LFS
 			6'h31: begin xm_kind = MK_LFS; xm_ea = ra_v + simm; xm_upd = 1'b1; end
+`ifndef PPC_NO_FPDOUBLE
 			6'h32: begin xm_kind = MK_LFD; xm_size = 4'd8; end                                          // LFD
 			6'h33: begin xm_kind = MK_LFD; xm_size = 4'd8; xm_ea = ra_v + simm; xm_upd = 1'b1; end
+`endif
 			6'h34: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; end                         // STFS
 			6'h35: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; xm_ea = ra_v + simm; xm_upd = 1'b1; end
+`ifndef PPC_NO_FPDOUBLE
 			6'h36: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; end                       // STFD
 			6'h37: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; xm_ea = ra_v + simm; xm_upd = 1'b1; end
+`endif
 			6'h1f:
 			begin
 				xm_ea = ix;
@@ -901,7 +914,9 @@ module ppc_pipe #(
 					10'h157: begin xm_size = 4'd2; xm_sext = 1'b1; end                                  // LHAX
 					10'h017: ;                                                                          // LWZX
 					10'h217: xm_kind = MK_LFS;                                                          // LFSX
+`ifndef PPC_NO_FPDOUBLE
 					10'h257: begin xm_kind = MK_LFD; xm_size = 4'd8; end                                // LFDX
+`endif
 					10'h316: begin xm_size = 4'd2; xm_bswap = 1'b1; end                                 // LHBRX
 					10'h216: xm_bswap = 1'b1;                                                           // LWBRX
 					10'h077: begin xm_size = 4'd1; xm_ea = iu; xm_upd = 1'b1; end                       // LBZUX
@@ -909,22 +924,32 @@ module ppc_pipe #(
 					10'h177: begin xm_size = 4'd2; xm_sext = 1'b1; xm_ea = iu; xm_upd = 1'b1; end       // LHAUX
 					10'h037: begin xm_ea = iu; xm_upd = 1'b1; end                                       // LWZUX
 					10'h237: begin xm_kind = MK_LFS; xm_ea = iu; xm_upd = 1'b1; end                     // LFSUX
+`ifndef PPC_NO_FPDOUBLE
 					10'h277: begin xm_kind = MK_LFD; xm_size = 4'd8; xm_ea = iu; xm_upd = 1'b1; end     // LFDUX
+`endif
 					10'h014: xm_resv = 1'b1;                                                            // LWARX
 					10'h0d7: begin xm_kind = MK_ST; xm_size = 4'd1; xm_wdata = {56'h0, rs_v[7:0]}; end  // STBX
 					10'h197: begin xm_kind = MK_ST; xm_size = 4'd2; xm_wdata = {48'h0, rs_v[15:0]}; end // STHX
 					10'h097: begin xm_kind = MK_ST; xm_wdata = {32'h0, rs_v}; end                       // STWX
 					10'h297: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; end               // STFSX
 					10'h3d7: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; end              // STFIWX
+`ifndef PPC_NO_FPDOUBLE
 					10'h2d7: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; end             // STFDX
+`endif
 					10'h396: begin xm_kind = MK_ST; xm_size = 4'd2; xm_wdata = {48'h0, rs_v[7:0], rs_v[15:8]}; end // STHBRX
 					10'h296: begin xm_kind = MK_ST; xm_wdata = {32'h0, rs_v[7:0], rs_v[15:8], rs_v[23:16], rs_v[31:24]}; end // STWBRX
 					10'h0f7: begin xm_kind = MK_ST; xm_size = 4'd1; xm_wdata = {56'h0, rs_v[7:0]}; xm_ea = iu; xm_upd = 1'b1; end  // STBUX
 					10'h1b7: begin xm_kind = MK_ST; xm_size = 4'd2; xm_wdata = {48'h0, rs_v[15:0]}; xm_ea = iu; xm_upd = 1'b1; end // STHUX
 					10'h0b7: begin xm_kind = MK_ST; xm_wdata = {32'h0, rs_v}; xm_ea = iu; xm_upd = 1'b1; end                      // STWUX
 					10'h2b7: begin xm_kind = MK_ST; xm_wdata = {32'h0, fs_v[31:0]}; xm_ea = iu; xm_upd = 1'b1; end           // STFSUX
+`ifndef PPC_NO_FPDOUBLE
 					10'h2f7: begin xm_kind = MK_ST; xm_size = 4'd8; xm_wdata = cvt_r; xm_cvt = 1'b1; xm_ea = iu; xm_upd = 1'b1; end           // STFDUX
+`endif
+`ifndef PPC_NO_STRING
 					10'h255, 10'h215, 10'h2d5, 10'h295, 10'h3f6, 10'h096: begin xm_mem = 1'b0; xm_seq = 1'b1; end // strings, DCBZ, STWCX.
+`else
+					10'h3f6, 10'h096: begin xm_mem = 1'b0; xm_seq = 1'b1; end                                // DCBZ, STWCX.
+`endif
 					default: xm_mem = 1'b0;
 				endcase
 			end
@@ -1318,7 +1343,9 @@ module ppc_pipe #(
 	always_comb
 		case (sq_kind)
 			Q_STMW: seq_rs = pg(sq_reg + 5'd1);
+`ifndef PPC_NO_STRING
 			Q_STSW: seq_rs = pg(sq_byte == 2'd3 ? sq_reg + 5'd1 : sq_reg);
+`endif
 			default: seq_rs = pg(sq_reg);
 		endcase
 	wire seq_rd = xstate == XS_SEQ && !sq_fin;
@@ -1798,6 +1825,7 @@ module ppc_pipe #(
 		end
 		else
 			case (opc)
+`ifndef PPC_NO_TRAP
 				6'h03: // TWI
 				begin
 					dv_q <= ra_v;
@@ -1807,6 +1835,7 @@ module ppc_pipe #(
 					ret_x <= 1'b0;
 					xstate <= XS_CHK;
 				end
+`endif
 				6'h07: wg(rD, mulw[31:0]);                                                             // MULLI
 				6'h08: begin wg(rD, simm - ra_v); xer[29] <= ad_s[32]; end                             // SUBFIC
 				6'h0a, 6'h0b: ;                                                                        // CMPLI, CMPI (cmp_d)
@@ -1912,6 +1941,7 @@ module ppc_pipe #(
 		b = rb_v;
 		s = rs_v;
 		case (xo)
+`ifndef PPC_NO_TRAP
 			10'h004: // TW
 			begin
 				dv_q <= a;
@@ -1921,6 +1951,7 @@ module ppc_pipe #(
 				ret_x <= 1'b0;
 				xstate <= XS_CHK;
 			end
+`endif
 			10'h10a, 10'h30a, 10'h00a, 10'h20a, 10'h08a, 10'h28a, 10'h0ca, 10'h2ca, 10'h0ea, 10'h2ea:
 			begin
 				// ADD, ADDC, ADDE, ADDZE, ADDME
@@ -1989,6 +2020,7 @@ module ppc_pipe #(
 			10'h3ba: begin res = {{24{s[7]}}, s[7:0]}; wg(rA, res); end                          // EXTSB
 			10'h39a: begin res = {{16{s[15]}}, s[15:0]}; wg(rA, res); end                        // EXTSH
 
+`ifndef PPC_NO_STRING
 			10'h255, 10'h215:                                                                      // LSWI, LSWX
 			begin
 				logic [6:0] cnt;
@@ -1998,6 +2030,7 @@ module ppc_pipe #(
 				sq_reg <= rD;
 				if (cnt != 0) seq_start(Q_LSW, xo == 10'h255 ? raz : raz + b, 4'd1);
 			end
+`endif
 			10'h096:                                                                               // STWCX.
 			begin
 				sq_wdata <= {32'h0, s};
@@ -2005,6 +2038,7 @@ module ppc_pipe #(
 				if (reserved) seq_start(Q_STWCX, raz + b, 4'd4);
 				else crf[0] <= {3'b000, xerso};
 			end
+`ifndef PPC_NO_STRING
 			10'h2d5, 10'h295:                                                                      // STSWI, STSWX
 			begin
 				logic [6:0] cnt;
@@ -2015,6 +2049,7 @@ module ppc_pipe #(
 				sq_wdata <= {56'h0, rs_v[31:24]};
 				if (cnt != 0) seq_start(Q_STSW, xo == 10'h2d5 ? raz : raz + b, 4'd1);
 			end
+`endif
 			// cache, TLB, sync: nothing in MAME
 			10'h036, 10'h056, 10'h0f6, 10'h116, 10'h256, 10'h356, 10'h1d6, 10'h236, 10'h3d6, 10'h132, 10'h172,
 			10'h3d2, 10'h3f2: ;
@@ -2176,7 +2211,9 @@ module ppc_pipe #(
 		if (!sq_out)
 		begin
 			// lsw clears each register before its first byte is read (MAME), even when the read faults
+`ifndef PPC_NO_STRING
 			if (sq_kind == Q_LSW && sq_byte == 2'd0) wg(sq_reg, 32'h0);
+`endif
 			if (d_rdy) sq_out <= 1'b1;
 		end
 		else if (d_valid)
@@ -2194,6 +2231,7 @@ module ppc_pipe #(
 					sq_wdata <= {32'h0, gxc(seq_rs, gr_s)};
 					sq_reg <= sq_reg + 5'd1;
 				end
+`ifndef PPC_NO_STRING
 				Q_LSW:
 				begin
 					logic [31:0] v;
@@ -2215,6 +2253,7 @@ module ppc_pipe #(
 					sq_byte <= byte_n;
 					sq_reg <= reg_n;
 				end
+`endif
 				default: ;
 			endcase
 			sq_count <= sq_count - 7'd1;
