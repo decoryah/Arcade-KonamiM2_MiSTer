@@ -321,7 +321,12 @@ module m2_te (
 	logic [5:0]  vm_a [0:3];
 
 	// ---- the triangle ------------------------------------------------------------------------------------------------------
-	val_t        e_v [0:6];             // the edge's
+	// The setup works out the next triangle while this one's walked: what it hands the walk is copied when the walk starts (E_START), the
+	// setup's own in e_s, dx_s, sl_s and the rest, the walk's in e_v, ddx, slope and wk_*
+	val_t        e_s [0:6];             // the edge's, as set up
+	val_t        dx_s [0:6];
+	val_t        sl_s [0:6];
+	val_t        e_v [0:6];             // the edge's, walked
 	val_t        ddx [0:6];
 	val_t        slope [0:6];
 	val_t        s_v [0:6];             // the pixel's
@@ -332,6 +337,10 @@ module m2_te (
 	logic [29:0] ar_u;                      // |aria|, and its sign, for its float a clock later
 	logic        ar_n;
 	logic        scan_lr;
+	logic        w_on;                  // a triangle's being walked
+	logic signed [13:0] wk_x2, wk_y2, wk_y3, wk_xst1, wk_xstl, wk_xys1, wk_xysl, wk_dy1, wk_dyl;
+	logic        wk_lr;
+	logic [1:0]  wk_wr;
 	logic [31:0] fa_aria;
 	logic signed [13:0] fc_c;
 	logic signed [13:0] xstep0, xstep1, xstepl, dy0, dy1, dyl;
@@ -339,11 +348,11 @@ module m2_te (
 	logic [2:0]  fc_i;
 	wire signed [13:0] x12 = x1 - x2, x23 = x2 - x3, x31 = x3 - x1, y12 = y1 - y2, y23 = y2 - y3, y31 = y3 - y1;
 
-	// one multiplier, for the setup's and the rows' products: two clocks
-	logic signed [17:0] mx_a, mx_b;
-	logic signed [35:0] mx_r;
-	always_ff @(posedge clk) mx_r <= mx_a * mx_b;
-	logic [3:0]  ss;
+	// a multiplier for the setup's products, one for the walk's rows': two clocks
+	logic signed [17:0] mx_a, mx_b, mw_a, mw_b;
+	logic signed [35:0] mx_r, mw_r;
+	always_ff @(posedge clk) begin mx_r <= mx_a * mx_b; mw_r <= mw_a * mw_b; end
+	logic [3:0]  ss, wss;
 
 	// whole-number divide
 	logic [13:0] dv_n, dv_d, dv_q;
@@ -491,10 +500,10 @@ module m2_te (
 		return v;
 	endfunction
 
-	wire         ins_long = scan_lr ? cf_long <= 0 : cf_long >= 0;
-	wire         ins_short = scan_lr ? cf_short <= 0 : cf_short >= 0;
-	wire         ein_long = scan_lr ? cf_long < 0 : cf_long > 0;
-	wire         ein_short = scan_lr ? cf_short < 0 : cf_short > 0;
+	wire         ins_long = wk_lr ? cf_long <= 0 : cf_long >= 0;
+	wire         ins_short = wk_lr ? cf_short <= 0 : cf_short >= 0;
+	wire         ein_long = wk_lr ? cf_long < 0 : cf_long > 0;
+	wire         ein_short = wk_lr ? cf_short < 0 : cf_short > 0;
 
 	// the rows' products, for the addresses
 	logic signed [27:0] row_d, row_z, row_s;
@@ -522,7 +531,7 @@ module m2_te (
 
 	logic [22:0] w16_s;
 	always_comb
-		case (wrange)
+		case (wk_wr)
 			2'd0: w16_s = s_v[A_W][22:0];
 			2'd1: w16_s = 23'(s_v[A_W][22:0] >> 3);
 			2'd2: w16_s = 23'(s_v[A_W][22:0] >> 6);
@@ -530,13 +539,13 @@ module m2_te (
 		endcase
 	wire [15:0]  w16 = w16_s[22:7];
 
-	wire         v0_go = st == P_RUN && px != pxe && pu && !(serial && p_any);
+	wire         v0_go = w_on && px != pxe && pu && !(serial && p_any);
 	wire         v0_ok = v0_go && !(fbclipdis || winclipdis || zclipdis);
 	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
 	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
-	logic        tri_flat, v1_four;
-	wire         f4_on = tri_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:5] == 6'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
-	wire         v0_four = f4_on && px[1:0] == (scan_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
+	logic        tri_flat, wk_flat, v1_four;
+	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:5] == 6'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
+	wire         v0_four = f4_on && px[1:0] == (wk_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
 	assign       z_rn = v0_ok && zon && !zclip;
 	assign       z_ra_full = z_addr;
 
@@ -609,7 +618,7 @@ module m2_te (
 	wire  [22:0] u_nv = uw_in << u_ns, v_nv = vw_in << v_ns;
 	logic [4:0]  np_sh;
 	always_comb
-		case (wrange)
+		case (wk_wr)
 			2'd0: np_sh = 5'd9;
 			2'd1: np_sh = 5'd12;
 			2'd2: np_sh = 5'd15;
@@ -1181,9 +1190,9 @@ module m2_te (
 		// the fixed-point value of the last clock's float
 		fx_to <= 2'd3;
 		case (fx_to)
-			2'd0: slope[fx_at] <= fx_o;
-			2'd1: ddx[fx_at] <= fx_o;
-			2'd2: e_v[fx_at] <= fx_o;
+			2'd0: sl_s[fx_at] <= fx_o;
+			2'd1: dx_s[fx_at] <= fx_o;
+			2'd2: e_s[fx_at] <= fx_o;
 			default: ;
 		endcase
 
@@ -1191,7 +1200,7 @@ module m2_te (
 		begin
 			st <= I_STOP;
 			gc_master <= 32'h0; gc_idata <= 32'h0; gc_ddata <= 32'h0; gc_dcntl <= 32'h0; gc_iwp <= 32'h0; gc_irp <= 32'h0; gc_ien <= 32'h0; gc_ist <= 32'h0;
-			fd_run <= 1'b0; vf_v <= 1'b0; vm_v <= 4'd0;
+			fd_run <= 1'b0; vf_v <= 1'b0; vm_v <= 4'd0; w_on <= 1'b0;
 			es_cntl <= 3'd0; vcnt <= 2'd0; tsort <= 3'd0; run_stop <= 1'b0; start_p <= 1'b0; end_set <= 32'h0;
 			db_super <= 32'h0; db_user <= 32'h0; db_discard <= 32'h0; tm_cntl <= 32'h0; tm_addr <= 32'h0;
 		end
@@ -1213,19 +1222,21 @@ module m2_te (
 
 				// ---- the list ----
 				I_FETCH:
-					if (f_ok)
+					// (more vertices are set up while the last triangle's walked; anything else waits till its pixels are all out)
+					if (f_ok && f_w[31:28] == 4'h2 && f_w[27:24] == 4'h0)
+					begin
+						gc_irp <= gc_irp + 32'd4;
+						vn <= f_w[15:0];
+						v_fl <= f_w[20:16];
+						st <= V_NEXT;
+					end
+					else if (f_ok && !w_on && !p_any)
 					begin
 						gc_irp <= gc_irp + 32'd4;
 						if (f_w[31:28] == 4'h1)
 						begin
 							roffs <= f_w[15:0]; rcnt <= f_w[23:16];
 							st <= I_REGS;
-						end
-						else if (f_w[31:28] == 4'h2 && f_w[27:24] == 4'h0)
-						begin
-							vn <= f_w[15:0];
-							v_fl <= f_w[20:16];
-							st <= V_NEXT;
 						end
 						else
 						begin
@@ -1316,17 +1327,24 @@ module m2_te (
 					end
 				end
 				I_AFTER:
+					// (a list's end, or a stop, waits for the last triangle's pixels)
 					if (gc_irp == gc_iwp)
 					begin
-						end_set <= end_set | 32'h00000400 | (32'(gc_master[0]) << 9);
-						c_flush <= 1'b1;
-						st <= I_FLUSH;
+						if (!w_on && !p_any)
+						begin
+							end_set <= end_set | 32'h00000400 | (32'(gc_master[0]) << 9);
+							c_flush <= 1'b1;
+							st <= I_FLUSH;
+						end
 					end
 					else if (run_stop || gc_master[3] || gc_master[1])
 					begin
-						end_set <= end_set | (32'(gc_master[0]) << 9);
-						c_flush <= 1'b1;
-						st <= I_FLUSH;
+						if (!w_on && !p_any)
+						begin
+							end_set <= end_set | (32'(gc_master[0]) << 9);
+							c_flush <= 1'b1;
+							st <= I_FLUSH;
+						end
 					end
 					else st <= I_FETCH;
 
@@ -1538,7 +1556,7 @@ module m2_te (
 					end
 					else if (!at_have)
 					begin
-						e_v[at_i] <= '0; ddx[at_i] <= '0; slope[at_i] <= '0;
+						e_s[at_i] <= '0; dx_s[at_i] <= '0; sl_s[at_i] <= '0;
 						at_i <= at_i + 3'd1;
 					end
 					else if (at_i[2])
@@ -1559,7 +1577,7 @@ module m2_te (
 					// (a colour the same at all three corners: whole numbers up to 255, so nothing rounds, and the slopes come to nothing)
 					if (q1f == q2f && q1f == q3f)
 					begin
-						slope[at_i] <= '0; ddx[at_i] <= '0;
+						sl_s[at_i] <= '0; dx_s[at_i] <= '0;
 						fx_f <= q1f; fx_sh <= 11'(q1f[30:23]) - 11'sd127 - 11'(af_bits(at_i)); fx_at <= at_i; fx_to <= 2'd2;
 						st <= S_FX1;
 					end
@@ -1607,8 +1625,13 @@ module m2_te (
 
 				// ---- the walk ----
 				E_START:
-				if (!p_any)
+				if (!p_any && !w_on)
 				begin
+					for (int i = 0; i < 7; i++) begin e_v[i] <= e_s[i]; ddx[i] <= dx_s[i]; slope[i] <= sl_s[i]; end
+					wk_x2 <= x2; wk_y2 <= y2; wk_y3 <= y3;
+					wk_xst1 <= xstep1; wk_xstl <= xstepl; wk_xys1 <= xys1; wk_xysl <= xysl; wk_dy1 <= dy1; wk_dyl <= dyl;
+					wk_lr <= scan_lr; wk_wr <= wrange; wk_flat <= tri_flat;
+					w_on <= 1'b1;
 					y <= y1;
 					cf_short <= 14'sd0; cf_long <= 14'sd0;
 					omit_right <= 1'b1;
@@ -1626,46 +1649,47 @@ module m2_te (
 					y_n <= y1;
 					nx_last <= 1'b0;
 					px <= 14'sd0; pxe <= 14'sd0;
-					ss <= 4'd0;
+					wss <= 4'd0;
 					nx <= NX_ROW;
-					st <= P_RUN;
+					st <= E_NEXT;
 				end
 
-				// ---- a pixel ----
-				P_RUN:
-					if (px == pxe)
-					begin
-						if (nx == NX_DONE)
-						begin
-							if (nx_last) st <= E_NEXT;
-							else
-							begin
-								// a line's start (walk_span's copies of the edge's)
-								y <= y_n;
-								row_d <= row_dn; row_z <= row_zn; row_s <= row_sn;
-								for (int i = 0; i < 7; i++) s_v[i] <= (omit_right && !scan_lr) ? e_v[i] - ddx[i] : e_v[i];
-								px <= (omit_right && !scan_lr) ? xs - 14'sd1 : xs;
-								pxe <= omit_right ? (scan_lr ? xe : xe - 14'sd1) : (scan_lr ? xe + 14'sd1 : xe - 14'sd1);
-								nx <= NX_N1;
-							end
-						end
-					end
-					else if (v0_go)
-					begin
-						for (int i = 0; i < 4; i++) s_v[i] <= clamp19(scan_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
-						for (int i = 4; i < 7; i++) s_v[i] <= clamp23(scan_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
-						px <= scan_lr ? px + (v0_four ? 14'sd4 : 14'sd1) : px - (v0_four ? 14'sd4 : 14'sd1);
-					end
-
-				// ---- the triangle's done, or there wasn't one: the next vertex, or the list ----
+				// ---- the triangle's done (or being walked), or there wasn't one: the next vertex, or the list (I_FETCH, I_AFTER wait for the pixels) ----
 				E_NEXT:
-					if (!p_any || vn != 16'd0)
-					begin
-						vn <= vn - 16'd1;
-						st <= vn == 16'd0 ? I_AFTER : V_NEXT;
-					end
+				begin
+					vn <= vn - 16'd1;
+					st <= vn == 16'd0 ? I_AFTER : V_NEXT;
+				end
 				default: st <= I_STOP;
 			endcase
+
+			// ---- a pixel ----
+			if (w_on)
+			begin
+				if (px == pxe)
+				begin
+					if (nx == NX_DONE)
+					begin
+						if (nx_last) w_on <= 1'b0;
+						else
+						begin
+							// a line's start (walk_span's copies of the edge's)
+							y <= y_n;
+							row_d <= row_dn; row_z <= row_zn; row_s <= row_sn;
+							for (int i = 0; i < 7; i++) s_v[i] <= (omit_right && !wk_lr) ? e_v[i] - ddx[i] : e_v[i];
+							px <= (omit_right && !wk_lr) ? xs - 14'sd1 : xs;
+							pxe <= omit_right ? (wk_lr ? xe : xe - 14'sd1) : (wk_lr ? xe + 14'sd1 : xe - 14'sd1);
+							nx <= NX_N1;
+						end
+					end
+				end
+				else if (v0_go)
+				begin
+					for (int i = 0; i < 4; i++) s_v[i] <= clamp19(wk_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
+					for (int i = 4; i < 7; i++) s_v[i] <= clamp23(wk_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
+					px <= wk_lr ? px + (v0_four ? 14'sd4 : 14'sd1) : px - (v0_four ? 14'sd4 : 14'sd1);
+				end
+			end
 
 			// 1.0 / the mantissa, a bit a clock: 27, the first being whether it's 1 exactly
 			if (fd_run)
@@ -1701,29 +1725,29 @@ module m2_te (
 			end
 
 			// ---- the next line ----
-			if (st == P_RUN)
+			if (w_on)
 			case (nx)
 				NX_N1:
 				begin
 					omit_right <= 1'b0;
 					cf_short <= cf_short + xystep;
-					cf_long <= cf_long + xysl;
-					xs <= xs + xstepl;
+					cf_long <= cf_long + wk_xysl;
+					xs <= xs + wk_xstl;
 					xe <= xe + xstep;
 					nx <= NX_N2;
 				end
 				NX_N2:
 				begin
 					step_back <= 1'b0;
-					if (scan_lr)
+					if (wk_lr)
 					begin
-						if (!ins_long) begin step_back <= 1'b1; cf_long <= cf_long + dyl; xs <= xs + 14'sd1; end
+						if (!ins_long) begin step_back <= 1'b1; cf_long <= cf_long + wk_dyl; xs <= xs + 14'sd1; end
 						if (dsp_off ? !ins_short : !ein_short) begin cf_short <= cf_short - dy; xe <= xe - 14'sd1; end
 					end
 					else
 					begin
 						if (!ins_short) begin cf_short <= cf_short + dy; xe <= xe + 14'sd1; end
-						if (dsp_off ? !ins_long : !ein_long) begin step_back <= 1'b1; cf_long <= cf_long - dyl; xs <= xs - 14'sd1; end
+						if (dsp_off ? !ins_long : !ein_long) begin step_back <= 1'b1; cf_long <= cf_long - wk_dyl; xs <= xs - 14'sd1; end
 					end
 					nx <= NX_A1;
 				end
@@ -1742,39 +1766,39 @@ module m2_te (
 				begin
 					for (int i = 0; i < 7; i++)
 						if ((i < 4 && !m_dshade) || ((i == A_UW || i == A_VW) && !es_cntl[1]) || (i == A_W && !persp_off))
-							e_v[i] <= i < 4 ? clamp19(scan_lr ? e_v[i] + ddx[i] : e_v[i] - ddx[i]) : clamp23(scan_lr ? e_v[i] + ddx[i] : e_v[i] - ddx[i]);
+							e_v[i] <= i < 4 ? clamp19(wk_lr ? e_v[i] + ddx[i] : e_v[i] - ddx[i]) : clamp23(wk_lr ? e_v[i] + ddx[i] : e_v[i] - ddx[i]);
 					nx <= NX_LINE;
 				end
 				NX_LINE:
 				begin
 					logic signed [13:0] ny;
 					ny = du_scan ? y_n - 14'sd1 : y_n + 14'sd1;
-					if (ny == y2)
+					if (ny == wk_y2)
 					begin
 						cf_short <= 14'sd0;
-						xystep <= xys1; xstep <= xstep1; dy <= dy1;
-						xe <= x2;
-						if (scan_lr) omit_right <= 1'b1;
+						xystep <= wk_xys1; xstep <= wk_xst1; dy <= wk_dy1;
+						xe <= wk_x2;
+						if (wk_lr) omit_right <= 1'b1;
 					end
 					y_n <= ny;
-					ss <= 4'd0;
+					wss <= 4'd0;
 					// (the rows' products, a line on from the last's)
 					row_dn <= du_scan ? row_dn - 28'(db_dstride[10:0]) : row_dn + 28'(db_dstride[10:0]);
 					row_zn <= du_scan ? row_zn - 28'(db_dstride[10:0]) : row_zn + 28'(db_dstride[10:0]);
 					row_sn <= du_scan ? row_sn - 28'(db_sstride[10:0]) : row_sn + 28'(db_sstride[10:0]);
 					nx <= NX_DONE;
-					if (ny == y3) nx_last <= 1'b1;
+					if (ny == wk_y3) nx_last <= 1'b1;
 				end
 				NX_ROW:
 				begin
 					// the rows' products, three, one after another
-					ss <= ss + 4'd1;
-					case (ss)
-						4'd0: begin mx_a <= 18'(y_n); mx_b <= 18'({1'b0, db_dstride[10:0]}); end
-						4'd1: begin mx_a <= 18'(z_yn); mx_b <= 18'({1'b0, db_dstride[10:0]}); end
-						4'd2: begin mx_a <= 18'(s_yn); mx_b <= 18'({1'b0, db_sstride[10:0]}); row_dn <= mx_r[27:0]; end
-						4'd3: row_zn <= mx_r[27:0];
-						default: begin row_sn <= mx_r[27:0]; nx <= NX_DONE; end
+					wss <= wss + 4'd1;
+					case (wss)
+						4'd0: begin mw_a <= 18'(y_n); mw_b <= 18'({1'b0, db_dstride[10:0]}); end
+						4'd1: begin mw_a <= 18'(z_yn); mw_b <= 18'({1'b0, db_dstride[10:0]}); end
+						4'd2: begin mw_a <= 18'(s_yn); mw_b <= 18'({1'b0, db_sstride[10:0]}); row_dn <= mw_r[27:0]; end
+						4'd3: row_zn <= mw_r[27:0];
+						default: begin row_sn <= mw_r[27:0]; nx <= NX_DONE; end
 					endcase
 				end
 				default: ;
@@ -1797,7 +1821,7 @@ module m2_te (
 									lb_inv <= 1'b1;
 									run_stop <= 1'b0;
 									if (st == I_FLUSH) start_p <= 1'b1;
-									else st <= I_FETCH;
+									else begin st <= I_FETCH; w_on <= 1'b0; end
 								end
 							end
 							9'd4: gc_ddata <= md(gc_ddata, r_d, r_mode);
