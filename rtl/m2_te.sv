@@ -638,6 +638,7 @@ module m2_te (
 	// the walker's pixel
 	logic        v1_v, v2_v, v3_v, v4_v, v5_v, v6_v, v7_v, v8_v, v9_v;
 	logic [9:1]  wk;                    // these stages hold a pixel the walker stepped to, kept or not: in a row, the next pixel along the span
+	logic [9:1]  wy;                    // and its row's low bit (a stall as a span starts leaves no gap between it and the last)
 	logic [13:0] t0_u, t0_v, t1_u, t1_v;
 	wire  [14:0] t_du = {1'b0, t0_u} - {1'b0, t1_u}, t_dv = {1'b0, t0_v} - {1'b0, t1_v};
 	logic        v1_zc;
@@ -690,9 +691,10 @@ module m2_te (
 			t1_u <= t0_u; t1_v <= t0_v;
 			tu <= t1_u; tv <= t1_v;
 			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
-			if (wk[8] && wk[7])
+			if (wk[8] && wk[7] && wy[8] == wy[7])
 				t_min <= $signed(t_du) > 15'sd16 || $signed(t_du) < -15'sd16 || $signed(t_dv) > 15'sd16 || $signed(t_dv) < -15'sd16;
 			wk <= {wk[8:1], v0_go};
+			wy <= {wy[8:1], y[0]};
 
 			u_c[0] <= persp_off ? 16'(uw_in >> np_sh) : u_nv[22:7];
 			v_c[0] <= persp_off ? 16'(vw_in >> np_sh) : v_nv[22:7];
