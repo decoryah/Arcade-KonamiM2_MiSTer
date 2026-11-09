@@ -17,6 +17,7 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <algorithm>
 
 static const uint32_t RAM_BASE = 0x40000000, RAM_SIZE = 0x1000000;
 static std::vector<uint8_t> ram, wrote;
@@ -50,6 +51,9 @@ static const int P_RUN_N = int(sizeof st_name / sizeof *st_name) - 1;
 static uint64_t stalled;
 static uint64_t p_bil, p_pt, p_u0, p_v0, p_both, p_pt_go, p_go, p_hold, p_ser, p_drain, p_zr, p_zw, p_cr, p_cw, p_stall;
 static uint64_t f_list, f_pix, e_wpix, e_wdrain;
+static uint64_t cx_clk, cx_emit_run, cx_emit_str, cx_ctl, cx_nosrc;  // (TE_PROF: compressed loads' clocks: texels from runs, from strings, control bytes, waiting for source)
+static std::map<unsigned, uint64_t> cx_bits;
+static std::map<std::string, uint64_t> cc_why;    // (TE_PROF: the color cache's state in the clocks pixels stall on it)                          // (texels by their bits and the group's fields: colour bits, alpha bits, ssb)
 static std::map<unsigned, uint64_t> regw_n;          // (TE_PROF: the list's register writes, by byte offset)
 static std::map<unsigned, uint64_t> regh_n, regh_w;  // (TE_PROF: register instructions by offset << 8 | count: how many, the clocks they waited for the pixels)  // I_FETCH waiting for the list's word, for the pixels; E_START for the walk, for the drain
 #endif
@@ -236,6 +240,15 @@ static void clock1()
 			regw_n[unsigned(q->m2_te__DOT__ls_a) << 2]++;
 			if ((unsigned(q->m2_te__DOT__ls_a) << 2) == 0x14) regw_n[0x100000 | (unsigned(q->m2_te__DOT__dc_new) & 0x3f)]++;  // (the list control's: what it asks)
 		}
+		if (!strcmp(st_name[q->m2_te__DOT__st & 127], "T_MM") && q->m2_te__DOT__mm_cmp && q->m2_te__DOT__mm_n)
+		{
+			cx_clk++;
+			if (!q->m2_te__DOT__cx_grp) cx_ctl++;
+			else if (q->m2_te__DOT__cx_have && !q->m2_te__DOT__cx_str) cx_emit_run++;
+			else if (q->m2_te__DOT__cx_n < 8 && !q->m2_te__DOT__cx_word) cx_nosrc++;
+			else cx_emit_str++;
+			if (q->m2_te__DOT__cx_pe) cx_bits[unsigned(q->m2_te__DOT__cx_dbits) << 16 | unsigned(q->m2_te__DOT__cx_cbits) << 8 | unsigned(q->m2_te__DOT__cx_ab) << 4 | unsigned(q->m2_te__DOT__cx_ssb)]++;
+		}
 		if (!strcmp(st_name[q->m2_te__DOT__st & 127], "E_START"))
 		{
 			if (q->m2_te__DOT__w_on) e_wpix++;
@@ -388,6 +401,19 @@ static void clock1()
 		{
 			p_stall++;
 			p_zr += q->m2_te__DOT__zr_stall; p_zw += q->m2_te__DOT__zw_stall; p_cr += q->m2_te__DOT__cr_stall; p_cw += q->m2_te__DOT__cw_stall;
+#ifdef TE_PROF
+			if (q->m2_te__DOT__cr_stall || q->m2_te__DOT__cw_stall)
+			{
+				static const char *cst[] = { "INIT", "IDLE", "EVW", "FILL", "FILLW", "REARM", "FWALK", "FLOOK", "FEND" };
+				static const char *bst[] = { "b-idle", "b-look", "b-rd", "b-wr", "b-tag" };
+				auto *c = q;
+				char key[160];
+				unsigned st = c->m2_te__DOT__cc__DOT__st, bs = c->m2_te__DOT__cc__DOT__b_st, qc = c->m2_te__DOT__cc__DOT__q_cnt;
+				snprintf(key, sizeof key, "%s %s %s q%s%s%s%s", q->m2_te__DOT__cr_stall ? "R" : "-", q->m2_te__DOT__cw_stall ? "W" : "-", st < 9 ? cst[st] : "?", qc == 0 ? "0" : qc < 8 ? "1-7" : qc < 16 ? "8-15" : "16",
+					bs < 5 ? (std::string(" ") + bst[bs]).c_str() : " ?", c->m2_te__DOT__cc__DOT__m_req && !c->m2_te__DOT__m_owned ? " port-wait" : "", c->m2_te__DOT__cc__DOT__r_v && !c->m2_te__DOT__cc__DOT__r_hit ? " rmiss" : "");
+				cc_why[key]++;
+			}
+#endif
 		}
 		else if (!px_left) p_drain++;
 		else if (q->m2_te__DOT__t_hold)
@@ -553,6 +579,23 @@ int main(int argc, char **argv)
 		printf("  waits: I_FETCH for the list %llu, for the pixels %llu; E_START for the walk %llu, for the drain %llu\n", (unsigned long long)f_list, (unsigned long long)f_pix,
 			(unsigned long long)e_wpix, (unsigned long long)e_wdrain);
 		f_list = f_pix = e_wpix = e_wdrain = 0;
+		{
+			std::vector<std::pair<uint64_t, std::string>> v;
+			for (auto &kv : cc_why) v.push_back({kv.second, kv.first});
+			std::sort(v.rbegin(), v.rend());
+			printf("  color stalls by the cache's state:");
+			for (size_t i = 0; i < v.size() && i < 14; i++) printf(" [%s] %llu;", v[i].second.c_str(), (unsigned long long)v[i].first);
+			printf("\n");
+			cc_why.clear();
+		}
+		if (cx_clk)
+		{
+			printf("  compressed loads: %llu clocks: control %llu, in a run %llu, in a string %llu, short of source %llu; texels by dbits/cbits/abits/ssb:", (unsigned long long)cx_clk,
+				(unsigned long long)cx_ctl, (unsigned long long)cx_emit_run, (unsigned long long)cx_emit_str, (unsigned long long)cx_nosrc);
+			for (auto &kv : cx_bits) printf(" %u/%u/%u/%u:%llu", kv.first >> 16, kv.first >> 8 & 255, kv.first >> 4 & 15, kv.first & 15, (unsigned long long)kv.second);
+			printf("\n");
+			cx_clk = cx_ctl = cx_emit_run = cx_emit_str = cx_nosrc = 0; cx_bits.clear();
+		}
 		printf("  register writes:");
 		for (auto &kv : regw_n) printf(" %05x:%llu", kv.first, (unsigned long long)kv.second);
 		printf("\n");

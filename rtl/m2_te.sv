@@ -8,7 +8,7 @@
 //                 with the iterated colour
 //   destination   source and Z through write-back caches (te_cache), the blend, the discards, the writes; a list that stops flushes them
 //
-// Only the texture loads that the game's lists use: MMDMA, PIPLOAD. No compressed load (not seen in a list so far). A value that a span's
+// Only the texture loads that the games' lists use: MMDMA, PIPLOAD, and compressed TEXLOAD (Battle Tryst's). No uncompressed TEXLOAD. A value that a span's
 // first pixel has made negative goes to the texture sums as if 0, where MAME's are unsigned.
 `default_nettype none
 
@@ -88,6 +88,7 @@ module m2_te (
 	logic [2:0]  es_cntl;
 	logic [31:0] tm_cntl, tm_ldcntl, tm_addr, tm_pip, tm_tab, tm_lod0, tm_src, tm_count, tm_uvmax, tm_uvmask, tm_exp;
 	logic [31:0] tm_c0, tm_c1, tm_c2, tm_c3;
+	logic [31:0] tm_st01, tm_st23;      // a compressed load's source texel formats: types 0 and 1, 2 and 3 (16 bits each, the low half first)
 	logic [31:0] db_super, db_user, db_discard, db_fbclip, db_xwin, db_ywin, db_dctl, db_dbase, db_dstride, db_sctl, db_sbase, db_sstride,
 		db_soff, db_zctl, db_zbase, db_zoff, db_zclip, db_ssb, db_constin, db_tmul, db_tc0, db_tc1, db_smul, db_sc0, db_sc1, db_alu,
 		db_sa, db_da, db_dac, db_dma, db_dmb;
@@ -300,6 +301,26 @@ module m2_te (
 	logic [1:0]  lb_n;
 	logic [31:0] mm_src;
 	logic [27:0] mm_n;
+	// a compressed load (BDA spec 6.8.8.1, as MAME's M2 driver has it): source bits, MSB first, in cx_acc's low cx_n bits; texels out, packed
+	// MSB first into whole words, in cx_out's low cx_on bits. One control byte or one texel a clock.
+	logic        mm_cmp;
+	logic [63:0] cx_acc, cx_out;
+	logic [6:0]  cx_n, cx_on;
+	logic        cx_grp;                // in a control byte's texels
+	logic        cx_str, cx_tr, cx_lit, cx_ssb, cx_have;
+	logic [3:0]  cx_cb;                 // (an index's or a literal component's bits)
+	logic [5:0]  cx_cbits;
+	logic [3:0]  cx_ab;
+	logic [6:0]  cx_cnt;
+	logic [31:0] cx_cnst, cx_val;
+	logic        cx_pe;                 // a texel for the packer, the clock after it's decoded (cx_pv)
+	logic [1:0]  cx_fs;                 // the texel's field to read next: its ssb, alpha, then colour (a clock each, the first two if it has them)
+	logic        cx_tssb;               // (what's been read of it)
+	logic [14:0] cx_talpha;
+	logic [31:0] cx_pv;
+	logic [2:0]  cx_pr;                 // how many of it: a run's texels go up to four a clock (as many as fit in 32 bits)
+	logic        cx_pp;                 // or two of a string's, both in cx_pv
+	logic signed [29:0] cx_left;
 	logic [3:0]  vf_i;
 	logic [4:0]  v_fl;                  // shaded, textured, perspective, new, replace
 	wire         f_shad = v_fl[0], f_text = v_fl[1], f_prsp = v_fl[2], f_new = v_fl[3], f_rm = v_fl[4];
@@ -325,18 +346,24 @@ module m2_te (
 	always_ff @(posedge clk) if (ms_more != (!ms_left[28] && ms_left != 29'd0)) $display("TE ms_more wrong");
 `endif
 	wire         ms_have = ms_wpd != ms_rp;
-	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have;
+	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have && (!mm_cmp || cx_n <= 7'd32);
 	// (a whole word in one clock, when source and place are in step and it's the texture memory)
-	wire         ms_two = ms_skip == 2'd0 && !mm_pip && mm_src[2:0] == 3'd0 && !mm_dst[2] && mm_n >= 28'd8;
+	wire         ms_two = ms_skip == 2'd0 && !mm_pip && !mm_cmp && mm_src[2:0] == 3'd0 && !mm_dst[2] && mm_n >= 28'd8;
 	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2] || ms_two);
 	wire [4:0]   ms_rn = ms_rp + 5'(ms_pop);
 	logic [63:0] ms_q;
 	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && m_ready), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
 	wire [31:0]  ms_raw = mm_src[2] ? ms_q[63:32] : ms_q[31:0];
+	// a compressed load's destination texel: colour (an index, or three literal components), alpha, SSB, as the texture memory holds them
+	wire  [5:0]  cx_dcb = tm_exp[10] ? (tm_exp[12] ? 6'(tm_exp[3:0]) * 6'd3 : 6'(tm_exp[3:0])) : 6'd0;
+	wire  [3:0]  cx_dab = tm_exp[11] ? tm_exp[7:4] : 4'd0;
+	wire         cx_dsb = tm_exp[9];
+	wire  [5:0]  cx_dbits = cx_dcb + 6'(cx_dab) + 6'(cx_dsb);
 	// a source not on a word boundary: each word out is the end of one read and the start of the next (the first byte's in bits 7:0)
 	logic        ms_arm;
 	logic [31:0] ms_prev;
 	logic [31:0] ms_w;
+	wire         cx_word = ms_take && ms_skip == 2'd0 && !ms_arm && mm_cmp;      // a word for the decoder this clock
 	always_comb
 		case (mm_src[1:0])
 			2'd1: ms_w = {ms_raw[7:0], ms_prev[31:8]};
@@ -1436,7 +1463,19 @@ module m2_te (
 					ms_a <= tm_src[31:5]; ms_left <= ml_ld; ms_more <= !ml_ld[28] && ml_ld != 29'd0; ms_skip <= tm_src[4:3];
 					ms_req <= 5'd0; ms_wp <= 5'd0; ms_wpd <= 5'd0; ms_rp <= 5'd0;
 					ms_arm <= tm_src[1:0] != 2'd0;
-					if (tm_ldcntl[9:8] == 2'd1)
+					mm_cmp <= 1'b0;
+					if (tm_ldcntl[9:8] == 2'd0 && tm_ldcntl[10] && cx_dbits != 6'd0)
+					begin
+						// compressed: as many source bytes as it takes (asked for until the texels are done), from bit 0 of the first
+						mm_cmp <= 1'b1;
+						mm_pip <= 1'b0;
+						mm_n <= 28'd1;
+						ms_left <= 29'h00ffffff;
+						cx_acc <= 64'd0; cx_n <= 7'd0; cx_out <= 64'd0; cx_on <= 7'd0; cx_grp <= 1'b0; cx_pe <= 1'b0;
+						cx_left <= 30'(signed'({2'b00, tm_count[27:0]}));
+						st <= T_MM;
+					end
+					else if (tm_ldcntl[9:8] == 2'd1)
 					begin
 						mm_pip <= !tm_cntl[2];
 						if (tm_cntl[3:2] != 2'd0) st <= T_MM;
@@ -1468,6 +1507,11 @@ module m2_te (
 							ms_prev <= ms_raw;
 							mm_src <= mm_src + 32'd4;
 						end
+						else if (mm_cmp)
+						begin
+							ms_prev <= ms_raw;
+							mm_src <= mm_src + 32'd4;
+						end
 						else
 						begin
 							ms_prev <= ms_raw;
@@ -1481,6 +1525,147 @@ module m2_te (
 							mm_src <= mm_src + (ms_two ? 32'd8 : 32'd4);
 							mm_dst <= mm_dst + (ms_two ? 14'd8 : 14'd4);
 							mm_n <= ms_two ? mm_n - 28'd8 : mm_n < 28'd4 ? 28'd0 : mm_n - 28'd4;
+						end
+					end
+					if (mm_cmp && mm_n != 28'd0)
+					begin : cx
+						logic [63:0] acc, oacc;
+						logic [6:0]  n, on, k;
+						logic [1:0]  fk;
+						logic [31:0] x, w, colour, alpha, ssb, val;
+						logic [7:0]  cntl;
+						logic [15:0] ty;
+						logic [5:0]  cb;
+						logic        emit, last;
+						logic [5:0]  r, rmax;
+						logic [31:0] rep, x2, colour2, val2;
+						logic        two, run_rep, run_last, ctl;
+						acc = cx_acc; n = cx_n; oacc = cx_out; on = cx_on;
+						emit = 1'b0; last = 1'b0; val = cx_val; r = 6'd1; val2 = 32'h0; ctl = 1'b0;
+						if (cx_word) begin acc = {acc[31:0], ms_w[7:0], ms_w[15:8], ms_w[23:16], ms_w[31:24]}; n = n + 7'd32; end
+						// a run's texel again (or a string's that reads no bits, all the same texel): as many a clock as fit in 32 bits
+						rmax = cx_dbits <= 6'd8 ? 6'd4 : cx_dbits <= 6'd10 ? 6'd3 : cx_dbits <= 6'd16 ? 6'd2 : 6'd1;
+						run_rep = cx_grp && cx_have && (!cx_str || (cx_cbits == 6'd0 && cx_ab == 4'd0 && !cx_ssb));
+						run_last = run_rep && cx_cnt <= 7'(rmax);
+						// the next field's bits from the source, one extractor for all: a control byte, or a texel's ssb, alpha or colour (fk 0, 1, 2).
+						// A run's last texels read none, so the next control byte comes with them
+						if (!cx_grp || run_last) begin k = 7'd8; fk = 2'd2; end
+						else if (cx_tr) begin k = 7'd0; fk = 2'd2; end
+						else if (cx_fs == 2'd0 && cx_ssb) begin k = 7'd1; fk = 2'd0; end
+						else if (cx_fs != 2'd2 && cx_ab != 4'd0) begin k = 7'(cx_ab); fk = 2'd1; end
+						else begin k = 7'(cx_cbits); fk = 2'd2; end
+						x = k == 7'd0 ? 32'd0 : 32'(acc >> (n - k)) & 32'((33'd1 << k) - 33'd1);
+						// (a string of texels with only a colour each: two a clock when the bits are here, the second from the bits after the first's)
+						two = cx_grp && cx_str && !cx_tr && cx_fs == 2'd0 && cx_ab == 4'd0 && !cx_ssb && cx_cbits != 6'd0 && cx_cbits <= 6'd16
+							&& cx_dbits <= 6'd16 && cx_cnt >= 7'd2 && n >= (k << 1);
+						x2 = 32'(acc >> (n - (k << 1))) & 32'((33'd1 << k) - 33'd1);
+						if (!cx_grp)
+						begin
+							if (cx_left <= 30'sd0) last = 1'b1;
+							else if (n >= 7'd8) ctl = 1'b1;
+						end
+						else
+						begin
+							// a texel: read (for each of a string, or once for a run), then written
+							if (run_rep)
+							begin
+								// (as many as are left of the group, up to rmax; the load's count is only looked at between groups, as before)
+								r = rmax;
+								if (cx_cnt < 7'(r)) r = 6'(cx_cnt);
+								emit = 1'b1;
+								if (run_last && cx_left - $signed(30'(r)) > 30'sd0 && n >= 7'd8) ctl = 1'b1;
+							end
+							else if (n >= k)
+							begin
+								n = n - k;
+								if (fk == 2'd0) begin cx_tssb <= x[0]; cx_fs <= 2'd1; end
+								else if (fk == 2'd1) begin cx_talpha <= x[14:0]; cx_fs <= 2'd2; end
+								else
+								begin
+									colour = cx_lit ? 32'(cx_cnst[23:0]) : 32'(cx_cnst[7:0]);
+									alpha = 32'(cx_cnst[30:24]);
+									ssb = 32'(cx_cnst[31]);
+									if (!cx_tr)
+									begin
+										if (cx_cbits != 6'd0) colour = cx_lit ? x : x + 32'(cx_cnst[7:0]);
+										if (cx_ab != 4'd0) alpha = 32'(cx_talpha);
+										if (cx_ssb) ssb = 32'(cx_tssb);
+									end
+									val = (colour & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
+										| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
+									cx_val <= val;
+									cx_have <= 1'b1;
+									cx_fs <= 2'd0;
+									emit = 1'b1;
+									if (two)
+									begin
+										n = n - k;
+										colour2 = cx_lit ? x2 : x2 + 32'(cx_cnst[7:0]);
+										val2 = (colour2 & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
+											| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
+										cx_val <= val2;
+										r = 6'd2;
+									end
+								end
+							end
+							if (emit)
+							begin
+								cx_left <= cx_left - 30'(r);
+								cx_cnt <= cx_cnt - 7'(r);
+								if (cx_cnt == 7'(r)) cx_grp <= 1'b0;
+							end
+						end
+						if (ctl)
+						begin
+							// a control byte: the type (which source format and constant), a count, a string or a run
+							cntl = x[7:0];
+							n = n - 7'd8;
+							cx_fs <= 2'd0;
+							ty = cntl[7] ? (cntl[6] ? tm_st23[31:16] : tm_st23[15:0]) : (cntl[6] ? tm_st01[31:16] : tm_st01[15:0]);
+							cx_cnst <= cntl[7] ? (cntl[6] ? tm_c3 : tm_c2) : (cntl[6] ? tm_c1 : tm_c0);
+							cx_tr <= ty[8];
+							cx_lit <= ty[12];
+							cx_ssb <= ty[9];
+							cx_cb <= ty[10] ? ty[3:0] : 4'd0;
+							cx_cbits <= ty[10] ? (ty[12] ? 6'(ty[3:0]) * 6'd3 : 6'(ty[3:0])) : 6'd0;
+							cx_ab <= ty[11] ? ty[7:4] : 4'd0;
+							cx_cnt <= ty[8] ? {1'b0, cntl[5:0]} + 7'd1 : {2'b00, cntl[4:0]} + 7'd1;
+							cx_str <= !ty[8] && cntl[5];
+							cx_have <= 1'b0;
+							cx_grp <= 1'b1;
+						end
+						// the packer, a clock behind the decoder: the texel's bits at the top of cx_pv, put in after the cx_on bits at the top of cx_out; a
+						// word's the top 32 when there are 32 (and what's left at the end, padded with zeros, as MAME's)
+						cx_pe <= emit;
+						cx_pv <= (val << (6'd32 - cx_dbits)) | (two && emit ? val2 << (7'd32 - (7'(cx_dbits) << 1)) : 32'h0);
+						cx_pr <= r;
+						cx_pp <= two && emit;
+						if (cx_pe)
+						begin
+							// (a string's two texels are both in cx_pv; a run's one is repeated)
+							// (a string's two texels are both in cx_pv; a run's one is repeated)
+							rep = cx_pp ? cx_pv : cx_pv | (cx_pr > 3'd1 ? cx_pv >> cx_dbits : 32'h0) | (cx_pr > 3'd2 ? cx_pv >> (7'(cx_dbits) << 1) : 32'h0)
+								| (cx_pr > 3'd3 ? cx_pv >> (7'(cx_dbits) * 7'd3) : 32'h0);
+							oacc = oacc | ({rep, 32'h0} >> on);
+							on = on + 7'(cx_dbits) * 7'(cx_pr);
+						end
+						if (on >= 7'd32 || (last && on != 7'd0 && !cx_pe))
+						begin
+							w = oacc[63:32];
+							oacc = {oacc[31:0], 32'h0};
+							on = on >= 7'd32 ? on - 7'd32 : 7'd0;
+							// (the texture memory's words have the first byte in bits 7:0)
+							ld_d <= {w[7:0], w[15:8], w[23:16], w[31:24]};
+							ld_two <= 1'b0;
+							ld_ta <= mm_dst[13:2];
+							ld_tram <= 1'b1;
+							mm_dst <= mm_dst + 14'd4;
+						end
+						cx_acc <= acc; cx_n <= n; cx_out <= oacc; cx_on <= on;
+						if (last && on == 7'd0 && !cx_pe)
+						begin
+							mm_n <= 28'd0;
+							ms_left <= 29'd0;
 						end
 					end
 				end
@@ -2007,6 +2192,8 @@ module m2_te (
 								8'd10: tm_count <= md(tm_count, r_d, r_mode);
 								8'd11: tm_uvmax <= md(tm_uvmax, r_d, r_mode);
 								8'd12: tm_uvmask <= md(tm_uvmask, r_d, r_mode);
+								8'd13: tm_st01 <= md(tm_st01, r_d, r_mode);
+								8'd14: tm_st23 <= md(tm_st23, r_d, r_mode);
 								8'd15: tm_exp <= md(tm_exp, r_d, r_mode);
 								8'd16: tm_c0 <= md(tm_c0, r_d, r_mode);
 								8'd17: tm_c1 <= md(tm_c1, r_d, r_mode);
