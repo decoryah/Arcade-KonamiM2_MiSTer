@@ -1,0 +1,43 @@
+<misterromdescription>
+    <name>Battle Tryst (ver JAC)</name>
+    <setname>btltryst</setname>
+    <mameversion>0289</mameversion>
+    <year>1998</year>
+    <manufacturer>Konami</manufacturer>
+    <rbf>KonamiM2Tryst</rbf>
+    <buttons names="Button 1,Button 2,Button 3,Start,Coin" default="A,B,X,Start,Select" />
+
+    <!--
+      Battle Tryst's own build (KonamiM2.qsf's Battle Tryst lines), as KonamiM2Tryst_<date>.rbf in _Arcade/cores: the Z buffer in the SDRAM board's memory, compressed texture loads, the
+      MPEG unit's control, and the CD's data sectors streamed from the mounted image. As Heat of Eleven's MRA, with RAM 2 x 8 MB and an
+      M48T58: index 3 is its 8 KB, then a byte for the board: bit 0 the larger RAM, bit 1 the CD's data sectors streamed from the mounted
+      image (the data track is 367 MB). Index 1 is only the drive's answers that aren't sectors (2048 bytes). The MPEG intro's pictures
+      aren't decoded: it shows black.
+
+      btltryst_cd.zip and btltryst_full.bin aren't in a MAME set; from the set's 636jac02.chd:
+        chdman extractcd -i btltryst/636jac02.chd -o x.cue -ob x.bin
+        python3 tools/fullimage.py x.cue btltryst_full.bin            (422,546,208 bytes, with btltryst_full.cue: in games/btltryst)
+        python3 tools/cdimage.py chdman btltryst/636jac02.chd btltryst_cd.bin, with its header option (2048 bytes)
+        zip btltryst_cd.zip btltryst_cd.bin                            (beside btltryst.zip)
+      Main releases up to 20261010 don't mount btltryst_full.bin from here: choose it once under "CD audio image" in the OSD.
+    -->
+
+    <file delay="1" type="s" index="0" path="btltryst_full.bin"/>
+
+    <rom index="0" zip="btltryst.zip" md5="none" address="0x30000000">
+        <part name="636a01.8q" crc="7b1dc738"/>
+    </rom>
+    <rom index="1" zip="btltryst_cd.zip" md5="none" address="0x32000000">
+        <part name="btltryst_cd.bin"/>
+    </rom>
+    <rom index="2" zip="btltryst.zip" md5="none">
+        <part name="93c46.7k"/>
+    </rom>
+    <!-- the EEPROM, the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
+    <nvram index="2" size="128"/>
+
+    <rom index="3" zip="btltryst.zip" md5="none">
+        <part name="m48t58"/>
+        <part>03</part>
+    </rom>
+</misterromdescription>
