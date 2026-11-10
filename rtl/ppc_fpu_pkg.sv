@@ -562,15 +562,18 @@ package ppc_fpu_pkg;
 		logic [22:0] m;
 		logic p;
 		logic signed [9:0] re;
+		logic [4:0] z;
 		if (v[30:23] == 8'hff) return v[22:0] != 23'h0 ? (v | 32'h00400000) : v[31] ? 32'h7fc00000 : 32'h0;   // NaN quieted; -inf, +inf
 		if (v[30:0] == 31'h0) return {v[31], 31'h7f800000};                                                   // +-0: +-inf
 		if (v[31]) return 32'h7fc00000;                                                                       // below 0: the default NaN, positive
 		if (v[30:23] == 8'h00)
 		begin
-			// a denormal, normalized: 0.m x 2^-126
-			e = -10'sd127; m = v[22:0];
-			for (int j = 0; j < 23; j++) if (!m[22]) begin m = {m[21:0], 1'b0}; e = e - 10'sd1; end
-			m = {m[21:0], 1'b0};
+			// a denormal, normalized: 0.m x 2^-126, its leading zeros counted side by side, then one shift (a shift a step was a
+			// chain of 23: 4-5 ns short of the machine clock)
+			z = 5'd0;
+			for (int j = 0; j < 23; j++) if (v[j]) z = 5'(22 - j);
+			m = 23'({v[22:0], 1'b0} << z);
+			e = -10'sd127 - $signed({5'b0, z});
 		end
 		else
 		begin
