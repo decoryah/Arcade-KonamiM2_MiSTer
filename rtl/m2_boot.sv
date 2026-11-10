@@ -13,6 +13,13 @@
 //
 // Each CPU reaches memory through its caches (rtl/ppc_cache.sv), which see every write the others make, so memory is coherent,
 // as MAME's is. The download writes DDR3 directly, under reset.
+//
+// PPC_CACHE_KB (a build option, default 32): each cache's size, instruction and data sides each (rtl/ppc_cache.sv's KB). 4 is
+// the 602's own (4 KB a side, the data side two-way, 32-byte lines; its instruction side is two-way too, here direct-mapped):
+// the board's speed and slowdowns, and much less block RAM; 32 runs faster than the board.
+`ifndef PPC_CACHE_KB
+`define PPC_CACHE_KB 32
+`endif
 `default_nettype none
 module m2_boot #(
 	parameter int TICK = 8              // clocks a DEC / TB tick (the bus clock / 4)
@@ -165,7 +172,7 @@ module m2_boot #(
 			.fp_req(fp_req[g]), .fp_res
 		);
 		// verilator lint_on PINCONNECTEMPTY
-		ppc_cache cache
+		ppc_cache #(.KB(`PPC_CACHE_KB)) cache
 		(
 			.clk, .rst(rs[g]), .sn_v(sn_v[g]), .sn_a,
 			.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data, .i_mem(m_if.mem),
