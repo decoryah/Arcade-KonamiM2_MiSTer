@@ -2,9 +2,10 @@
 // SP / LT registers, says it holds an integer: rtl/ppc_pipe.sv's stfd needs that). A multiply-add is fused (the 48-bit product
 // goes to the add whole, as in the manual), a result rounded once.
 //   M0-M2  a * c: the operands' specials and a denormal's leading zeros; the normalized multiply; the product normalized
-//   A0-A3  the add: operands unpacked; the specials and the larger by magnitude; aligned and added; normalized
-//   S0-S2  the shift into a denormal; the round; the pack (or fctiw[z], or frsp, which has nothing to do but quiet a NaN)
-// An op goes through the units it needs, in that order, always S: fmadds M A S (10 stages), fmuls M S (6), fadds A S (7).
+//   A0-A2  the add: the operands unpacked, the specials and the larger by magnitude; aligned and added; normalized
+//   S0-S1  the shift into a denormal and the round's increment; the pack (or fctiw[z], or frsp, which has nothing to do but
+//          quiet a NaN)
+// An op goes through the units it needs, in that order, always S: fmadds M A S (8 stages), fmuls M S (5), fadds A S (5).
 // ppc_fps_it is the iterative unit: divide, square root, fres, frsqrte, two bits a clock.
 //
 // The control is rtl/ppc_fpp.sv's (a result leaves its last stage, ev, for the next op's operands, and is registered, wv, for the
@@ -17,41 +18,68 @@ module ppc_fps_ctl (
 	input  logic        allow,          // this CPU's clock for an op
 	input  logic [15:0] res_a, res_s, res_w,
 	input  logic        issue,
-	input  logic [4:0]  op,             // ppc_fpu_pkg::fop_t, not F_DIV(S) / F_SQRT(S) / F_RES / F_RSQRTE / F_CMP
+	// verilator lint_off UNUSEDSIGNAL
+	input  ppc_fpu_pkg::fpk_t pk,       // the op's (fpk_s: a ppc_fpu_pkg::fop_t, not F_DIV(S) / F_SQRT(S) / F_RES / F_RSQRTE / F_CMP)
+	// verilator lint_on UNUSEDSIGNAL
 	input  logic [4:0]  rd,
-	input  logic [4:0]  rb,             // b's FPR (a multiply-add's addend, taken late)
+	input  logic [4:0]  ra, rb, rc,     // its operands' FPRs (b: a multiply-add's addend, taken late)
 	output logic        ok,             // op can issue this clock
 	output logic        dok,            // ... as far as rd goes
 	output logic        busy,           // an op of this CPU's is in flight
 	output logic [2:0]  bw,             // a multiply-add's addend still to come: the clocks until it leaves its last stage
+	output logic [2:0]  fe, fw,         // operands a, b, c leaving the last stage this clock (ev), registered (wv)
 	output logic [31:0] pe, pw, pn,     // FPRs not written by this clock's end: with ev, with wv, at all
 	output logic [31:0] lb              // FPRs a multiply-add's addend may be made in, b taken late
 );
 	import ppc_fpu_pkg::*;
 
 	logic [3:0]  cnt [0:31];            // the clocks until the last op writing the FPR has its wv (1: this clock)
-	cls_t        ik;
-	logic [3:0]  a_w;
-	always_comb
-	begin
-		ik = cls(op);
-		a_w = sat_w(ik);
-		ok = allow && !(ik.add && res_a[sat_a(ik)]) && !res_s[sat_s(ik)] && !res_w[a_w];
-		dok = cnt[rd] < a_w + 4'd2;
-		for (int f = 0; f < 32; f++)
-		begin
-			pe[f] = cnt[f] > 4'd2;
-			pw[f] = cnt[f] > 4'd1;
-			pn[f] = cnt[f] != 4'd0;
-			lb[f] = cnt[f] <= 4'(SLM + 2);
-		end
-	end
+	// verilator lint_off UNUSEDSIGNAL
+	cls_t        ik;                    // (its add and mul)
+	// verilator lint_on UNUSEDSIGNAL
+	assign ik = pk.k;
+	assign ok = allow && !(ik.add && res_a[pk.a0]) && !res_s[pk.s] && !res_w[pk.w0];
+	assign dok = cnt[rd] < pk.w0 + 4'd2;
+	// pe, pw, pn and lb from registers, each its compare on cnt's next value: from the counts through the compares to X's
+	// hazards was a long path
+	logic [31:0] pe_q, pw_q, pn_q, lb_q;
+	assign pe = pe_q;
+	assign pw = pw_q;
+	assign pn = pn_q;
+	assign lb = lb_q;
 	assign busy = pn != 32'h0;
 	assign bw = ik.mul && ik.add && cnt[rb] > 4'd2 ? 3'(cnt[rb] - 4'd2) : 3'd0;
+	assign fe = {cnt[rc] == 4'd2, cnt[rb] == 4'd2, cnt[ra] == 4'd2};
+	assign fw = {cnt[rc] == 4'd1, cnt[rb] == 4'd1, cnt[ra] == 4'd1};
 
 	always_ff @(posedge clk)
 		for (int f = 0; f < 32; f++)
-			cnt[f] <= rst ? 4'd0 : issue && rd == 5'(f) ? a_w + 4'd1 : cnt[f] == 4'd0 ? 4'd0 : cnt[f] - 4'd1;
+		begin
+			cnt[f] <= rst ? 4'd0 : issue && rd == 5'(f) ? pk.w0 + 4'd1 : cnt[f] == 4'd0 ? 4'd0 : cnt[f] - 4'd1;
+			if (rst)
+			begin
+				pe_q[f] <= 1'b0; pw_q[f] <= 1'b0; pn_q[f] <= 1'b0; lb_q[f] <= 1'b1;
+			end
+			else if (issue && rd == 5'(f))
+			begin
+				pe_q[f] <= pk.w0 + 4'd1 > 4'd2; pw_q[f] <= pk.w0 + 4'd1 > 4'd1; pn_q[f] <= pk.w0 + 4'd1 != 4'd0;
+				lb_q[f] <= pk.w0 + 4'd1 <= 4'(SLM + 2);
+			end
+			else
+			begin
+				// (a count of 0 stays 0, any other goes down by 1)
+				pe_q[f] <= cnt[f] > 4'd3; pw_q[f] <= cnt[f] > 4'd2; pn_q[f] <= cnt[f] > 4'd1; lb_q[f] <= cnt[f] <= 4'(SLM + 3);
+			end
+		end
+`ifdef VERILATOR
+	always_ff @(posedge clk)
+		for (int f = 0; f < 32; f++)
+			if (!rst && (pe_q[f] != (cnt[f] > 4'd2) || pw_q[f] != (cnt[f] > 4'd1) || pn_q[f] != (cnt[f] != 4'd0) ||
+				lb_q[f] != (cnt[f] <= 4'(SLM + 2))))
+				$display("FPCTL p wrong: %0d %0d", f, cnt[f]);
+	always_ff @(posedge clk)
+		if (!rst && issue && (pk.a0 != sat_a(pk.k) || pk.s != sat_s(pk.k) || pk.w0 != sat_w(pk.k))) $display("FPCTL pk wrong");
+`endif
 endmodule
 
 module ppc_fps_dp (
@@ -64,6 +92,7 @@ module ppc_fps_dp (
 	input  logic [31:0] a, b, c,
 	input  logic [4:0]  rd,
 	input  logic [2:0]  i_bw,           // a multiply-add's addend: the clocks until it comes (evl), 0 if it's in b
+	input  logic [2:0]  i_fe, i_fw,     // a, b, c: this clock's evl instead, or wval
 	output logic [15:0] res_a, res_s, res_w, // the reservations: bit j, the clock j from now
 	output logic        ev,             // a result leaving its last stage (for the operands): FPR erd = evl
 	output logic        ecpu,
@@ -82,6 +111,10 @@ module ppc_fps_dp (
 	assign ik = cls(op);
 	meta_t im;
 	assign im = '{1'b1, cpu, ik, rd, rn};
+	// the issued op's operands, those made in the pipeline taken as they leave it (or from wval, a clock after)
+	wire [31:0] ia = i_fe[0] ? evl[31:0] : i_fw[0] ? wval[31:0] : a;
+	wire [31:0] ib = i_fe[1] ? evl[31:0] : i_fw[1] ? wval[31:0] : b;
+	wire [31:0] ic = i_fe[2] ? evl[31:0] : i_fw[2] ? wval[31:0] : c;
 
 	// ---- M: a * c --------------------------------------------------------------------------------------------------
 	meta_t        m0, m1, m2;
@@ -132,60 +165,65 @@ module ppc_fps_dp (
 	wire [31:0] m_bv = m2_bw == 3'd1 ? evl[31:0] : m2_b;
 	sx_t m_prod;
 	assign m_prod = '{1'b0, 1'b0, 1'b0, m2_s, m_e, m_m};
+	// (to A, a product under the normal range shifted to a denormal's exponent, the bits shifted out or'd into the last: A's
+	// operands' exponents are all -126 or more, so the larger exponent is the larger operand)
+	sden_t m_pd;
+	assign m_pd = sden(m_e, m_m, 1'b0);
+	sx_t m_proda;
+	assign m_proda = '{1'b0, 1'b0, 1'b0, m2_s, m_pd.e, {m_pd.m[47:1], m_pd.m[0] | m_pd.st}};
 
 	// ---- A: x + y (x - y) ------------------------------------------------------------------------------------------
-	meta_t       a0, a1, a2, a3;
+	meta_t       a0, a1, a2;
 	logic [31:0] a0_x, a0_y;                // an operand as it is, ...
 	logic        a0_xp, a0_yp;              // ... or the product
 	sx_t         a0_p;
-	sx_t         a1_x, a1_y;
-	logic [31:0] a1_xv, a1_yv;              // (the raw values, for a NaN)
-	logic        a2_sp, a3_sp;
-	logic [31:0] a2_spv, a3_spv;
-	logic        a2_s, a3_s;                // the result's sign (the larger operand's)
-	logic        a2_sub;                    // the signs differ
-	logic [47:0] a2_mb, a2_ms;              // the larger and smaller operand's significands
-	logic signed [9:0] a2_eb, a3_e;
-	logic [10:0] a2_d;                      // the difference of the exponents
-	logic [51:0] a3_sum;
+	logic        a1_sp, a2_sp;
+	logic [31:0] a1_spv, a2_spv;
+	logic        a1_s, a2_s;                // the result's sign (the larger operand's)
+	logic        a1_sub;                    // the signs differ
+	logic [47:0] a1_mb, a1_ms;              // the larger and smaller operand's significands
+	logic signed [9:0] a1_eb, a2_e;
+	logic [10:0] a1_d;                      // the difference of the exponents
+	logic [51:0] a2_sum;
 
+	// A0: the operands unpacked (a denormal as it is, its exponent -126: A2 normalizes the sum); the specials; the larger by
+	// magnitude
 	sx_t a0_ux, a0_uy;
-	assign a0_ux = a0_xp ? a0_p : sunpack(a0_x);
-	assign a0_uy = a0_yp ? a0_p : sunpack(a0_y);
-
-	// A1: the specials; the larger by magnitude
-	logic        a1_sp;
-	logic [31:0] a1_spv;
-	logic        a1_big;                    // x is the larger
-	logic        a1_sy;
+	assign a0_ux = a0_xp ? a0_p : sunpack_a(a0_x);
+	assign a0_uy = a0_yp ? a0_p : sunpack_a(a0_y);
+	logic        a0_sp;
+	logic [31:0] a0_spv;
+	logic        a0_big;                    // x is the larger
+	logic        a0_sy;
 	always_comb
 	begin
 		logic xz, yz;
-		a1_sy = a1_y.s ^ a1.k.sub;
-		xz = a1_x.zero;
-		yz = a1_y.zero;
-		a1_sp = 1'b1;
-		if (a1_x.nan) a1_spv = squiet(a1_xv);
-		else if (a1_y.nan) a1_spv = squiet(a1_yv);
-		else if (a1_x.inf && a1_y.inf) a1_spv = a1_x.s != a1_sy ? SDNAN : {a1_x.s, 31'h7f800000};
-		else if (a1_x.inf) a1_spv = {a1_x.s, 31'h7f800000};
-		else if (a1_y.inf) a1_spv = {a1_sy, 31'h7f800000};
-		else if (xz && yz) a1_spv = {(a1_x.s && a1_sy) || (a1_x.s != a1_sy && a1.rn == 2'd3), 31'h0};
-		else begin a1_sp = 1'b0; a1_spv = 32'h0; end
-		// (a zero's exponent is the lowest: it's the smaller, shifted out with nothing to lose)
-		a1_big = a1_x.e > a1_y.e || (a1_x.e == a1_y.e && a1_x.m >= a1_y.m);
+		a0_sy = a0_uy.s ^ a0.k.sub;
+		xz = a0_ux.zero;
+		yz = a0_uy.zero;
+		a0_sp = 1'b1;
+		if (a0_ux.nan) a0_spv = squiet(a0_x);
+		else if (a0_uy.nan) a0_spv = squiet(a0_y);
+		else if (a0_ux.inf && a0_uy.inf) a0_spv = a0_ux.s != a0_sy ? SDNAN : {a0_ux.s, 31'h7f800000};
+		else if (a0_ux.inf) a0_spv = {a0_ux.s, 31'h7f800000};
+		else if (a0_uy.inf) a0_spv = {a0_sy, 31'h7f800000};
+		else if (xz && yz) a0_spv = {(a0_ux.s && a0_sy) || (a0_ux.s != a0_sy && a0.rn == 2'd3), 31'h0};
+		else begin a0_sp = 1'b0; a0_spv = 32'h0; end
+		// (a zero's exponent is the lowest: it's the smaller, shifted out with nothing to lose; an exponent over -126 has its
+		// significand's top bit set)
+		a0_big = a0_ux.e > a0_uy.e || (a0_ux.e == a0_uy.e && a0_ux.m >= a0_uy.m);
 	end
 
-	// A2: the smaller aligned (the bits shifted out in the last), and the sum
-	logic [51:0] a2_sum;
+	// A1: the smaller aligned (the bits shifted out in the last), and the sum
+	logic [51:0] a1_sum;
 	always_comb
 	begin
 		logic [50:0] sm;
-		sm = shr51({a2_ms, 3'b000}, a2_d > 11'd63 ? 6'd63 : a2_d[5:0]);
-		a2_sum = a2_sub ? {1'b0, a2_mb, 3'b000} - {1'b0, sm} : {1'b0, a2_mb, 3'b000} + {1'b0, sm};
+		sm = shr51({a1_ms, 3'b000}, a1_d > 11'd63 ? 6'd63 : a1_d[5:0]);
+		a1_sum = a1_sub ? {1'b0, a1_mb, 3'b000} - {1'b0, sm} : {1'b0, a1_mb, 3'b000} + {1'b0, sm};
 	end
 
-	// A3: normalized
+	// A2: normalized
 	logic [47:0] a_m;
 	logic        a_st;
 	logic signed [9:0] a_e;
@@ -193,105 +231,98 @@ module ppc_fps_dp (
 	always_comb
 	begin
 		logic [5:0] l;
-		l = lz51(a3_sum[50:0]);
-		a_n = a3_sum[50:0] << l;
-		if (a3_sum[51]) begin a_m = a3_sum[51:4]; a_st = a3_sum[3:0] != 4'h0; a_e = a3_e + 10'sd1; end
-		else begin a_m = a_n[50:3]; a_st = a_n[2:0] != 3'h0; a_e = a3_e - 10'($signed({1'b0, l})); end
+		l = lz51(a2_sum[50:0]);
+		a_n = a2_sum[50:0] << l;
+		if (a2_sum[51]) begin a_m = a2_sum[51:4]; a_st = a2_sum[3:0] != 4'h0; a_e = a2_e + 10'sd1; end
+		else begin a_m = a_n[50:3]; a_st = a_n[2:0] != 3'h0; a_e = a2_e - 10'($signed({1'b0, l})); end
 	end
-	wire         a_zero = a3_sum == 52'h0;
-	wire         a_sp = a3_sp || a_zero;
-	wire [31:0]  a_spv = a3_sp ? a3_spv : {a3.rn == 2'd3, 31'h0};
+	wire         a_zero = a2_sum == 52'h0;
+	wire         a_sp = a2_sp || a_zero;
+	wire [31:0]  a_spv = a2_sp ? a2_spv : {a2.rn == 2'd3, 31'h0};
 
 	// ---- S: to a denormal, the round, the pack; or the conversion to an integer ------------------------------------
-	meta_t       s0, s1, s2;
-	logic        s0_sp, s1_sp, s2_sp;
-	logic [31:0] s0_spv, s1_spv, s2_spv;
-	logic        s0_s, s1_s, s2_s;
-	logic signed [9:0] s0_e, s1_e, s2_e;
-	logic [47:0] s0_m, s1_m;
-	logic        s0_st, s1_st;
-	logic [23:0] s2_kept;
-	logic        s2_inc;
+	meta_t       s0, s1;
+	logic        s0_sp, s1_sp;
+	logic [31:0] s0_spv, s1_spv;
+	logic        s0_s, s1_s;
+	logic signed [9:0] s0_e, s1_e;
+	logic [47:0] s0_m;
+	logic        s0_st;
+	logic [23:0] s1_kept;
+	logic        s1_inc;
 	logic [31:0] s0_b;                      // fctiw's operand
-	logic        s1_cvsp, s2_cvsp;          // a special result (0, 0x80000000) ...
-	logic [31:0] s1_cvspv, s2_cvspv;
-	logic        s1_tiny;                   // ... under 2^-2: 0 and the sticky bit
-	logic [23:0] s1_cvm;
-	logic [5:0]  s1_cvsh;                   // ... the right shift to the integer
-	logic [33:0] s2_mag;
+	logic        s1_cvsp;                   // a special result (0, 0x80000000)
+	logic [31:0] s1_cvspv;
+	logic [33:0] s1_mag;
 
-	// S0
-	logic        s0_cvsp, s0_tiny;
+	// S0: to a denormal, and the round's increment; or fctiw[z]'s shift to the integer, and its increment
+	logic        s0_cvsp;
 	logic [31:0] s0_cvspv;
-	logic [5:0]  s0_cvsh;
 	sden_t       s0_d;
+	logic [33:0] s0_mag;
+	logic        s0_inc;
 	always_comb
 	begin
 		logic signed [9:0] e;
+		logic tiny;                         // under 2^-2: 0 and the sticky bit
+		logic [5:0] sh;                     // the right shift to the integer
+		logic r, st;
+		logic [1:0] md;
+		logic [63:0] m;
 		s0_d = sden(s0_e, s0_m, s0_st);
 		e = 10'($signed({2'b0, s0_b[30:23]}) - 127);
-		s0_cvsp = 1'b1; s0_cvspv = 32'h80000000; s0_tiny = 1'b0;
-		s0_cvsh = 6'(10'sd55 - e);
+		s0_cvsp = 1'b1; s0_cvspv = 32'h80000000; tiny = 1'b0;
+		sh = 6'(10'sd55 - e);
 		if (s0_b[30:23] == 8'hff) ;
 		else if (s0_b[30:0] == 31'h0) s0_cvspv = 32'h0;
 		else if (e >= 10'sd32) ;
 		else
 		begin
 			s0_cvsp = 1'b0;
-			s0_tiny = s0_b[30:23] == 8'h0 || e < -10'sd2;
+			tiny = s0_b[30:23] == 8'h0 || e < -10'sd2;
 		end
-	end
-
-	// S1
-	logic [33:0] s1_mag;
-	logic        s1_inc;
-	always_comb
-	begin
-		logic r, st;
-		logic [1:0] md;
-		logic [63:0] m;
-		m = {8'h0, s1_cvm, 32'h0};
-		if (s1.k.cv)
+		m = {8'h0, 1'b1, s0_b[22:0], 32'h0};
+		if (s0.k.cv)
 		begin
-			if (s1_tiny) begin s1_mag = 34'h0; r = 1'b0; st = 1'b1; end
+			if (tiny) begin s0_mag = 34'h0; r = 1'b0; st = 1'b1; end
 			else
 			begin
-				s1_mag = 34'(m >> s1_cvsh);
-				r = m[s1_cvsh - 6'd1];
+				s0_mag = 34'(m >> sh);
+				r = m[sh - 6'd1];
 				st = 1'b0;
-				for (int i = 0; i < 63; i++) if (i < int'(s1_cvsh) - 1 && m[i]) st = 1'b1;
+				for (int i = 0; i < 63; i++) if (i < int'(sh) - 1 && m[i]) st = 1'b1;
 			end
-			md = s1.k.cvz ? 2'd1 : s1.rn;
+			md = s0.k.cvz ? 2'd1 : s0.rn;
 			case (md)
-				2'd0: s1_inc = r && (st || s1_mag[0]);
-				2'd1: s1_inc = 1'b0;
-				2'd2: s1_inc = !s1_s && (r || st);
-				default: s1_inc = s1_s && (r || st);
+				2'd0: s0_inc = r && (st || s0_mag[0]);
+				2'd1: s0_inc = 1'b0;
+				2'd2: s0_inc = !s0_s && (r || st);
+				default: s0_inc = s0_s && (r || st);
 			endcase
 		end
 		else
 		begin
-			s1_mag = 34'h0;
-			s1_inc = sinc(s1_s, s1_m, s1_st, s1.rn);
+			s0_mag = 34'h0;
+			s0_inc = sinc(s0_s, s0_d.m, s0_d.st, s0.rn);
 		end
 	end
 
-	// S2
+	// S1: the pack
 	logic [32:0] s_out;
 	always_comb
 	begin
 		logic [33:0] mag;
 		logic [31:0] iv;
-		mag = s2_mag + 34'(s2_inc);
-		if (s2_cvsp) iv = s2_cvspv;
-		else if (s2_s) iv = mag > 34'h80000000 ? 32'h80000000 : 32'(-mag);
+		mag = s1_mag + 34'(s1_inc);
+		if (s1_cvsp) iv = s1_cvspv;
+		else if (s1_s) iv = mag > 34'h80000000 ? 32'h80000000 : 32'(-mag);
 		else iv = mag >= 34'h80000000 ? 32'h80000000 : mag[31:0];
-		s_out = s2.k.cv ? {1'b1, iv} : {1'b0, s2_sp ? s2_spv : spack(s2_s, s2_e, s2_kept, s2_inc, s2.rn)};
+		s_out = s1.k.cv ? {1'b1, iv} : {1'b0, s1_sp ? s1_spv : spack(s1_s, s1_e, s1_kept, s1_inc, s1.rn)};
 	end
 
-	assign ev = s2.v;
-	assign ecpu = s2.cpu;
-	assign erd = s2.rd;
+	assign ev = s1.v;
+	assign ecpu = s1.cpu;
+	assign erd = s1.rd;
 	assign evl = s_out;
 
 	always_ff @(posedge clk)
@@ -299,8 +330,8 @@ module ppc_fps_dp (
 		if (rst)
 		begin
 			m0.v <= 1'b0; m1.v <= 1'b0; m2.v <= 1'b0;
-			a0.v <= 1'b0; a1.v <= 1'b0; a2.v <= 1'b0; a3.v <= 1'b0;
-			s0.v <= 1'b0; s1.v <= 1'b0; s2.v <= 1'b0;
+			a0.v <= 1'b0; a1.v <= 1'b0; a2.v <= 1'b0;
+			s0.v <= 1'b0; s1.v <= 1'b0;
 			wv <= 1'b0;
 			res_a <= '0; res_s <= '0; res_w <= '0;
 			m0_bw <= 3'd0;
@@ -309,7 +340,7 @@ module ppc_fps_dp (
 		begin
 			// M
 			m0.v <= 1'b0;
-			if (issue && ik.mul) begin m0 <= im; m0_a <= a; m0_c <= c; m0_b <= b; m0_bw <= i_bw; end
+			if (issue && ik.mul) begin m0 <= im; m0_a <= ia; m0_c <= ic; m0_b <= ib; m0_bw <= i_bw; end
 			m1 <= m0; m1_sp <= m0_sp; m1_spv <= m0_spv; m1_s <= m0_a[31] ^ m0_c[31]; m1_e <= m0_e;
 			m1_ma <= {m0_a[30:23] != 8'h0, m0_a[22:0]}; m1_mc <= {m0_c[30:23] != 8'h0, m0_c[22:0]}; m1_ka <= m0_ka; m1_kc <= m0_kc;
 			m2 <= m1; m2_sp <= m1_sp; m2_spv <= m1_spv; m2_s <= m1_s; m2_e <= m1_e;
@@ -324,33 +355,32 @@ module ppc_fps_dp (
 			begin
 				a0 <= m2;
 				a0_xp <= !m2.k.swap; a0_yp <= m2.k.swap;
-				a0_p <= m_prod;
+				a0_p <= m_proda;
 				a0_x <= m_bv; a0_y <= m_bv;     // (whichever isn't the product)
 				// a special product's raw value, for a NaN
 				if (m2_sp) begin if (m2.k.swap) a0_y <= m2_spv; else a0_x <= m2_spv; a0_xp <= 1'b0; a0_yp <= 1'b0; end
 			end
 			else if (issue && ik.add && !ik.mul)
 			begin
-				a0 <= im; a0_x <= a; a0_y <= b; a0_xp <= 1'b0; a0_yp <= 1'b0;
+				a0 <= im; a0_x <= ia; a0_y <= ib; a0_xp <= 1'b0; a0_yp <= 1'b0;
 			end
-			a1 <= a0; a1_x <= a0_ux; a1_y <= a0_uy; a1_xv <= a0_x; a1_yv <= a0_y;
-			a2 <= a1; a2_sp <= a1_sp; a2_spv <= a1_spv;
-			a2_s <= a1_big ? a1_x.s : a1_sy;
-			a2_sub <= a1_x.s != a1_sy;
-			a2_mb <= a1_big ? a1_x.m : a1_y.m; a2_ms <= a1_big ? a1_y.m : a1_x.m;
-			a2_eb <= a1_big ? a1_x.e : a1_y.e;
-			a2_d <= a1_big ? 11'($signed({a1_x.e[9], a1_x.e}) - $signed({a1_y.e[9], a1_y.e})) :
-				11'($signed({a1_y.e[9], a1_y.e}) - $signed({a1_x.e[9], a1_x.e}));
-			a3 <= a2; a3_sp <= a2_sp; a3_spv <= a2_spv; a3_s <= a2_s; a3_e <= a2_eb; a3_sum <= a2_sum;
+			a1 <= a0; a1_sp <= a0_sp; a1_spv <= a0_spv;
+			a1_s <= a0_big ? a0_ux.s : a0_sy;
+			a1_sub <= a0_ux.s != a0_sy;
+			a1_mb <= a0_big ? a0_ux.m : a0_uy.m; a1_ms <= a0_big ? a0_uy.m : a0_ux.m;
+			a1_eb <= a0_big ? a0_ux.e : a0_uy.e;
+			a1_d <= a0_big ? 11'($signed({a0_ux.e[9], a0_ux.e}) - $signed({a0_uy.e[9], a0_uy.e})) :
+				11'($signed({a0_uy.e[9], a0_uy.e}) - $signed({a0_ux.e[9], a0_ux.e}));
+			a2 <= a1; a2_sp <= a1_sp; a2_spv <= a1_spv; a2_s <= a1_s; a2_e <= a1_eb; a2_sum <= a1_sum;
 
-			// S0: from A3, M2 or issued
+			// S0: from A2, M2 or issued
 			s0.v <= 1'b0;
-			if (a3.v)
+			if (a2.v)
 			begin
-				s0 <= a3;
+				s0 <= a2;
 				// (fnmadd's negation)
-				s0_sp <= a_sp; s0_spv <= a3.k.neg ? a_spv ^ 32'h80000000 : a_spv;
-				s0_s <= a3_s ^ a3.k.neg; s0_e <= a_e; s0_m <= a_m; s0_st <= a_st;
+				s0_sp <= a_sp; s0_spv <= a2.k.neg ? a_spv ^ 32'h80000000 : a_spv;
+				s0_s <= a2_s ^ a2.k.neg; s0_e <= a_e; s0_m <= a_m; s0_st <= a_st;
 			end
 			else if (m2.v && !m2.k.add)
 			begin
@@ -359,13 +389,11 @@ module ppc_fps_dp (
 			end
 			else if (issue && !ik.mul && !ik.add)
 			begin
-				s0 <= im; s0_b <= b; s0_s <= b[31];
-				s0_sp <= 1'b1; s0_spv <= snan(b) ? squiet(b) : b;
+				s0 <= im; s0_b <= ib; s0_s <= ib[31];
+				s0_sp <= 1'b1; s0_spv <= snan(ib) ? squiet(ib) : ib;
 			end
-			s1 <= s0; s1_sp <= s0_sp; s1_spv <= s0_spv; s1_s <= s0_s; s1_e <= s0_d.e; s1_m <= s0_d.m; s1_st <= s0_d.st;
-			s1_cvsp <= s0_cvsp; s1_cvspv <= s0_cvspv; s1_tiny <= s0_tiny; s1_cvm <= {1'b1, s0_b[22:0]}; s1_cvsh <= s0_cvsh;
-			s2 <= s1; s2_sp <= s1_sp; s2_spv <= s1_spv; s2_s <= s1_s; s2_e <= s1_e; s2_kept <= s1_m[47:24];
-			s2_cvsp <= s1_cvsp; s2_cvspv <= s1_cvspv; s2_mag <= s1_mag; s2_inc <= s1_inc;
+			s1 <= s0; s1_sp <= s0_sp; s1_spv <= s0_spv; s1_s <= s0_s; s1_e <= s0_d.e; s1_kept <= s0_d.m[47:24];
+			s1_cvsp <= s0_cvsp; s1_cvspv <= s0_cvspv; s1_mag <= s0_mag; s1_inc <= s0_inc;
 
 			wv <= ev; wcpu <= ecpu; wrd <= erd; wval <= evl;
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # run.sh [ops]: the single-precision float units (rtl/ppc_fps.sv) against the host's floats: the pipeline, then the iterative unit
 set -e
-R=/mnt/c/repos/konamim2-mister/mister
+R=${R:-/mnt/c/repos/konamim2-mister/mister}
 export PATH=~/tools/oss-cad-suite/bin:$PATH
 N=${1:-2000000}
 for TOP in ppc_fps_dp ppc_fps_it; do

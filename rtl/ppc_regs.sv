@@ -1,7 +1,7 @@
 // A register file in RAM for rtl/ppc_pipe.sv: two write ports, each with its own bank (a copy per read port), and a
 // live value table (the bank that wrote an entry last; w1 wins when both write it in a clock). NR read ports,
-// registered: the address the clock before. What an entry written in that clock reads is either value (no_rw_check):
-// the core forwards those writes itself.
+// registered: the address the clock before, ra_k if keep, else ra_n (keep comes late: the table is looked up at both).
+// What an entry written in that clock reads is either value (no_rw_check): the core forwards those writes itself.
 `default_nettype none
 module ppc_regs #(
 	parameter int W = 32,               // bits an entry
@@ -15,7 +15,8 @@ module ppc_regs #(
 	input  logic                   we1,
 	input  logic [AW-1:0]          wa1,
 	input  logic [W-1:0]           wd1,
-	input  logic [NR-1:0][AW-1:0]  ra,
+	input  logic [NR-1:0][AW-1:0]  ra_k, ra_n,
+	input  logic                   keep,
 	output logic [NR-1:0][W-1:0]   rd
 );
 	logic [(1 << AW) - 1:0] lvt;
@@ -30,10 +31,12 @@ module ppc_regs #(
 	for (i = 0; i < NR; i++)
 	begin : g_rd
 		logic [W-1:0] q0, q1;
+		logic [AW-1:0] ra;
 		logic sel;
-		ppc_ram_s #(.W(W), .AW(AW)) b0 (.clk, .we(we0), .wa(wa0), .wd(wd0), .ra(ra[i]), .rd(q0));
-		ppc_ram_s #(.W(W), .AW(AW)) b1 (.clk, .we(we1), .wa(wa1), .wd(wd1), .ra(ra[i]), .rd(q1));
-		always_ff @(posedge clk) sel <= lvt[ra[i]];
+		assign ra = keep ? ra_k[i] : ra_n[i];
+		ppc_ram_s #(.W(W), .AW(AW)) b0 (.clk, .we(we0), .wa(wa0), .wd(wd0), .ra, .rd(q0));
+		ppc_ram_s #(.W(W), .AW(AW)) b1 (.clk, .we(we1), .wa(wa1), .wd(wd1), .ra, .rd(q1));
+		always_ff @(posedge clk) sel <= keep ? lvt[ra_k[i]] : lvt[ra_n[i]];
 		assign rd[i] = sel ? q1 : q0;
 	end
 	endgenerate

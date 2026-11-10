@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the release zip in MiSTer's SD card structure from the repository (as Gaelco 3D's tools/package.py):
 
-  _Arcade/<title>.mra                   the MRAs                (mra/*.mra)
+  _Arcade/<title>.mra                   the MRAs                (mra/*.mra that ask for KonamiM2: Heat of Eleven's own build isn't released)
   _Arcade/cores/KonamiM2_<date>.rbf     the core                (releases/KonamiM2_<date>.rbf)
 
   python3 tools/package.py [YYYYMMDD[a-z]]
@@ -31,6 +31,9 @@ def main(argv):
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
         for mra in sorted(glob.glob(os.path.join(REPO, 'mra', '*.mra'))):
+            with open(mra, encoding='utf-8') as f:
+                if '<rbf>KonamiM2</rbf>' not in f.read():
+                    continue
             z.write(mra, '_Arcade/' + os.path.basename(mra))
         z.write(rbf, '_Arcade/cores/' + os.path.basename(rbf))
     print(out)

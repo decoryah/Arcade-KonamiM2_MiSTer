@@ -3,7 +3,7 @@
 # RTL unit and on the reference model (tools/ref/ppc602). FPP=1: the float pipeline (rtl/ppc_fpp.sv) instead
 # (~/build_m2/ppcfpu_fpp).
 set -e
-R=/mnt/c/repos/konamim2-mister/mister
+R=${R:-/mnt/c/repos/konamim2-mister/mister}
 B=~/build_m2/ppcfpu
 TOP=ppc_fpu
 DEF=

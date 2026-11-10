@@ -48,8 +48,8 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-# (seed 7: with these changes, seeds 4 and 11 fail to route the default build)
-set_global_assignment -name SEED 7
+# seed 2: release 20261110's build (seeds 7, 4 and 1 also meet timing)
+set_global_assignment -name SEED 2
 
 
 
@@ -79,6 +79,19 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 
 # Disable ALSA audio output to save some resources
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
+# The chip is nearly full: the framework blocks with time to spare (3.7 ns and more) are made small, not fast
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "audio_out:audio_out"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "emu:emu|hps_io:hps_io"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "emu:emu|video_freak:video_freak"
+# ... and those with 4.8 ns and more (fpf2 seed 6, in and out), the core's input port (m2_kio) too
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "osd:vga_osd"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "pll_hdmi_adj:pll_hdmi_adj"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "pll_cfg_hdmi:pll_cfg_hdmi"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "vga_out:vga_out"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "mcp23009:mcp23009"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "emu:emu|arcade_video:arcade_video"
+set_instance_assignment -name OPTIMIZATION_TECHNIQUE AREA -to "emu:emu|m2_boot:u_boot|m2_kio:kio"
 
 source sys/sys.tcl
 set_global_assignment -name FAMILY "Cyclone V"

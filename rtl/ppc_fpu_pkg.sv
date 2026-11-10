@@ -17,6 +17,7 @@ package ppc_fpu_pkg;
 
 	// ---- the float pipeline's op classes (rtl/ppc_fpp.sv) ---------------------------------------------------------------
 	localparam int LM = 5, LA = 4, LS = 3;  // its units' stages
+	localparam int LMF = 2;                 // M's for a fast multiply (single-valued a and c: M0 then M4)
 	typedef struct packed {
 		logic mul;                      // a * c first
 		logic add;                      // then (or only) an add
@@ -47,16 +48,48 @@ package ppc_fpu_pkg;
 		endcase
 		return k;
 	endfunction
-	// the clocks from an op's issue until it enters A0 and S0 and is written
+	// the clocks from an op's issue until it enters A0 and S0 and is written (f: a fast multiply), and its M4 clock
 	// verilator lint_off UNUSEDSIGNAL
-	function automatic logic [3:0] at_a(input cls_t k);
-		return k.mul ? 4'(LM + 1) : 4'd1;
+	function automatic logic [3:0] at_m(input logic f);
+		return f ? 4'(LMF) : 4'(LM);
+	endfunction
+	function automatic logic [3:0] at_a(input cls_t k, input logic f);
+		return k.mul ? at_m(f) + 4'd1 : 4'd1;
+	endfunction
+	// S takes only frsp and fctiw(z), from issue: a single op's round to single is in its last M or A stage (rnd_sd)
+	function automatic logic need_s(input cls_t k);
+		return k.cv || (k.rs && !k.mul && !k.add);
 	endfunction
 	function automatic logic [3:0] at_s(input cls_t k);
 		return 4'd1 + (k.mul ? 4'(LM) : 4'd0) + (k.add ? 4'(LA) : 4'd0);
 	endfunction
-	function automatic logic [3:0] at_w(input cls_t k);
-		return (k.mul ? 4'(LM) : 4'd0) + (k.add ? 4'(LA) : 4'd0) + (k.rs || k.cv ? 4'(LS) : 4'd0);
+	function automatic logic [3:0] at_w(input cls_t k, input logic f);
+		return (k.mul ? at_m(f) : 4'd0) + (k.add ? 4'(LA) : 4'd0) + (need_s(k) ? 4'(LS) : 4'd0);
+	endfunction
+	// an op's class and clocks for the float control (rtl/ppc_fpp.sv), each way (0, 1: a fast multiply); the CPU decodes
+	// them with its instruction, so the control's checks start from registers
+	typedef struct packed { cls_t k; logic ns; logic [3:0] a0, a1, s, w0, w1; } fpk_t;
+	function automatic fpk_t fpk(input logic [4:0] o);
+		fpk_t p;
+		p.k = cls(o);
+		p.ns = need_s(p.k);
+		p.a0 = at_a(p.k, 1'b0); p.a1 = at_a(p.k, 1'b1);
+		p.s = at_s(p.k);
+		p.w0 = at_w(p.k, 1'b0); p.w1 = at_w(p.k, 1'b1);
+		return p;
+	endfunction
+	// a value a fast multiply can take: its significand in 24 bits and its exponent at least 2^-511 (so the exact product
+	// is a double normal), or a NaN, an infinity or a zero; single loads and single ops make only these
+	function automatic logic sgl(input logic [63:0] v);
+		return v[62:0] == 63'h0 || v[62:52] == 11'h7ff || (v[28:0] == 29'h0 && v[62:61] != 2'b00);
+	endfunction
+	// a value stfs can store as it is (d2s_x, which is then d2s's answer in any mode): a single normal, a zero, an infinity or a
+	// NaN; single ops in M or A and loads of a single that isn't a denormal make only these
+	function automatic logic sgn(input logic [63:0] v);
+		return v[62:0] == 63'h0 || v[62:52] == 11'h7ff || (v[28:0] == 29'h0 && v[62:52] >= 11'h381 && v[62:52] <= 11'h47e);
+	endfunction
+	function automatic logic [31:0] d2s_x(input logic [63:0] x);
+		return {x[63], x[62], x[58:52], x[51] || (x[62:52] == 11'h7ff && x[50:0] != 51'h0), x[50:29]};
 	endfunction
 	// verilator lint_on UNUSEDSIGNAL
 
@@ -69,10 +102,12 @@ package ppc_fpu_pkg;
 		logic [31:0] a, b, c;
 		logic [4:0]  rd;
 		logic [2:0]  bw;                // a multiply-add's addend: the clocks until it comes (ev), 0 if it's in b
+		logic [2:0]  fe, fw;            // operands a, b, c the pipeline makes, leaving it this clock: as ev, as wv
+		logic        want;              // an op for the units waits (so the next clock may be this CPU's)
 	} fp_req_t;
 	typedef struct packed {
 		logic [1:0]  allow;             // whose op may go this clock
-		logic [15:0] res_a, res_s, res_w; // the pipeline's reservations: bit j, the clock j from now
+		logic [15:0] res_a, res_s, res_w; // the pipeline's reservations (A0, S0, write): bit j, the clock j from now
 		logic        ev;                // a result leaving its last stage: FPR erd = evl, ecpu's
 		logic        ecpu;
 		logic [4:0]  erd;
@@ -195,19 +230,21 @@ package ppc_fpu_pkg;
 		end
 	endfunction
 
-	// cvtss2sd: exact; a NaN is quieted
+	// cvtss2sd: exact; a NaN is quieted. Packed straight (no round: an lfs's convert is in front of the FPR write): a
+	// normal's exponent rebiased (+896), a denormal's normalized (its leading one at k below the point: 2^(-126 - k))
 	function automatic logic [63:0] s2d(input logic [31:0] x);
-		int k;
+		logic [4:0] k;
+		logic [22:0] m;
 		if (x[30:23] == 8'hff)
 			return x[22:0] != 0 ? {x[31], 11'h7ff, 1'b1, x[21:0], 29'h0} : {x[31], 63'h7ff0000000000000};
 		if (x[30:0] == 0) return {x[31], 63'h0};
 		if (x[30:23] == 0)
 		begin
-			k = 0;
-			for (int i = 22; i >= 0; i--) if (x[i] && k == 0) k = 23 - i;
-			return round_pack(x[31], 14'(-126 - k), {{1'b0, x[22:0]} << k, 32'h0}, 1'b0, 1'b0, 2'd0);
+			k = 5'(lzc56({1'b0, x[22:0], 32'h0}));
+			m = x[22:0] << k;
+			return {x[31], 11'd897 - {6'h0, k}, m, 29'h0};
 		end
-		return round_pack(x[31], 14'($signed({6'b0, x[30:23]}) - 127), {1'b1, x[22:0], 32'h0}, 1'b0, 1'b0, 2'd0);
+		return {x[31], x[30], {3{!x[30]}}, x[29:0], 29'h0};
 	endfunction
 
 	// cvtsd2ss in the rounding mode; a NaN keeps its sign and top payload bits, quieted
@@ -365,6 +402,53 @@ package ppc_fpu_pkg;
 		if (ee > 14'sd1023) return ovf_max(s, mode) ? {s, 63'h7fefffffffffffff} : {s, 63'h7ff0000000000000};
 		return {s, kept[52] ? 11'(ee + 14'sd1023) : 11'h0, kept[51:0]};
 	endfunction
+	// rnd_d's double (sign sd), then that rounded to single (sign ss: fnmadds negates between the two), as a double: MAME's
+	// two rounds at once. The double's round can only change the single's round and sticky bits by a carry through the bits
+	// between them, so which of those are all ones says what they become. A result under the single normals (e < -126) is
+	// a zero: the single denormals, which MAME would make, are left out.
+	function automatic logic [63:0] rnd_sd(input logic sd, input logic ss, input logic signed [13:0] e, input logic [55:0] sig,
+		input logic st, input logic [1:0] mode);
+		logic [23:0] ks;
+		logic [28:0] l;
+		logic dr, dsk, incd, ones, r, sk, incs, dov;
+		logic [24:0] v;
+		logic signed [13:0] ee;
+		ks = sig[55:32];
+		l = sig[31:3];
+		dr = sig[2];
+		dsk = st || sig[1:0] != 2'b00;
+		case (mode)
+			2'd0: incd = dr && (dsk || sig[3]);
+			2'd1: incd = 1'b0;
+			2'd2: incd = !sd && (dr || dsk);
+			default: incd = sd && (dr || dsk);
+		endcase
+		ones = &l[27:0];
+		r = l[28] ^ (incd && ones);
+		sk = incd ? !ones : l[27:0] != 0;
+		case (mode)
+			2'd0: incs = r && (sk || ks[0]);
+			2'd1: incs = 1'b0;
+			2'd2: incs = !ss && (r || sk);
+			default: incs = ss && (r || sk);
+		endcase
+		v = {1'b0, ks} + 25'(incs || (incd && &l));
+		ee = e;
+		if (v[24])
+		begin
+			v = v >> 1;
+			ee = e + 14'sd1;
+		end
+		dov = e > 14'sd1023 || (e == 14'sd1023 && incd && &sig[55:3]);
+		if (dov) return {ss, ovf_max(sd, mode) && ovf_max(ss, mode) ? 63'h47efffffe0000000 : 63'h7ff0000000000000};
+		if (ee > 14'sd127) return {ss, ovf_max(ss, mode) ? 63'h47efffffe0000000 : 63'h7ff0000000000000};
+		if (e < -14'sd126) return {ss, 63'h0};
+		return {ss, 11'(ee + 14'sd1023), v[22:0], 29'h0};
+	endfunction
+	// a special value (NaN, infinity, zero) as a single op leaves it: a NaN keeps its sign and top payload bits (rs_d)
+	function automatic logic [63:0] sp_s(input logic [63:0] v);
+		return v[62:52] == 11'h7ff && v[51:0] != 0 ? {v[63], 11'h7ff, 1'b1, v[50:29], 29'h0} : v;
+	endfunction
 
 	// the round to single and back (cvtsd2ss then cvtss2sd), in three steps: the value (-1)^s * m * 2^(e - 52), m[52] set,
 	// with st the bits below m; the result a double, the single exactly. The single's last bit is m's bit p: 29, or more
@@ -430,16 +514,21 @@ package ppc_fpu_pkg;
 		return {y.s, 11'(e + 14'sd1023), v[51:0]};
 	endfunction
 
+	// (sign and magnitude, no negates: the two zeros the same, then the signs, then the magnitudes, the other way round
+	// for two negatives)
 	function automatic logic [3:0] cmp(input logic [63:0] x, input logic [63:0] y);
-		logic signed [64:0] kx, ky;
+		logic m_lt, m_gt;
 		if (isnan(x) || isnan(y)) return 4'b0001;
-		kx = x[63] ? -$signed({2'b0, x[62:0]}) : $signed({2'b0, x[62:0]});
-		ky = y[63] ? -$signed({2'b0, y[62:0]}) : $signed({2'b0, y[62:0]});
-		return kx < ky ? 4'b1000 : kx > ky ? 4'b0100 : 4'b0010;
+		if (x[62:0] == 63'h0 && y[62:0] == 63'h0) return 4'b0010;
+		if (x[63] != y[63]) return x[63] ? 4'b1000 : 4'b0100;
+		m_lt = x[62:0] < y[62:0];
+		m_gt = x[62:0] > y[62:0];
+		if (x[63]) {m_lt, m_gt} = {m_gt, m_lt};
+		return m_lt ? 4'b1000 : m_gt ? 4'b0100 : 4'b0010;
 	endfunction
 
 	// ---- single precision, as the chip has it (rtl/ppc_fps.sv) ------------------------------------------------------------
-	localparam int SLM = 3, SLA = 4, SLS = 3;   // its units' stages
+	localparam int SLM = 3, SLA = 3, SLS = 2;   // its units' stages
 	localparam logic [31:0] SDNAN = 32'h7fc00000;
 	function automatic logic [3:0] sat_a(input cls_t k);
 		return k.mul ? 4'(SLM + 1) : 4'd1;
@@ -449,6 +538,17 @@ package ppc_fpu_pkg;
 	endfunction
 	function automatic logic [3:0] sat_w(input cls_t k);
 		return (k.mul ? 4'(SLM) : 4'd0) + (k.add ? 4'(SLA) : 4'd0) + 4'(SLS);
+	endfunction
+	// an op's class and clocks for its float control (ppc_fps_ctl), decoded with the CPU's instruction (one way: no fast
+	// multiply; every op takes S)
+	function automatic fpk_t fpk_s(input logic [4:0] o);
+		fpk_t p;
+		p.k = cls(o);
+		p.ns = 1'b1;
+		p.a0 = sat_a(p.k); p.a1 = p.a0;
+		p.s = sat_s(p.k);
+		p.w0 = sat_w(p.k); p.w1 = p.w0;
+		return p;
 	endfunction
 	function automatic logic snan(input logic [31:0] x);
 		return x[30:23] == 8'hff && x[22:0] != 23'h0;
@@ -493,6 +593,19 @@ package ppc_fpu_pkg;
 		else begin u.e = 10'($signed({2'b0, x[30:23]}) - 127); u.m = {1'b1, x[22:0], 24'h0}; end
 		return u;
 	endfunction
+	// an add's operand (rtl/ppc_fps.sv's A0): as sunpack, but a denormal as it is, its exponent -126 and its significand's top
+	// bit clear
+	function automatic sx_t sunpack_a(input logic [31:0] x);
+		sx_t u;
+		u = '0;
+		u.s = x[31];
+		if (x[30:23] == 8'hff) begin u.nan = x[22:0] != 23'h0; u.inf = x[22:0] == 23'h0; end
+		else if (x[30:0] == 31'h0) begin u.zero = 1'b1; u.e = -10'sd512; end
+		else u.e = x[30:23] == 8'h0 ? -10'sd126 : 10'($signed({2'b0, x[30:23]}) - 127);
+		u.m = {x[30:23] != 8'h0, x[22:0], 24'h0};
+		if (x[30:23] == 8'hff || x[30:0] == 31'h0) u.m = 48'h0;
+		return u;
+	endfunction
 	// the round: first below the normal range a shift into a denormal; then an increment at m's bit 24; then the pack
 	typedef struct packed { logic signed [9:0] e; logic [47:0] m; logic st; } sden_t;
 	function automatic sden_t sden(input logic signed [9:0] e, input logic [47:0] m, input logic st);
@@ -532,12 +645,16 @@ package ppc_fpu_pkg;
 		if (ee > 10'sd127) return ovf_max(s, mode) ? {s, 31'h7f7fffff} : {s, 31'h7f800000};
 		return {s, v[23] ? 8'(ee + 10'sd127) : 8'h0, v[22:0]};
 	endfunction
+	// (as cmp: sign and magnitude, no negates)
 	function automatic logic [3:0] cmp_s(input logic [31:0] x, input logic [31:0] y);
-		logic signed [32:0] kx, ky;
+		logic m_lt, m_gt;
 		if (snan(x) || snan(y)) return 4'b0001;
-		kx = x[31] ? -$signed({2'b0, x[30:0]}) : $signed({2'b0, x[30:0]});
-		ky = y[31] ? -$signed({2'b0, y[30:0]}) : $signed({2'b0, y[30:0]});
-		return kx < ky ? 4'b1000 : kx > ky ? 4'b0100 : 4'b0010;
+		if (x[30:0] == 31'h0 && y[30:0] == 31'h0) return 4'b0010;
+		if (x[31] != y[31]) return x[31] ? 4'b1000 : 4'b0100;
+		m_lt = x[30:0] < y[30:0];
+		m_gt = x[30:0] > y[30:0];
+		if (x[31]) {m_lt, m_gt} = {m_gt, m_lt};
+		return m_lt ? 4'b1000 : m_gt ? 4'b0100 : 4'b0010;
 	endfunction
 	// lfd: the 602 "compresses" a double in the single range into its 32-bit FPR and traps anything else to software, which
 	// this core doesn't have: the nearest single (no denormals, those go to zero). A high word of zero is what stfd left of an

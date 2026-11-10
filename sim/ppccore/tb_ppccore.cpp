@@ -6,11 +6,16 @@
 // endian mode). The float registers start with the hard cases often (gen_fp), in a random rounding mode.
 // Built with PIPE (run.sh with PIPE=1), it runs the pipeline (rtl/ppc_pipe.sv) instead, free-running: its fetch and data
 // sides answer in one clock (the data side, in the address clock), or (lat, the fourth argument, 1) after random
-// delays; the registers are compared at each retire (two at once: after the second) but for the ones an older
-// load or float op hasn't written yet, and all of them after the last instruction.
+// delays, the data side with two accesses out at most, answered in order; the registers are compared at each retire
+// (two at once: after the second) but for the ones an older
+// load or float op hasn't written yet, and all of them after the last instruction. The model then has the pipeline's
+// single-precision FPRs and its FP-unavailable exception (ppc602's sp, fpu_exc).
 // Built with CACHE too (run.sh with PIPE=1 CACHE=1), the pipeline with its caches (rtl/ppc_cache.sv) over a memory of the
 // bench's own (a second copy, written only by what the store buffer sends), with random wait states and latency if lat is 1:
 // each load's value is checked as it comes as well.
+// With irq (the fifth argument) 1, the pipeline's external interrupt line goes up at random clocks (and now and then down
+// again untaken); where the RTL takes it, the reference takes it too (run again from the start), and it must have had
+// MSR[EE] set there; the longest wait with EE set is printed.
 #ifdef CACHE
 #include "Vppc_cached.h"
 typedef Vppc_cached Vtop;
@@ -257,7 +262,7 @@ static std::string diff(const state &a, const state &b)
 static void clk(Vtop &t) { t.clk = 0; t.eval(); t.clk = 1; t.eval(); }
 
 #ifdef PIPE
-// a side of the pipeline's memory: one request out, answered after a delay (1: the next clock)
+// a request out to a side of the pipeline's memory, answered after a delay (1: the next clock)
 struct port
 {
 	bool out = false;
@@ -272,10 +277,12 @@ int main(int argc, char **argv)
 	int steps = argc > 2 ? atoi(argv[2]) : 300;
 	uint64_t seed = argc > 3 ? strtoull(argv[3], 0, 0) : 1;
 	int lat = argc > 4 ? atoi(argv[4]) : 0;
-	(void)lat;
+	int irq = argc > 5 ? atoi(argv[5]) : 0;
+	(void)lat; (void)irq;
 	std::mt19937_64 rng(seed);
 	Vtop top;
 	long bad = 0, total_insn = 0, total_acc = 0, total_exc = 0, total_cyc = 0;
+	long irq_n = 0, irq_wmax = 0;
 	std::unordered_map<uint32_t, long> hits;
 
 	for (long c = 0; c < cases && bad < 5; c++)
@@ -297,6 +304,10 @@ int main(int argc, char **argv)
 			}
 			ref.f[i] = gen_fp(rng, ref.f, i);
 		}
+#ifdef PIPE
+		// the pipeline's FPRs are the 602's singles (rtl/ppc_fps.sv), and it takes the FP-unavailable exception
+		ref.sp = true; ref.fpu_exc = true; ref.sp_canon();
+#endif
 		for (int i = 0; i < 4; i++) ref.tgpr[i] = uint32_t(rng());
 		ref.set_cr(uint32_t(rng()));
 		ref.set_xer(uint32_t(rng()) & 0xe000007f);
@@ -326,6 +337,9 @@ int main(int argc, char **argv)
 		msr &= ~0x00020000u;
 		if (rng() % 8) msr &= ~0x40u;
 		if (rng() % 2) msr &= ~0x30u;
+#ifdef PIPE
+		if (rng() % 4) msr |= 0x2000u;  // FP mostly on, so the float ops run (off, they take the FP-unavailable exception)
+#endif
 		ref.msr = msr;
 		// the rounding mode: the model runs on the host's
 		ref.fpscr = uint32_t(rng() % 4);
@@ -341,26 +355,44 @@ int main(int argc, char **argv)
 
 		// ---- the reference ----
 		mbus rb = mb;     // the RTL's copy of the memory
+		mbus mb0 = mb;    // (and the reference's start, for a run again)
 		std::vector<state> cp;
 		std::vector<size_t> nacc;
 		std::vector<uint32_t> pcs, ops;
-		for (int s = 0; s < steps; s++)
-		{
-			uint32_t pc = ref.pc;
-			if (pc < BASE || pc >= BASE + 4 * NPROG || (ref.msr & 0x00010001)) break;
-			// the instruction (through the IBATs) must be one the bench covers: the step is dropped if not
-			size_t nlog = mb.log.size();
-			int ex = ref.step();
-			if (ex != ppc602::EX_ISI && ex != ppc602::EX_ITLBMISS && !op_ok(ref.last_op)) { mb.log.resize(nlog); break; }
-			pcs.push_back(pc);
-			ops.push_back(ex == ppc602::EX_ISI || ex == ppc602::EX_ITLBMISS ? 0 : ref.last_op);
-			cp.push_back(ref_state(ref, ex));
-			nacc.push_back(mb.log.size());
-		}
+		std::vector<size_t> irq_at;     // the steps the RTL took an external interrupt before
+		auto run_ref = [&](ppc602 &r) {
+			cp.clear(); nacc.clear(); pcs.clear(); ops.clear();
+			{ static const int modes[4] = { FE_TONEAREST, FE_TOWARDZERO, FE_UPWARD, FE_DOWNWARD }; fesetround(modes[r.fpscr & 3]); }
+			size_t ii = 0;
+			for (int s = 0; s < steps; s++)
+			{
+				uint32_t pc = r.pc;
+				if (ii < irq_at.size() && irq_at[ii] == cp.size())
+				{
+					ii++;
+					r.interrupt(ppc602::EX_EI);
+					pcs.push_back(pc); ops.push_back(0);
+					cp.push_back(ref_state(r, ppc602::EX_EI));
+					nacc.push_back(mb.log.size());
+					continue;
+				}
+				if (pc < BASE || pc >= BASE + 4 * NPROG || (r.msr & 0x00010001)) break;
+				// the instruction (through the IBATs) must be one the bench covers: the step is dropped if not
+				size_t nlog = mb.log.size();
+				int ex = r.step();
+				if (ex != ppc602::EX_ISI && ex != ppc602::EX_ITLBMISS && !op_ok(r.last_op)) { mb.log.resize(nlog); break; }
+				pcs.push_back(pc);
+				ops.push_back(ex == ppc602::EX_ISI || ex == ppc602::EX_ITLBMISS ? 0 : r.last_op);
+				cp.push_back(ref_state(r, ex));
+				nacc.push_back(mb.log.size());
+			}
+		};
+		run_ref(ref);
 		if (cp.empty()) continue;
 
 		// ---- the RTL ----
 		top.int_ext = 0; top.dec_tick = 0; top.tb_tick = 0; top.dbg_hold = 0; top.dbg_int = 0; top.dbg_we = 0;
+		long irq_wait = irq ? 1 + rng() % 64 : 0, irq_w = 0;   // clocks until the line goes up; clocks up with EE set
 #ifdef PIPE
 #ifdef CACHE
 		top.rst = 1; top.mem_busy = 0; top.mem_ready = 0;
@@ -368,8 +400,19 @@ int main(int argc, char **argv)
 		std::deque<rbeat> rq;
 		memmodel bm = rb.mm;            // what's behind the caches
 		int busy = !lat ? 0 : rng() % 3 ? 25 : 90;    // (very busy: the store buffer fills)
-		bool lchk = false;              // a load's value to check
-		uint64_t lval = 0;
+		struct due { bool ld; uint64_t v; };
+		std::deque<due> dq;             // the accesses out, answered in order (a load's value to check)
+		auto answer = [&]() {
+			if (dq.empty()) { printf("case %ld: an answer with no access out\n", c); return false; }
+			due e = dq.front();
+			dq.pop_front();
+			if (e.ld && top.d_rdata != e.v)
+			{
+				printf("case %ld: a load read %016llX, not %016llX\n", c, (unsigned long long)top.d_rdata, (unsigned long long)e.v);
+				return false;
+			}
+			return true;
+		};
 		// a clock of the memory: the answer, then after eval what's asked at the edge
 		auto mem_in = [&]() {
 			top.mem_busy = int(rng() % 100) < busy;
@@ -401,7 +444,8 @@ int main(int argc, char **argv)
 		};
 #else
 		top.rst = 1; top.if_rdy = 1; top.if_valid = 0; top.d_rdy = 1; top.d_valid = 0;
-		port ip, dp;
+		port ip;
+		std::deque<port> dq;            // the accesses out (two at most), answered in order
 #endif
 		bool aph = false;               // the access taken last clock: its address clock now
 		// a delay: mostly the next clock
@@ -426,10 +470,17 @@ int main(int argc, char **argv)
 		size_t ci = 0;
 		bool fail = false;
 		long cyc;
-		for (cyc = 0; cyc < 200000 && ci < cp.size() && !fail; cyc++)
+		for (cyc = 0; cyc < 2000000 && ci < cp.size() && !fail; cyc++)
 		{
 			top.clk = 0; top.eval();
 #ifdef PIPE
+			// the external interrupt line: up after a while, now and then down again untaken
+			if (irq)
+			{
+				if (!top.int_ext) { if (--irq_wait <= 0) { top.int_ext = 1; irq_w = 0; } }
+				else if (rng() % 1024 == 0) { top.int_ext = 0; irq_wait = 1 + rng() % 64; }
+				else if (top.msr_o & 0x8000) irq_w++;
+			}
 			// the access in its address clock; the answers this clock (the data side's from that clock on); the requests
 			// taken at its edge
 #ifdef CACHE
@@ -444,29 +495,25 @@ int main(int argc, char **argv)
 					uint64_t d = top.d_wdata & (n == 8 ? ~0ull : (1ull << (8 * n)) - 1);
 					rm.wrn(a, n, d);
 					rlog.push_back({ 1, n, a, d });
+					dq.push_back({ false, 0 });
 				}
 				else
 				{
-					lval = rm.rdn(a, n);
-					lchk = true;
-					rlog.push_back({ 0, n, a, lval });
+					uint64_t v = rm.rdn(a, n);
+					rlog.push_back({ 0, n, a, v });
+					dq.push_back({ true, v });
 				}
 				if (rlog.size() == nacc.back() && nacc.back() > (cp.size() > 1 ? nacc[cp.size() - 2] : 0)) top.dbg_hold = 1;
 				top.eval();
 			}
 			aph = false;
-			if (top.d_valid && lchk)
-			{
-				if (top.d_rdata != lval)
-				{
-					printf("case %ld: a load read %016llX, not %016llX\n", c, (unsigned long long)top.d_rdata, (unsigned long long)lval);
-					fail = true;
-					break;
-				}
-				lchk = false;
-			}
+			if (top.d_valid && !answer()) { fail = true; break; }
 			mem_out();
-			if (top.d_req && top.d_rdy) aph = true;
+			if (top.d_req && top.d_rdy)
+			{
+				if (dq.size() >= 2) { printf("case %ld: a third access out\n", c); fail = true; break; }
+				aph = true;
+			}
 #else
 			top.if_valid = ip.out && ip.wait == 0;
 			if (top.if_valid) top.if_data = uint32_t(rm.rdn(top.if_pa, 4));
@@ -476,6 +523,7 @@ int main(int argc, char **argv)
 			{
 				int n = top.d_size;
 				uint32_t a = top.d_pa;
+				port p;
 				if (top.d_we)
 				{
 					uint64_t d = top.d_wdata & (n == 8 ? ~0ull : (1ull << (8 * n)) - 1);
@@ -484,24 +532,25 @@ int main(int argc, char **argv)
 				}
 				else
 				{
-					dp.data = rm.rdn(a, n);
-					rlog.push_back({ 0, n, a, dp.data });
+					p.data = rm.rdn(a, n);
+					rlog.push_back({ 0, n, a, p.data });
 				}
-				dp.out = true; dp.wait = delay() - 1;
+				p.out = true; p.wait = delay() - 1;
+				dq.push_back(p);
 				// the last instruction's access (it retires at this edge): X takes nothing more
 				if (rlog.size() == nacc.back() && nacc.back() > (cp.size() > 1 ? nacc[cp.size() - 2] : 0)) top.dbg_hold = 1;
 			}
 			aph = false;
-			top.d_valid = dp.out && dp.wait == 0;
-			if (top.d_valid) top.d_rdata = dp.data;
+			top.d_valid = !dq.empty() && dq.front().wait <= 0;
+			if (top.d_valid) top.d_rdata = dq.front().data;
 			top.eval();
 			top.if_rdy = !lat || rng() % 8;
 			top.d_rdy = !lat || rng() % 8;
 			top.eval();
 			if (ip.out && (top.if_valid || top.if_kill)) ip.out = false;
 			else if (ip.out) ip.wait--;
-			if (dp.out && top.d_valid) dp.out = false;
-			else if (dp.out) dp.wait--;
+			if (top.d_valid) dq.pop_front();
+			for (port &p : dq) p.wait--;
 			if (top.if_req && top.if_rdy)
 			{
 				if (ip.out) { printf("case %ld: a fetch while one is out\n", c); fail = true; break; }
@@ -509,7 +558,7 @@ int main(int argc, char **argv)
 			}
 			if (top.d_req && top.d_rdy)
 			{
-				if (dp.out) { printf("case %ld: an access while one is out\n", c); fail = true; break; }
+				if (dq.size() >= 2) { printf("case %ld: a third access out\n", c); fail = true; break; }
 				aph = true;
 			}
 #endif
@@ -550,6 +599,24 @@ int main(int argc, char **argv)
 				if (ops[ci]) hits[key(ops[ci])]++;
 				ci++;
 			}
+			// the RTL took the external interrupt before this step: so does the reference (run again), with EE set
+			if (top.exc_o == ppc602::EX_EI && ci < cp.size() && cp[ci].ex != ppc602::EX_EI)
+			{
+				if (!((ci ? cp[ci - 1] : init).msr & 0x8000))
+				{
+					printf("case %ld step %zu: an external interrupt with MSR[EE] clear, before %08X %08X\n", c, ci, pcs[ci], ops[ci]);
+					fail = true;
+					break;
+				}
+				irq_at.push_back(ci);
+				mb = mb0;
+				ppc602 r2(m0);
+				run_ref(r2);
+				irq_n++;
+				irq_wmax = std::max(irq_wmax, irq_w);
+				top.int_ext = 0;
+				irq_wait = 1 + rng() % 64;
+			}
 #endif
 			state rs = rtl_state(top), &es = cp[ci];
 #ifdef PIPE
@@ -580,6 +647,19 @@ int main(int argc, char **argv)
 					printf("  before: fA %016llX fB %016llX fC %016llX\n", (unsigned long long)pv.f[(o >> 16) & 31],
 						(unsigned long long)pv.f[(o >> 11) & 31], (unsigned long long)pv.f[(o >> 6) & 31]);
 				printf("%s", d.c_str());
+				// (FHIST set: how the model came to each FPR that differs; FHIST=2: every FPR at the start too)
+				if (const char *fh = getenv("FHIST"))
+					for (int i = 0; i < 32; i++)
+					{
+						if (fh[0] == '2')
+							printf("  f%d at the start %016llX%s\n", i, (unsigned long long)init.f[i], m0.fint >> i & 1 ? " (an integer)" : "");
+						if (es.f[i] == rs.f[i]) continue;
+						uint64_t v = init.f[i];
+						printf("  f%d from %016llX:", i, (unsigned long long)v);
+						for (size_t k = 0; k <= ci; k++)
+							if (cp[k].f[i] != v) { v = cp[k].f[i]; printf(" %08X %08X -> %016llX;", pcs[k], ops[k], (unsigned long long)v); }
+						printf("\n");
+					}
 				printf("  accesses ref:");
 				for (size_t k = k0; k < na; k++) printf(" %s", mb.log[k].str().c_str());
 				printf("\n  accesses rtl:");
@@ -595,36 +675,38 @@ int main(int argc, char **argv)
 		if (!fail && ci < cp.size())
 		{
 			printf("case %ld: RTL stopped after %zu of %zu instructions; next %08X %08X\n", c, ci, cp.size(), pcs[ci], ops[ci]);
+			printf("  after %ld clocks: pc %08X msr %08X xer %08X; int_ext %d hold %d; if_req %d d_req %d\n", cyc, uint32_t(top.pc_o),
+				uint32_t(top.msr_o), uint32_t(top.xer_o), int(top.int_ext), int(top.dbg_hold), int(top.if_req), int(top.d_req));
+			for (size_t k = ci > 6 ? ci - 6 : 0; k < ci; k++) printf("    before: %08X %08X%s\n", pcs[k], ops[k], cp[k].ex ? " (exception)" : "");
 			fail = true;
 		}
 		total_cyc += cyc;
 #ifdef PIPE
-		// drained: everything
+		// drained: everything (an access the cache holds waits out a sweep of its tags, a clock a line)
+		top.int_ext = 0;
 		if (!fail)
 		{
+			const int DRAIN = 4000;
 			int k;
-			for (k = 0; k < 1000 && !top.dbg_idle; k++)
+			for (k = 0; k < DRAIN && !top.dbg_idle; k++)
 			{
 				top.clk = 0; top.eval();
 #ifdef CACHE
 				mem_in();
 				top.eval();
-				if (top.d_valid && lchk)
-				{
-					if (top.d_rdata != lval) { printf("case %ld: a load read %016llX, not %016llX\n", c, (unsigned long long)top.d_rdata, (unsigned long long)lval); fail = true; break; }
-					lchk = false;
-				}
+				if (top.d_valid && !answer()) { fail = true; break; }
 				mem_out();
 				if (top.d_req) { printf("case %ld: ran on after the last instruction\n", c); fail = true; break; }
 #else
 				top.if_valid = ip.out && ip.wait == 0;
 				if (top.if_valid) top.if_data = uint32_t(rm.rdn(top.if_pa, 4));
-				top.d_valid = dp.out && dp.wait == 0;
-				if (top.d_valid) top.d_rdata = dp.data;
+				top.d_valid = !dq.empty() && dq.front().wait <= 0;
+				if (top.d_valid) top.d_rdata = dq.front().data;
 				top.if_rdy = 1; top.d_rdy = 1;
 				top.eval();
 				if (ip.out && (top.if_valid || top.if_kill)) ip.out = false; else if (ip.out) ip.wait--;
-				if (dp.out && top.d_valid) dp.out = false; else if (dp.out) dp.wait--;
+				if (top.d_valid) dq.pop_front();
+				for (port &p : dq) p.wait--;
 				if (top.if_req) { ip.out = true; ip.wait = 0; }
 				if (top.d_req) { printf("case %ld: ran on after the last instruction\n", c); fail = true; break; }
 #endif
@@ -634,10 +716,10 @@ int main(int argc, char **argv)
 			state rs = rtl_state(top), es = cp.back();
 			rs.ex = es.ex;
 			std::string d = diff(es, rs);
-			if (!fail && (k == 1000 || !d.empty()))
+			if (!fail && (k == DRAIN || !d.empty()))
 			{
 				printf("case %ld: after the last instruction (%08X %08X)%s\n%s", c, pcs.back(), ops.back(),
-					k == 1000 ? ", not idle" : "", d.c_str());
+					k == DRAIN ? ", not idle" : "", d.c_str());
 				fail = true;
 			}
 		}
@@ -657,6 +739,7 @@ int main(int argc, char **argv)
 	int unrun = 0;
 	for (uint32_t k : keys) if (!hits[k]) { printf("never ran: %02X %03X\n", k >> 10, k & 0x3ff); unrun++; }
 	if (cases < 1000) unrun = 0;   // too few cases to expect them all
+	if (irq) printf("%ld external interrupts taken, the longest wait with EE set %ld clocks\n", irq_n, irq_wmax);
 	printf("%s: %ld cases, %ld instructions, %ld accesses, %ld exceptions; %.2f clocks an instruction\n", bad || unrun ? "FAIL" : "PASS",
 		cases, total_insn, total_acc, total_exc, total_insn ? double(total_cyc) / total_insn : 0.0);
 	return bad || unrun ? 1 : 0;

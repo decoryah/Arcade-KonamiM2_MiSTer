@@ -86,6 +86,6 @@ module ppc_cached (
 		.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
 		.d_mem(1'b1), .d_cacheable(!d_pa[14]), .d_writable(1'b1),
 		.u_req(), .u_pa(), .u_we(), .u_size(), .u_wdata(), .u_ack(1'b0), .u_rdata,
-		.mem_rd, .mem_we, .mem_a, .mem_burst, .mem_wd, .mem_be, .mem_busy, .mem_ready, .mem_dout
+		.mem_rd, .mem_we, .mem_a, .mem_burst, .mem_wd, .mem_be, .mem_busy, .mem_ready, .mem_dout, .pf()
 	);
 endmodule

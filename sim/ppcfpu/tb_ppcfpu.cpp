@@ -90,9 +90,29 @@ static void model(ppc602 &m, onebus &bus, int f, uint32_t rn, uint64_t a, uint64
 	wcr = m.cr[1];                                   // fcmpu: crfD 1 (the 4 in rD)
 }
 
+// a single's value as a double: any single (denormals, NaNs and infinities too), or one near 1
+static uint64_t gen_s(std::mt19937_64 &rng)
+{
+	uint32_t u = uint32_t(rng());
+	if (rng() % 2) u = (u & 0x807fffffu) | (uint32_t(127 + int(rng() % 40) - 20) << 23);
+	float fv;
+	memcpy(&fv, &u, 4);
+	double d = fv;
+	uint64_t r;
+	memcpy(&r, &d, 8);
+	return r;
+}
+
+// what the fast multiply takes (rtl/ppc_fpu_pkg.sv sgl): a zero, NaN or infinity, or 24 significand bits, exponent >= -511
+static bool sgl(uint64_t v)
+{
+	return (v << 1) == 0 || ((v >> 52) & 0x7ff) == 0x7ff || ((v & 0x1fffffffull) == 0 && ((v >> 61) & 3) != 0);
+}
+
 static void operands(std::mt19937_64 &rng, int f, uint64_t &a, uint64_t &b, uint64_t &c)
 {
 	a = gen(rng, 0); b = gen(rng, a); c = gen(rng, rng() % 2 ? a : b);
+	if (rng() % 3 == 0) { a = gen_s(rng); c = gen_s(rng); if (rng() % 2) b = gen_s(rng); }
 	if (f == F_S2D) a = uint32_t(rng() % 4 ? rng() : gen(rng, 0) >> 32);
 }
 
@@ -104,6 +124,9 @@ int main(int argc, char **argv)
 	onebus bus;
 	ppc602 m(bus);
 	m.reset();
+#ifndef FPP
+	m.single_ftz = false;   // the iterative unit's single ops keep MAME's single denormals (the pipeline's don't)
+#endif
 	long bad = 0, n[F_N] = {};
 #ifdef FPP
 	// the pipeline's operations
@@ -115,7 +138,7 @@ int main(int argc, char **argv)
 	u.rst = 1; u.issue = 0;
 	u.clk = 0; u.eval(); u.clk = 1; u.eval();
 	u.rst = 0;
-	long issued = 0, clk = 0, done = 0;
+	long issued = 0, clk = 0, done = 0, fast = 0;
 	int next = 0, f = OPS[rng() % NOPS];
 	uint32_t rn = rng() % 4;
 	uint64_t a, b, c;
@@ -125,6 +148,7 @@ int main(int argc, char **argv)
 		// offer the next op on most clocks (and always once all are issued, none)
 		bool offer = issued < count && !sl[next].busy && rng() % 8 != 0;
 		u.op = f; u.rn = rn; u.a = a; u.b = b; u.c = c; u.rd = next; u.rb = 31;   // (no op writes f31: no addend comes late)
+		u.fast = sgl(a) && sgl(c);
 		u.issue = 0;
 		u.clk = 0; u.eval();
 		bool go = offer && u.ok;
@@ -155,6 +179,8 @@ int main(int argc, char **argv)
 			model(m, bus, f, rn, a, b, c, q.want, wcr);
 			q.busy = true; q.f = f; q.rn = rn; q.a = a; q.b = b; q.c = c; q.at = clk;
 			n[f]++;
+			if (u.fast && (f == F_MUL || f == F_MULS || (f >= F_MADD && f <= F_NMSUB) || (f >= F_MADDS && f <= F_NMSUBS)))
+				fast++;
 			issued++;
 			next = (next + 1) % 31;
 			f = OPS[rng() % NOPS];
@@ -165,7 +191,8 @@ int main(int argc, char **argv)
 		clk++;
 	}
 	if (done < issued && bad < 10) { printf("%ld results missing\n", issued - done); bad++; }
-	printf("%s: %ld operations, %d kinds, %.2f clocks each\n", bad ? "FAIL" : "PASS", issued, NOPS, double(clk) / (issued ? issued : 1));
+	printf("%s: %ld operations (%ld fast multiplies), %d kinds, %.2f clocks each\n", bad ? "FAIL" : "PASS", issued, fast, NOPS,
+		double(clk) / (issued ? issued : 1));
 #else
 	Vppc_fpu u;
 	u.rst = 1; u.start = 0;

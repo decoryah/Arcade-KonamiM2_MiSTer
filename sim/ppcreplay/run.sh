@@ -4,16 +4,16 @@
 # RTL=1 builds it with the RTL core (rtl/ppc_core.sv) in lockstep with the model (~/build_m2/ppcreplay_rtl); with PIPE=1
 # too, the pipeline (rtl/ppc_pipe.sv; ~/build_m2/ppcreplay_pipe).
 set -e
-R=/mnt/c/repos/konamim2-mister/mister
+R=${R:-/mnt/c/repos/konamim2-mister/mister}
 W=/mnt/c/repos/konamim2-mister/work
 B=~/build_m2/ppcreplay
 mkdir -p $B
 if [ -n "$RTL" ]; then
-	if [ -n "$PIPE" ]; then TOP=ppc_pipe; BR=~/build_m2/ppcreplay_pipe; DEF=-DPIPE; else TOP=ppc_core; BR=~/build_m2/ppcreplay_rtl; DEF=; fi
+	if [ -n "$PIPE" ]; then TOP=ppc_pipe; BR=~/build_m2/ppcreplay_pipe; DEF=-DPIPE; G=-GFP_EXC=0; else TOP=ppc_core; BR=~/build_m2/ppcreplay_rtl; DEF=; fi
 	mkdir -p $BR
 	export PATH=~/tools/oss-cad-suite/bin:$PATH
 	if [ -z "$NOBUILD" ]; then
-	verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTH --top-module $TOP -Mdir $BR -o tb_ppcreplay \
+	verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTH --top-module $TOP $G -Mdir $BR -o tb_ppcreplay \
 	  -CFLAGS "-O2 -std=c++17 -ffp-contract=off -frounding-math -DWITH_RTL $DEF" \
 	  $R/rtl/ppc_fpu_pkg.sv $R/rtl/ppc_fpu.sv $R/rtl/ppc_fps.sv $R/rtl/ppc_fpx.sv $R/rtl/ppc_regs.sv $R/rtl/$TOP.sv $R/sim/ppcreplay/tb_ppcreplay.cpp $R/tools/ref/ppc602/ppc602.cpp \
 	  > $BR/build.log 2>&1 || { grep -E "%Error|error:" $BR/build.log | head -40; exit 1; }

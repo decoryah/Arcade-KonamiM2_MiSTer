@@ -117,6 +117,7 @@ module m2_boot #(
 	logic [31:5]  sn_a;
 	logic         sn_t;
 	logic [N-1:0] c_ret, c_ret2;
+	logic [3:0]   c_pf [0:N-1], c_perf [0:N-1];
 	logic         ppc1_int, ppc2_int;
 	logic [31:0]  c_ipc [0:N-1];
 	logic [31:0]  c_ipc0 [0:N-1];
@@ -147,6 +148,7 @@ module m2_boot #(
 		assign m_if = map(if_pa);
 		assign m_d = map(d_pa);
 		// verilator lint_off PINCONNECTEMPTY
+		// (no fast multiply: the device is too full for it)
 		ppc_pipe #(.FWD(1'b0), .BENCH(1'b0), .FP_EXT(1'b1), .FP_ID(g != 0)) cpu (
 			.clk, .rst(rs[g]),
 			.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data,
@@ -155,7 +157,7 @@ module m2_boot #(
 			.retire(c_ret[g]), .retire2(c_ret2[g]), .ipc0_o(c_ipc0[g]), .iop0_o(), .ipc_o(c_ipc[g]), .iop_o(), .exc_o(c_exc[g]),
 			.timer_read_o(), .pc_o(), .gpr_o(), .fpr_o(),
 			.cr_o(), .lr_o(), .ctr_o(), .xer_o(), .msr_o(), .srr0_o(), .srr1_o(), .fpscr_o(), .gpr_pend_o(), .fpr_pend_o(),
-			.perf_o(), .perf_pc_o(),
+			.perf_o(c_perf[g]), .perf_pc_o(),
 			.dbg_hold(1'b0), .dbg_idle(), .dbg_we(1'b0), .dbg_idx(11'd0), .dbg_val(64'd0), .dbg_int(2'd0),
 			.fp_req(fp_req[g]), .fp_res
 		);
@@ -168,7 +170,7 @@ module m2_boot #(
 			.d_mem(m_d.mem), .d_cacheable(m_d.mem), .d_writable(!m_d.rom),
 			.u_req(c_u_req[g]), .u_pa(c_u_pa[g]), .u_we(c_u_we[g]), .u_size(c_u_size[g]), .u_wdata(c_u_wd[g]), .u_ack(c_u_ack[g]), .u_rdata,
 			.mem_rd(c_rd[g]), .mem_we(c_we[g]), .mem_a(c_a[g]), .mem_burst(c_burst[g]), .mem_wd(c_wd[g]), .mem_be(c_be[g]),
-			.mem_busy(c_busy[g]), .mem_ready(c_ready[g]), .mem_dout(ddr_dout)
+			.mem_busy(c_busy[g]), .mem_ready(c_ready[g]), .mem_dout(ddr_dout), .pf(c_pf[g])
 		);
 
 		// status
@@ -213,7 +215,8 @@ module m2_boot #(
 	logic [31:3] ata_m_a;
 	logic        dsp_m_rd, dsp_m_busy, dsp_m_ready;
 	logic [31:3] dsp_m_a;
-	logic        te_m_rd, te_m_we, te_m_busy, te_m_ready;
+	logic        te_m_rd, te_m_we, te_m_busy, te_m_ready, te_busy;
+	logic [23:0] v_rgb;
 	logic [31:3] te_m_a;
 	logic [63:0] te_m_wd;
 	logic [7:0]  te_m_be;
@@ -363,7 +366,7 @@ module m2_boot #(
 	(
 		.clk, .rst,
 		.a(u_pa[5:2]), .we(u_req && u_we && u_pa[31:8] == 24'h000300), .wd(u_wdata[31:0]),
-		.hpos, .vpos, .rgb, .on(vdu_on),
+		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on),
 		.m_rd(vdu_m_rd), .m_four(vdu_m_four), .m_a(vdu_m_a), .m_busy(vdu_m_busy), .m_ready(vdu_m_ready), .m_dout(ddr_dout)
 	);
 	// verilator lint_off PINCONNECTEMPTY
@@ -373,9 +376,21 @@ module m2_boot #(
 		.a(u_pa[15:2]), .we(u_req && u_we && u_te), .wd(u_wdata[31:0]), .rd(te_rd),
 		.intr(te_int),
 		.m_rd(te_m_rd), .m_we(te_m_we), .m_a(te_m_a), .m_wd(te_m_wd), .m_be(te_m_be), .m_busy(te_m_busy), .m_ready(te_m_ready), .m_dout(ddr_dout),
-		.busy()
+		.busy(te_busy)
 	);
 	// verilator lint_on PINCONNECTEMPTY
+`ifdef M2_HWPROF
+	// a debug build's profile over the picture (rtl/m2_prof.sv)
+	m2_prof prof
+	(
+		.clk, .rst,
+		.ev({c_perf[0] == 4'd8, c_perf[0] == 4'd7, c_perf[0] == 4'd6, c_perf[0] == 4'd5, c_perf[0] == 4'd4, c_perf[0] == 4'd3, c_perf[0] == 4'd2, c_perf[0] == 4'd1,
+		      c_pf[0], c_ret[0], te_busy}),
+		.hpos, .vpos, .rgb_in(v_rgb), .rgb
+	);
+`else
+	assign rgb = v_rgb;
+`endif
 	// 44.1 kHz, from 66.67 MHz
 	logic [10:0] dac_n;
 	logic [15:0] dac_l, dac_r;
@@ -445,6 +460,46 @@ module m2_boot #(
 		.ee_wr(ld_wr && ld_sel == 2'd2), .ee_a(ld_addr[6:0]), .ee_d(ld_data), .ee_ua, .ee_ud, .ee_chg
 	);
 
+	// the stubs' compares a clock early, on the address the choice takes (s_hit: the entry with u_pa's word), with the write
+	// of the clock in them (the stubs' words are written by u_req's access, to entry s_k): from u_pa through the compares to
+	// the words was a long path. An address is in one entry at most
+	logic [NS-1:0] s_hit;
+	logic [3:0]  s_k;
+	wire         s_wr = u_req && u_we && !(u_cde || u_bda || u_kio || u_ata || u_dsp);
+	wire  [31:2] s_na = c_u_pa[n_s][31:2];
+	always_comb
+	begin
+		s_k = s_next;
+		for (int i = NS - 1; i >= 0; i--) if (s_hit[i]) s_k = 4'(i);
+	end
+	always_ff @(posedge clk)
+		for (int i = 0; i < NS; i++)
+			s_hit[i] <= !rst && (s_wr && s_k == 4'(i) ? u_pa[31:2] == s_na : s_used[i] && sa[i][31:2] == s_na);
+	// a write's word, the entry's with the access's bytes in it, apart from the read's (whose choice of the devices' words
+	// was in the write's path; no read of a device's address takes an entry's word, so what one holds for TE is unseen)
+	logic [31:0] s_w;
+	always_comb
+	begin
+		s_w = 32'h0;
+		for (int i = 0; i < NS; i++) s_w = s_w | (s_hit[i] ? sv[i] : 32'h0);
+		for (int j = 0; j < 4; j++)
+			if (4'(j) < u_size && 32'(u_pa[1:0]) + j < 4)
+				s_w[8 * (3 - (32'(u_pa[1:0]) + j)) +: 8] = u_wdata[8 * (32'(u_size) - 1 - j) +: 8];
+	end
+`ifdef VERILATOR
+	// (the compares as they were, on u_pa)
+	always_ff @(posedge clk)
+		if (!rst && u_req)
+		begin
+			logic oh;
+			logic [3:0] ok;
+			oh = 1'b0; ok = s_next;
+			for (int i = 0; i < NS; i++)
+				if (s_used[i] && sa[i] == {u_pa[31:2], 2'b00} && !oh) begin oh = 1'b1; ok = 4'(i); end
+			if (oh != (s_hit != '0) || ok != s_k) $display("STUB hit wrong %08x", u_pa);
+		end
+`endif
+
 	always_ff @(posedge clk)
 		if (a_req) u_rdata <= a_we ? 64'h0 : rd_bytes({a_w[7:0], a_w[15:8], a_w[23:16], a_w[31:24], 32'h0} >> 32, {1'b0, a_off}, a_size);
 
@@ -461,9 +516,8 @@ module m2_boot #(
 			logic hit;
 			logic [3:0] k;
 			logic [31:0] w, fv;
-			hit = 1'b0; k = s_next; w = 32'h0;
-			for (int i = 0; i < NS; i++)
-				if (s_used[i] && sa[i] == {u_pa[31:2], 2'b00} && !hit) begin hit = 1'b1; k = 4'(i); w = sv[i]; end
+			hit = s_hit != '0; k = s_k; w = 32'h0;
+			for (int i = 0; i < NS; i++) w = w | (s_hit[i] ? sv[i] : 32'h0);
 			if (u_cde) w = cde_rd;
 			if (u_te) w = te_rd;
 			else if (u_dsp) w = dsp_rd;
@@ -475,11 +529,8 @@ module m2_boot #(
 			if (u_we && (u_cde || u_bda || u_kio || u_ata || u_dsp || u_tk)) a_w <= 32'h0;
 			else if (u_we)
 			begin
-				for (int j = 0; j < 4; j++)
-					if (4'(j) < u_size && 32'(u_pa[1:0]) + j < 4)
-						w[8 * (3 - (32'(u_pa[1:0]) + j)) +: 8] = u_wdata[8 * (32'(u_size) - 1 - j) +: 8];
 				sa[k] <= {u_pa[31:2], 2'b00};
-				sv[k] <= w;
+				sv[k] <= s_w;
 				s_used[k] <= 1'b1;
 				if (!hit) s_next <= s_next + 4'd1;
 				a_w <= 32'h0;

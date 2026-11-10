@@ -329,6 +329,13 @@ void ppc602::mtspr(uint32_t n, uint32_t v)
 
 void ppc602::exec(uint32_t op)
 {
+	if (fpu_exc && !(msr & MSR_FP))
+	{
+		uint32_t p = op >> 26, x = (op >> 1) & 0x3ff;
+		if (p == 0x3b || p == 0x3f || (p >= 0x30 && p <= 0x37) || (p == 0x1f && (x == 0x217 || x == 0x237 || x == 0x257 ||
+			x == 0x277 || x == 0x297 || x == 0x2b7 || x == 0x2d7 || x == 0x2f7 || x == 0x3d7)))
+			raise(EX_FPU);
+	}
 	switch (op >> 26)
 	{
 		case 0x03:                                                                                     // TWI
@@ -412,12 +419,12 @@ void ppc602::exec(uint32_t op)
 				wr32(base + SIMM + 4 * (n - RS), r[n]);
 			return;
 		}
-		case 0x30: setfd(RD, double(bitsf(rd32(RAZ + SIMM)))); return;                                 // LFS
-		case 0x31: { uint32_t a = r[RA] + SIMM; setfd(RD, double(bitsf(rd32(a)))); r[RA] = a; return; }
-		case 0x32: f[RD] = rd64(RAZ + SIMM); return;                                                   // LFD
-		case 0x33: { uint32_t a = r[RA] + SIMM; f[RD] = rd64(a); r[RA] = a; return; }
-		case 0x34: wr32(RAZ + SIMM, fbits(float(fd(RS)))); return;                                     // STFS
-		case 0x35: { uint32_t a = r[RA] + SIMM; wr32(a, fbits(float(fd(RS)))); r[RA] = a; return; }
+		case 0x30: ld_fs(RD, rd32(RAZ + SIMM)); return;                                                // LFS
+		case 0x31: { uint32_t a = r[RA] + SIMM; ld_fs(RD, rd32(a)); r[RA] = a; return; }
+		case 0x32: ld_fd(RD, rd64(RAZ + SIMM)); return;                                                // LFD
+		case 0x33: { uint32_t a = r[RA] + SIMM; ld_fd(RD, rd64(a)); r[RA] = a; return; }
+		case 0x34: wr32(RAZ + SIMM, st_fs(RS)); return;                                                // STFS
+		case 0x35: { uint32_t a = r[RA] + SIMM; wr32(a, st_fs(RS)); r[RA] = a; return; }
 		case 0x36: wr64(RAZ + SIMM, f[RS]); return;                                                    // STFD
 		case 0x37: { uint32_t a = r[RA] + SIMM; wr64(a, f[RS]); r[RA] = a; return; }
 		case 0x3b: op3b(op); return;
@@ -627,16 +634,16 @@ void ppc602::op1f(uint32_t op)
 		case 0x117: r[RD] = rd16(RAZ + b); return;                                                     // LHZX
 		case 0x157: r[RD] = uint32_t(int32_t(int16_t(rd16(RAZ + b)))); return;                         // LHAX
 		case 0x017: r[RD] = rd32(RAZ + b); return;                                                     // LWZX
-		case 0x217: setfd(RD, double(bitsf(rd32(RAZ + b)))); return;                                   // LFSX
-		case 0x257: f[RD] = rd64(RAZ + b); return;                                                     // LFDX
+		case 0x217: ld_fs(RD, rd32(RAZ + b)); return;                                                  // LFSX
+		case 0x257: ld_fd(RD, rd64(RAZ + b)); return;                                                  // LFDX
 		case 0x316: r[RD] = __builtin_bswap16(rd16(RAZ + b)); return;                                  // LHBRX
 		case 0x216: r[RD] = __builtin_bswap32(rd32(RAZ + b)); return;                                  // LWBRX
 		case 0x077: { uint32_t e = a + b; r[RD] = rd8(e); r[RA] = e; return; }                         // LBZUX
 		case 0x137: { uint32_t e = a + b; r[RD] = rd16(e); r[RA] = e; return; }                        // LHZUX
 		case 0x177: { uint32_t e = a + b; r[RD] = uint32_t(int32_t(int16_t(rd16(e)))); r[RA] = e; return; } // LHAUX
 		case 0x037: { uint32_t e = a + b; r[RD] = rd32(e); r[RA] = e; return; }                        // LWZUX
-		case 0x237: { uint32_t e = a + b; setfd(RD, double(bitsf(rd32(e)))); r[RA] = e; return; }      // LFSUX
-		case 0x277: { uint32_t e = a + b; f[RD] = rd64(e); r[RA] = e; return; }                        // LFDUX
+		case 0x237: { uint32_t e = a + b; ld_fs(RD, rd32(e)); r[RA] = e; return; }                     // LFSUX
+		case 0x277: { uint32_t e = a + b; ld_fd(RD, rd64(e)); r[RA] = e; return; }                     // LFDUX
 		case 0x014:                                                                                    // LWARX
 		{
 			uint32_t e = RAZ + b;
@@ -662,15 +669,15 @@ void ppc602::op1f(uint32_t op)
 		case 0x0d7: wr8(RAZ + b, uint8_t(r[RS])); return;                                              // STBX
 		case 0x197: wr16(RAZ + b, uint16_t(r[RS])); return;                                            // STHX
 		case 0x097: wr32(RAZ + b, r[RS]); return;                                                      // STWX
-		case 0x297: wr32(RAZ + b, fbits(float(fd(RS)))); return;                                       // STFSX
-		case 0x3d7: wr32(RAZ + b, uint32_t(f[RS])); return;                                            // STFIWX
+		case 0x297: wr32(RAZ + b, st_fs(RS)); return;                                                  // STFSX
+		case 0x3d7: wr32(RAZ + b, st_fiw(RS)); return;                                                 // STFIWX
 		case 0x2d7: wr64(RAZ + b, f[RS]); return;                                                      // STFDX
 		case 0x396: wr16(RAZ + b, __builtin_bswap16(uint16_t(r[RS]))); return;                         // STHBRX
 		case 0x296: wr32(RAZ + b, __builtin_bswap32(r[RS])); return;                                   // STWBRX
 		case 0x0f7: { uint32_t e = a + b; wr8(e, uint8_t(r[RS])); r[RA] = e; return; }                 // STBUX
 		case 0x1b7: { uint32_t e = a + b; wr16(e, uint16_t(r[RS])); r[RA] = e; return; }               // STHUX
 		case 0x0b7: { uint32_t e = a + b; wr32(e, r[RS]); r[RA] = e; return; }                         // STWUX
-		case 0x2b7: { uint32_t e = a + b; wr32(e, fbits(float(fd(RS)))); r[RA] = e; return; }          // STFSUX
+		case 0x2b7: { uint32_t e = a + b; wr32(e, st_fs(RS)); r[RA] = e; return; }                     // STFSUX
 		case 0x2f7: { uint32_t e = a + b; wr64(e, f[RS]); r[RA] = e; return; }                         // STFDUX
 		case 0x096:                                                                                    // STWCX.
 		{
@@ -774,15 +781,18 @@ void ppc602::op1f(uint32_t op)
 
 void ppc602::op3b(uint32_t op)
 {
+	if (sp) { sp_a(op); return; }
 	double a = fd(RA), b = fd(RB), c = fd(RC_);
 	double v;
+	// the pipeline's single ops (single_ftz): a double under the single normals is a zero
+	auto rnds = [this](double d) { return single_ftz && std::fabs(d) < 0x1p-126 ? std::copysign(0.0, d) : ::rnds(d); };
 	switch ((op >> 1) & 0x1f)
 	{
 		case 0x15: v = rnds(x86_add(a, b)); break;                                                        // FADDS
 		case 0x14: v = rnds(x86_sub(a, b)); break;                                                        // FSUBS
 		case 0x19: v = rnds(x86_mul(a, c)); break;                                                        // FMULS
-		case 0x12: v = rnds(x86_div(a, b)); break;                                                        // FDIVS
-		case 0x16: v = rnds(std::sqrt(b)); break;                                                      // FSQRTS
+		case 0x12: v = ::rnds(x86_div(a, b)); break;                                                      // FDIVS
+		case 0x16: v = ::rnds(std::sqrt(b)); break;                                                    // FSQRTS
 		case 0x18: { volatile float s = float(b); volatile float q = 1.0f / s; v = double(q); break; } // FRES
 		case 0x1d: { double p = x86_mul(a, c); v = rnds(x86_add(p, b)); break; }                             // FMADDS
 		case 0x1c: { double p = x86_mul(a, c); v = rnds(x86_sub(p, b)); break; }                             // FMSUBS
@@ -796,6 +806,7 @@ void ppc602::op3b(uint32_t op)
 
 void ppc602::op3f(uint32_t op)
 {
+	if (sp) { if ((op >> 1) & 0x10) sp_a(op); else sp_x(op); return; }
 	double a = fd(RA), b = fd(RB), c = fd(RC_);
 	uint32_t sw = (op >> 1) & 0x3ff;
 	if (sw & 0x10)
@@ -846,6 +857,170 @@ void ppc602::op3f(uint32_t op)
 		{
 			uint32_t m = crf_mask((op >> 17) & 0xff);
 			fpscr = (fpscr & ~m) | (uint32_t(f[RB]) & m);
+			set_round();
+			return;
+		}
+		case 0x086:                                                                                    // MTFSFI
+		{
+			uint32_t imm = (op >> 12) & 0xf;
+			fpscr = (fpscr & ~crmask(CRFD)) | (rol32(imm, 28 - 4 * CRFD) & crmask(CRFD));
+			if (CRFD == 7) set_round();
+			return;
+		}
+	}
+	raise(EX_PROGRAM, 0x80000);
+}
+
+// ---- the 602's single-precision FPRs (sp), as rtl/ppc_fps.sv and rtl/ppc_pipe.sv have them ------------------------------
+
+static inline bool snanb(uint32_t x) { return (x & 0x7f800000) == 0x7f800000 && (x & 0x007fffff); }
+static inline uint32_t squiet(uint32_t x) { return x | 0x00400000; }
+static const uint32_t SDNAN = 0x7fc00000;
+
+// stfd's double of a single (exact; a NaN's payload kept)
+static uint64_t s2d(uint32_t x)
+{
+	uint64_t s = uint64_t(x >> 31) << 63;
+	if ((x & 0x7f800000) == 0x7f800000) return s | 0x7ff0000000000000ull | (uint64_t(x & 0x7fffff) << 29);
+	if (!(x & 0x7fffffff)) return s;
+	return dbits(double(bitsf(x)));
+}
+// back: f holds only what s2d gives
+static uint32_t d2s(uint64_t d)
+{
+	uint32_t s = uint32_t(d >> 63) << 31;
+	if (((d >> 52) & 0x7ff) == 0x7ff) return s | 0x7f800000 | uint32_t((d >> 29) & 0x7fffff);
+	if (!(d << 1)) return s;
+	return fbits(float(bitsd(d)));
+}
+// lfd's (rtl/ppc_fpu_pkg.sv's d2f): a word under 2^32 an integer (bit 32), else the nearest single (ties to even, whatever
+// the mode), under the single normals a zero
+static uint64_t d2f33(uint64_t d)
+{
+	uint32_t e = (d >> 52) & 0x7ff, s = uint32_t(d >> 63) << 31;
+	if (!(d >> 32)) return 0x100000000ull | uint32_t(d);
+	if (e == 0x7ff)
+	{
+		uint32_t f = (d >> 29) & 0x7fffff;
+		if ((d & 0xfffffffffffffull) && !f) f = 0x400000;
+		return s | 0x7f800000 | f;
+	}
+	if (e <= 896) return s;
+	if (e >= 1151) return s | 0x7f800000;
+	uint32_t v = ((e - 896) << 23 | uint32_t((d >> 29) & 0x7fffff)) + uint32_t((d >> 28 & 1) && ((d >> 29 & 1) || (d & 0xfffffff)));
+	return s | v;
+}
+
+uint32_t ppc602::fs(int n) const { return (fint >> n & 1) ? uint32_t(f[n]) : d2s(f[n]); }
+void ppc602::setfs(int n, uint32_t v) { f[n] = s2d(v); fint &= ~(1u << n); }
+void ppc602::setfi(int n, uint32_t v) { f[n] = v; fint |= 1u << n; }
+void ppc602::setf33(int n, uint64_t v) { if (v >> 32 & 1) setfi(n, uint32_t(v)); else setfs(n, uint32_t(v)); }
+// (twice: a +0 from a flushed value would load as the integer 0)
+void ppc602::sp_canon() { for (int k = 0; k < 2; k++) for (int n = 0; n < 32; n++) setf33(n, d2f33(f[n])); }
+void ppc602::ld_fs(int n, uint32_t v) { if (sp) setfs(n, v); else setfd(n, double(bitsf(v))); }
+void ppc602::ld_fd(int n, uint64_t v) { if (sp) setf33(n, d2f33(v)); else f[n] = v; }
+uint32_t ppc602::st_fs(int n) { return sp ? fs(n) : fbits(float(fd(n))); }
+uint32_t ppc602::st_fiw(int n) { return sp ? fs(n) : uint32_t(f[n]); }
+
+// the A-form ops, double forms as the single ones: the host's floats, in the mode, fused; a NaN the unit's (the first NaN
+// operand quieted: a then c (the product) before b, b first for fnmsub (b - the product); with none, the default NaN
+// 0x7fc00000), fnmadd's negated, its exact zero too (the unit negates the sum before its round: its zero is the sum's negated)
+void ppc602::sp_a(uint32_t op)
+{
+	uint32_t a = fs(RA), b = fs(RB), c = fs(RC_);
+	volatile float fa = bitsf(a), fb = bitsf(b), fc = bitsf(c);
+	uint32_t v, nan = SDNAN;
+	bool neg = false;
+	switch ((op >> 1) & 0x1f)
+	{
+		case 0x15: v = fbits(fa + fb); nan = snanb(a) ? squiet(a) : snanb(b) ? squiet(b) : SDNAN; break;           // FADD(S)
+		case 0x14: v = fbits(fa - fb); nan = snanb(a) ? squiet(a) : snanb(b) ? squiet(b) : SDNAN; break;           // FSUB(S)
+		case 0x19: v = fbits(fa * fc); nan = snanb(a) ? squiet(a) : snanb(c) ? squiet(c) : SDNAN; break;           // FMUL(S)
+		case 0x12: v = fbits(fa / fb); nan = snanb(a) ? squiet(a) : snanb(b) ? squiet(b) : SDNAN; break;           // FDIV(S)
+		case 0x16: v = fbits(sqrtf(fb)); nan = snanb(b) ? squiet(b) : SDNAN; break;                                // FSQRT(S)
+		case 0x18:                                                                                                  // FRES
+			if ((op >> 26) != 0x3b) raise(EX_PROGRAM, 0x80000);
+			v = fbits(1.0f / fb); nan = snanb(b) ? squiet(b) : SDNAN; break;
+		case 0x1a:                                                                                                  // FRSQRTE
+		{
+			if ((op >> 26) != 0x3f) raise(EX_PROGRAM, 0x80000);
+			volatile float r = sqrtf(fb);
+			v = fbits(1.0f / r); nan = snanb(b) ? squiet(b) : SDNAN; break;
+		}
+		case 0x17:                                                                                                  // FSEL
+			if ((op >> 26) != 0x3f) raise(EX_PROGRAM, 0x80000);
+			if (!std::isnan(fa) && fa >= 0.0f) { f[RD] = f[RC_]; fint = (fint & ~(1u << RD)) | ((fint >> RC_ & 1) << RD); }
+			else { f[RD] = f[RB]; fint = (fint & ~(1u << RD)) | ((fint >> RB & 1) << RD); }
+			return;
+		case 0x1d: case 0x1c: case 0x1f: case 0x1e:                                                                 // the multiply-adds
+		{
+			uint32_t x = (op >> 1) & 0x1f;
+			// (the product: a NaN operand, or infinity times zero the default NaN)
+			bool az = !(a & 0x7fffffff), cz = !(c & 0x7fffffff), ai = (a & 0x7fffffff) == 0x7f800000, ci = (c & 0x7fffffff) == 0x7f800000;
+			uint32_t pn = snanb(a) ? squiet(a) : snanb(c) ? squiet(c) : (ai && cz) || (az && ci) ? SDNAN : 0, bn = snanb(b) ? squiet(b) : 0;
+			nan = x == 0x1e ? (bn ? bn : pn ? pn : SDNAN) : (pn ? pn : bn ? bn : SDNAN);
+			if (x == 0x1d) v = fbits(fmaf(fa, fc, fb));
+			else if (x == 0x1c) v = fbits(fmaf(fa, fc, -fb));
+			else if (x == 0x1e) v = fbits(fmaf(-fa, fc, fb));
+			else
+			{
+				neg = true;
+				if (double(fa) * double(fc) + double(fb) == 0.0) v = fbits(fmaf(fa, fc, fb)) ^ 0x80000000u;
+				else v = fbits(fmaf(-fa, fc, -fb));
+			}
+			break;
+		}
+		default: raise(EX_PROGRAM, 0x80000);
+	}
+	if (std::isnan(bitsf(v))) v = neg ? nan ^ 0x80000000u : nan;
+	setfs(RD, v);
+	fp_cr1(op);
+}
+
+// the X-form ops: the moves keep an integer's bit; fcmpu / fcmpo, fsel, mtfsf, fctiw[z] read the 32 bits as a single
+void ppc602::sp_x(uint32_t op)
+{
+	uint32_t sw = (op >> 1) & 0x3ff;
+	uint32_t b = fs(RB);
+	auto mov = [&](uint32_t v) { if (fint >> RB & 1) setfi(RD, v); else setfs(RD, v); };
+	switch (sw)
+	{
+		case 0x000: case 0x020:                                                                        // FCMPU, FCMPO
+		{
+			float a = bitsf(fs(RA)), fb = bitsf(b);
+			uint32_t c4 = std::isnan(a) || std::isnan(fb) ? 1 : a < fb ? 8 : a > fb ? 4 : 2;
+			cr[CRFD] = c4;
+			fpscr = (fpscr & ~0x0000f000u) | (c4 << 12);
+			return;
+		}
+		case 0x00c: setfs(RD, snanb(b) ? squiet(b) : b); fp_cr1(op); return;                          // FRSP
+		case 0x00e: case 0x00f:                                                                        // FCTIW, FCTIWZ
+		{
+			float v = bitsf(b);
+			uint32_t w = 0x80000000u;
+			if (!std::isnan(v) && !std::isinf(v))
+			{
+				double t = sw == 0x00f ? std::trunc(double(v)) : std::nearbyint(double(v));
+				if (t < 2147483648.0 && t >= -2147483648.0) w = uint32_t(int32_t(t));
+			}
+			setfi(RD, w);
+			return;
+		}
+		case 0x028: mov(b ^ 0x80000000u); return;                                                      // FNEG
+		case 0x048: mov(b); return;                                                                    // FMR
+		case 0x088: mov(b | 0x80000000u); return;                                                      // FNABS
+		case 0x108: mov(b & ~0x80000000u); return;                                                     // FABS
+		case 0x046: fpscr &= ~(0x80000000u >> CRBD); if (CRBD >= 30) set_round(); return;              // MTFSB0
+		case 0x026: fpscr |= 0x80000000u >> CRBD; if (CRBD >= 30) set_round(); return;                 // MTFSB1
+		case 0x040:                                                                                    // MCRFS
+			cr[CRFD] = (fpscr >> ((7 - CRFS) * 4)) & 0xf;
+			fpscr &= ~crmask(CRFS);
+			return;
+		case 0x247: setfi(RD, fpscr); return;                                                          // MFFS: an integer
+		case 0x2c7:                                                                                    // MTFSF
+		{
+			uint32_t m = crf_mask((op >> 17) & 0xff);
+			fpscr = (fpscr & ~m) | (b & m);
 			set_round();
 			return;
 		}

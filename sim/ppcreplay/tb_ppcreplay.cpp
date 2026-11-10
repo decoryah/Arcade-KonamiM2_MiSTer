@@ -1,4 +1,4 @@
-// tb_ppcreplay trace [-rom file] [-ram file -state file] [-max N] [-errors N] [-quiet] [-free lo hi [-hot N]]: runs the reference 602 (tools/ref/ppc602) against a MAME
+// tb_ppcreplay trace [-rom file] [-ram file -state file] [-max N] [-errors N] [-quiet] [-free lo hi [-hot N] [-lax]]: runs the reference 602 (tools/ref/ppc602) against a MAME
 // trace made by work/lua/boot_trace.lua (tools/lua/ppc_trace.lua): before each instruction an "R" line with r0-r31, CR,
 // LR, CTR, XER, MSR, SRR0, SRR1, FPSCR, then the instruction, then every data access it made ("MR/MW addr bits data").
 //
@@ -215,6 +215,8 @@ struct rtl_core
 	// -free: the data side answers with the model's accesses, in order (and they must be the same)
 	const std::vector<maccess> *src = nullptr;
 	size_t si = 0;
+	bool lax = false;                // -lax: a write's data may differ (counted): the 602's singles against MAME's doubles
+	uint64_t lax_diff = 0;
 	std::string err;
 	int perf = 0;                    // what X did this clock (perf_o), at perf_pc
 	uint32_t perf_pc = 0;
@@ -234,7 +236,8 @@ struct rtl_core
 			if (src)
 			{
 				const maccess *e = si < src->size() ? &(*src)[si] : nullptr;
-				if (!e || e->w != a.w || e->a != a.a || e->bytes != a.bytes || (a.w && e->d != a.d))
+				if (e && lax && a.w && e->w && e->a == a.a && e->bytes == a.bytes && e->d != a.d) lax_diff++;
+				else if (!e || e->w != a.w || e->a != a.a || e->bytes != a.bytes || (a.w && e->d != a.d))
 				{
 					char b[160];
 					snprintf(b, sizeof b, "access %zu: RTL %s %08X %d %llX, model %s %08X %d %llX", si, a.w ? "W" : "R", a.a, n,
@@ -357,8 +360,8 @@ int main(int argc, char **argv)
 	uint64_t maxn = ~0ull;
 	int maxerr = 10;
 	bool quiet = false;
-	bool freerun = false;
-	int hot = 0;                         // -hot N: the N instructions losing the most clocks, by cause
+	bool freerun = false, lax = false;
+	int hot = 0;                        // -hot N: the N instructions losing the most clocks, by cause
 	uint32_t idle_lo = 1, idle_hi = 0;
 	for (int i = 2; i < argc; i++)
 	{
@@ -375,6 +378,7 @@ int main(int argc, char **argv)
 			idle_hi = uint32_t(strtoul(argv[++i], nullptr, 16));
 		}
 		else if (!strcmp(argv[i], "-hot") && i + 1 < argc) hot = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-lax")) lax = true;
 	}
 	memory mem;
 	if (romfile)
@@ -614,6 +618,7 @@ int main(int argc, char **argv)
 	{
 		Vtop &t = rtl->t;
 		rtl->src = &rec_acc;
+		rtl->lax = lax;
 		uint64_t k = 0, cyc = 0, last = 0, cyc_in = 0, cyc_out = 0, ins_in = 0, ins_out = 0;
 		uint64_t why[9] = {};             // outside the idle loop: the clocks by what X did (perf_o)
 		std::map<uint32_t, uint64_t> lost[9];   // ... by the instruction in X
@@ -684,6 +689,7 @@ int main(int argc, char **argv)
 			"inside %llu in %llu (%.3f); %zu accesses\n", (unsigned long long)k, (unsigned long long)cyc, k ? double(cyc) / k : 0.0,
 			(unsigned long long)ins_out, (unsigned long long)cyc_out, ins_out ? double(cyc_out) / ins_out : 0.0,
 			(unsigned long long)ins_in, (unsigned long long)cyc_in, ins_in ? double(cyc_in) / ins_in : 0.0, rtl->si);
+		if (lax) printf("writes of other data (-lax): %llu\n", (unsigned long long)rtl->lax_diff);
 		static const char *WHY[9] = { "ran", "no instruction", "GPR load", "FPR load/move", "FPR float op", "float unit busy",
 			"access out", "multi-clock", "held" };
 		printf("outside the idle loop, by clock:");

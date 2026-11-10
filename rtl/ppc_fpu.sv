@@ -2,11 +2,13 @@
 // in the four rounding modes with denormals; a NaN operand comes back quieted (the first, if both are NaNs), an invalid
 // operation gives the default NaN 0xfff8000000000000.
 // Each operation is MAME's sequence of x86 operations (ppcdrc.cpp), run one step at a time:
-//   add / sub / mul: one step;  div: 58 bits, sqrt: 57, two a clock (after three clocks to unpack, one to start), then the
-//   round (two clocks, one after sqrt);  a
-//   single-precision op: the double op, then a round to single and back (cvtsd2ss / cvtss2sd, three clocks);  fmadd: a
-//   double multiply, then a double add (nothing fused);  fres: 1.0f / (float)b (divss);  frsqrte: 1.0 / sqrt(b), each
-//   step rounded.
+//   add / sub / mul: one step;  div: 56 bits, sqrt: 56, four a clock (after four clocks to unpack, three for sqrt, and
+//   one to start), then the round (two clocks);  a single-precision op: the double op, then a round to single and
+//   back (cvtsd2ss / cvtss2sd, three clocks);  fmadd: a double multiply, then a double add (nothing fused);  fres:
+//   1.0f / (float)b (divss);  frsqrte: 1.0 / sqrt(b), each step rounded (the root, a normal double, straight into the
+//   divide).
+// Rounding needs 54 bits (53 and the round bit) and whether there's more (the sticky bit): the divide makes 56 (the
+// quotient's top bit is one of the top two), the square root 56 (its top bit the top), the remainder the sticky bit.
 // FULL = 0 leaves only divide, square root, fres and frsqrte (rtl/ppc_pipe.sv's; rtl/ppc_fpp.sv has the rest); the
 // one-step operations are single clocks too long for the machine's clock, there for rtl/ppc_core.sv.
 `default_nettype none
@@ -74,8 +76,8 @@ module ppc_fpu #(
 		endcase
 	endfunction
 
-	typedef enum logic [3:0] { S_IDLE, S_RUN, S_DU, S_DU2, S_DIV0, S_DIV, S_SU, S_SU2, S_SQRT0, S_SQRT, S_DN, S_DR, S_RS2,
-		S_RS3 } state_t;
+	typedef enum logic [3:0] { S_IDLE, S_RUN, S_DU, S_DU2, S_DU3, S_DIV0, S_DIV, S_SU, S_SU2, S_SQRT0, S_SQRT, S_DN, S_DR,
+		S_RS2, S_RS3, S_RQ } state_t;
 	// (Verilator takes the tasks' writes for another process)
 	// verilator lint_off MULTIDRIVEN
 	state_t      state;
@@ -85,18 +87,47 @@ module ppc_fpu #(
 	logic [63:0] qa, qb, qc, t;
 
 	// divide / square root
-	logic [57:0] it_q;
+	logic [55:0] it_q;                  // the quotient or the root, in at the bottom
 	logic [58:0] it_r;
-	logic [113:0] it_n;                 // square root: the radicand, two bits a step
-	logic [56:0] it_root;
+	logic [111:0] it_n;                 // square root: the radicand, two bits a step
 	logic signed [6:0] it_k;            // the bit to make; done below 0
 	logic        it_s, it_sgl;
 	logic signed [13:0] it_e;
 	logic [52:0] it_d;
 	logic [54:0] it_d3;                 // 3 * it_d
-	logic [58:0] it_root3;              // square root: 3 * it_root
+
+	// two quotient bits (floor(r * 4 / d) with r < 2d, the r in): r = (r >= d ? r - d : r) << 1 twice, so r - d, then
+	// 2r - 3d or 2r - d, taken side by side; {the bits, the remainder (not yet shifted for the next)}
+	function automatic logic [60:0] div2(input logic [58:0] r0, input logic [52:0] d, input logic [54:0] d3);
+		// verilator lint_off UNUSEDSIGNAL
+		logic [60:0] t1, t2, t3;
+		// verilator lint_on UNUSEDSIGNAL
+		t1 = {2'b0, r0} - {8'h0, d};
+		t2 = {1'b0, r0, 1'b0} - {8'h0, d};
+		t3 = {1'b0, r0, 1'b0} - {6'h0, d3};
+		if (!t1[60]) return {1'b1, !t3[60], t3[60] ? {t1[57:0], 1'b0} : t3[58:0]};
+		return {1'b0, !t2[60], t2[60] ? {r0[57:0], 1'b0} : t2[58:0]};
+	endfunction
+
+	// two root bits: a step is r = 4r + the next two radicand bits, less 4 root + 1 if that's not more (a root bit 1); so
+	// two are y = 4r + p1 less 4 root + 1, then x = 16r + 4p1 + p2 less 24 root + 9 or 8 root + 1, taken side by side
+	// (x - (24 root + 9) as x + ~(16 root + 7) + ~(8 root): an add of three, one carry chain); {the bits, the remainder}
+	function automatic logic [60:0] sq2(input logic [58:0] r0, input logic [3:0] p, input logic [55:0] root);
+		// verilator lint_off UNUSEDSIGNAL
+		logic [62:0] y, x, d1, e2, f2;
+		// verilator lint_on UNUSEDSIGNAL
+		logic c1, c2;
+		y = {2'b0, r0, p[3:2]};
+		x = {r0, p};
+		d1 = y - {5'h0, root, 2'b01};
+		e2 = x + {3'h7, ~root, 4'b1000} + {4'hf, ~root, 3'b111};
+		f2 = x - {4'h0, root, 3'b001};
+		c1 = !d1[62];
+		c2 = c1 ? !e2[62] : !f2[62];
+		return {c1, c2, c1 ? (c2 ? e2[58:0] : {d1[56:0], p[1:0]}) : (c2 ? f2[58:0] : x[58:0])};
+	endfunction
 	logic [63:0] it_ox, it_oy;          // the operands (S_DU, S_SU)
-	unp_t        it_ux, it_uy;          // ... unpacked (S_DIV0, S_SQRT0); in S_DU2 / S_SU2 a denormal's m not yet shifted
+	unp_t        it_ux, it_uy;          // ... unpacked (S_DIV0, S_SQRT0); before, a denormal's m not yet shifted
 	logic [5:0]  it_kx, it_ky;          // ... by these (its leading zeros)
 
 	// unpack_d over two clocks: the fields (a denormal's m as it is, e -1022) and m's leading zeros; then the shift
@@ -123,6 +154,10 @@ module ppc_fpu #(
 	logic        fin_st;
 	rsa_t        fin_rsa;
 	rsb_t        fin_rsb;
+
+	// the unpacked operands' normalization, one a clock: x (S_DU2, S_SU2), then y (S_DU3)
+	unp_t nrm;
+	assign nrm = unpack_n(state == S_DU3 ? it_uy : it_ux, state == S_DU3 ? it_ky : it_kx);
 
 	step_t st_c;
 	logic [63:0] ox, oy;
@@ -208,8 +243,12 @@ module ppc_fpu #(
 				end
 				S_DU2:
 				begin
-					it_ux <= unpack_n(it_ux, it_kx);
-					it_uy <= unpack_n(it_uy, it_ky);
+					it_ux <= nrm;
+					state <= S_DU3;
+				end
+				S_DU3:
+				begin
+					it_uy <= nrm;
 					state <= S_DIV0;
 				end
 				S_SU:
@@ -220,7 +259,7 @@ module ppc_fpu #(
 				end
 				S_SU2:
 				begin
-					it_ux <= unpack_n(it_ux, it_kx);
+					it_ux <= nrm;
 					state <= S_SQRT0;
 				end
 
@@ -242,8 +281,8 @@ module ppc_fpu #(
 						it_r <= {6'h0, ux.m};
 						it_d <= uy.m;
 						it_d3 <= {2'b0, uy.m} + {1'b0, uy.m, 1'b0};
-						it_q <= 58'h0;
-						it_k <= 7'sd57;
+						it_q <= 56'h0;
+						it_k <= 7'sd55;
 						it_s <= sgn;
 						it_e <= ux.e - uy.e;
 						state <= S_DIV;
@@ -260,63 +299,51 @@ module ppc_fpu #(
 					else if (ux.inf) finish(ox, 4'h0);
 					else
 					begin
-						// m * 2^E, E = e - 52 made even; the root of m << 60 has its top bit at 56
+						// m * 2^E, E = e - 52 made even; the root of m << 58 has its top bit at 55
 						e = ux.e - 14'sd52;
 						if (e[0])
 						begin
-							it_n <= {ux.m, 61'h0};
+							it_n <= {ux.m, 59'h0};
 							e = e - 14'sd1;
 						end
 						else
-							it_n <= {1'b0, ux.m, 60'h0};
-						it_e <= ((e - 14'sd60) >>> 1) + 14'sd56;
+							it_n <= {1'b0, ux.m, 58'h0};
+						it_e <= ((e - 14'sd58) >>> 1) + 14'sd55;
 						it_r <= 59'h0;
-						it_root <= 57'h0;
-						it_root3 <= 59'h0;
-						it_k <= 7'sd56;
+						it_q <= 56'h0;
+						it_k <= 7'sd55;
+						it_s <= 1'b0;
+						it_sgl <= 1'b0;
 						state <= S_SQRT;
 					end
 				end
 
 				S_DIV:
 				begin
-					// two quotient bits a clock (floor(mx * 2^57 / my), 58 bits, in at the bottom): a step is
-					// r = (r >= d ? r - d : r) << 1, so two are r - d, then 2r - 3d or 2r - d, taken side by side
+					// four quotient bits a clock (floor(mx * 2^55 / my), 56 bits, in at the bottom), two and two
 					// verilator lint_off UNUSEDSIGNAL
-					logic [60:0] t1, t2, t3;
-					logic [58:0] r;
+					logic [60:0] a2, b2;
 					// verilator lint_on UNUSEDSIGNAL
-					logic [1:0] qd;
-					t1 = {2'b0, it_r} - {8'h0, it_d};
-					t2 = {1'b0, it_r, 1'b0} - {8'h0, it_d};
-					t3 = {1'b0, it_r, 1'b0} - {6'h0, it_d3};
-					if (!t1[60])
-					begin
-						qd[1] = 1'b1;
-						qd[0] = !t3[60];
-						r = t3[60] ? {t1[57:0], 1'b0} : t3[58:0];
-					end
-					else
-					begin
-						qd[1] = 1'b0;
-						qd[0] = !t2[60];
-						r = t2[60] ? {it_r[57:0], 1'b0} : t2[58:0];
-					end
-					it_r <= {r[57:0], 1'b0};
-					it_q <= {it_q[55:0], qd};
-					it_k <= it_k - 7'sd2;
-					if (it_k < 7'sd2) state <= S_DN;
+					a2 = div2(it_r, it_d, it_d3);
+					b2 = div2({a2[57:0], 1'b0}, it_d, it_d3);
+					it_r <= {b2[57:0], 1'b0};
+					it_q <= {it_q[51:0], a2[60:59], b2[60:59]};
+					it_k <= it_k - 7'sd4;
+					if (it_k < 7'sd4) state <= S_DN;
 				end
 
-				// the quotient normalized; to a denormal (a double), or to single
+				// the quotient normalized (its last bit, if it's below the top, below the round bit: a zero, the
+				// remainder saying whether it's more); to a denormal (a double), or to single. (A root: its top bit the
+				// top, never a denormal, double.)
 				S_DN:
 				begin
 					logic [55:0] sig;
 					logic st;
 					logic signed [13:0] e, dn;
 					logic [56:0] sh;
-					if (it_q[57]) begin sig = it_q[57:2]; st = it_q[1:0] != 0 || it_r != 0; e = it_e; end
-					else begin sig = it_q[56:1]; st = it_q[0] || it_r != 0; e = it_e - 14'sd1; end
+					st = it_r != 0;
+					if (it_q[55]) begin sig = it_q; e = it_e; end
+					else begin sig = {it_q[54:0], 1'b0}; e = it_e - 14'sd1; end
 					fin_s <= it_s;
 					if (it_sgl)
 					begin
@@ -332,7 +359,25 @@ module ppc_fpu #(
 						state <= S_DR;
 					end
 				end
-				S_DR: finish(rnd_d(fin_s, fin_e, fin_sig, fin_st, q_rn), 4'h0);
+				S_DR:
+				begin
+					finish(rnd_d(fin_s, fin_e, fin_sig, fin_st, q_rn), 4'h0);
+					if (fop_t'(q_op) == F_RSQRTE && n == 2'd0) state <= S_RQ;
+				end
+				// frsqrte's divide, 1.0 / t (the root, rounded: a normal double), as S_RUN to S_DIV0 would start it
+				S_RQ:
+				begin
+					it_r <= {6'h0, 1'b1, 52'h0};
+					it_d <= {1'b1, t[51:0]};
+					it_d3 <= {3'b001, t[51:0]} + {2'b01, t[51:0], 1'b0};
+					it_q <= 56'h0;
+					it_k <= 7'sd55;
+					it_s <= 1'b0;
+					it_sgl <= 1'b0;
+					it_e <= 14'sd1023 - {3'b0, t[62:52]};
+					n <= 2'd1;
+					state <= S_DIV;
+				end
 				S_RS2:
 				begin
 					fin_rsb <= rs_b(fin_rsa, q_rn);
@@ -342,47 +387,17 @@ module ppc_fpu #(
 
 				S_SQRT:
 				begin
-					// two root bits a clock: a step is r = 4r + the next two radicand bits, less 4 root + 1 if that's not
-					// more (a root bit 1); so two are y = 4r + p1 less 4 root + 1, then x = 16r + 4p1 + p2 less 24 root + 9
-					// or 8 root + 1, taken side by side (it_root3 is 3 root); the last clock (k = 0) makes one
+					// four root bits a clock (in at the bottom of it_q), two and two (sq2)
 					// verilator lint_off UNUSEDSIGNAL
-					logic [62:0] y, x, d1, e2, f2;
+					logic [60:0] a2, b2;
 					// verilator lint_on UNUSEDSIGNAL
-					logic [58:0] r;
-					logic [56:0] root;
-					logic [58:0] root3;
-					logic c1, c2;
-					y = {2'b0, it_r, it_n[113:112]};
-					x = {it_r, it_n[113:110]};
-					d1 = y - {4'h0, it_root, 2'b01};
-					e2 = x - ({1'b0, it_root3, 3'b000} + 63'd9);
-					f2 = x - {3'b0, it_root, 3'b001};
-					c1 = !d1[62];
-					if (it_k == 7'sd0)
-					begin
-						r = c1 ? d1[58:0] : y[58:0];
-						root = {it_root[55:0], c1};
-						root3 = 59'h0;
-						c2 = 1'b0;
-					end
-					else
-					begin
-						c2 = c1 ? !e2[62] : !f2[62];
-						r = c1 ? (c2 ? e2[58:0] : {d1[56:0], it_n[111:110]}) : (c2 ? f2[58:0] : x[58:0]);
-						root = {it_root[54:0], c1, c2};
-						root3 = {it_root3[56:0], 2'b00} + {57'h0, c1, c2} + {56'h0, c1, c2, 1'b0};
-					end
-					it_r <= r;
-					it_root <= root;
-					it_root3 <= root3;
-					it_n <= it_n << 4;
-					it_k <= it_k - 7'sd2;
-					if (it_k < 7'sd2)
-					begin
-						// (never a denormal)
-						fin_s <= 1'b0; fin_e <= it_e; fin_sig <= root[56:1]; fin_st <= root[0] || r != 0;
-						state <= S_DR;
-					end
+					a2 = sq2(it_r, it_n[111:108], it_q);
+					b2 = sq2(a2[58:0], it_n[107:104], {it_q[53:0], a2[60:59]});
+					it_r <= b2[58:0];
+					it_q <= {it_q[51:0], a2[60:59], b2[60:59]};
+					it_n <= it_n << 8;
+					it_k <= it_k - 7'sd4;
+					if (it_k < 7'sd4) state <= S_DN;
 				end
 
 				default: state <= S_IDLE;

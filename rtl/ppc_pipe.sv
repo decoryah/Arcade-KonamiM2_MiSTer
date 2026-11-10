@@ -12,18 +12,22 @@
 //   M:      the clock after the request, its translation: the physical address out, or a fault, taken precisely (the
 //           instruction X holds then isn't taken, an update form's rA is put back); a store that may cover an instruction
 //           already fetched (by its offset in the page) refetches after it. An access retires here (with X's next instruction, perhaps: retire2).
-//           Then the response to a load (the GPR or FPR written the clock it comes); a store's acknowledge. One access
-//           out.
+//           Then the response to a load (the GPR or FPR written the clock it comes); a store's acknowledge. Two accesses
+//           out (M, and the one behind it, N): the next may go in one's address clock, and they're answered in order.
 //   FP:     rtl/ppc_fpp.sv beside X, the float pipeline (an op a clock, its FPR written at its end), and rtl/ppc_fpu.sv
-//           for divide and square root (with the pipeline empty, and stopping it); with MSR[FP] clear an FP op takes the FP-unavailable exception (the kernel's lazy switch of the FPRs between tasks), otherwise no FP op faults. fcmpu / fcmpo and
-//           the moves are X's (the moves written through M). Single-precision loads and stores convert inline.
+//           for divide and square root (with the pipeline empty, and stopping it); with MSR[FP] clear an FP op takes the
+//           FP-unavailable exception (the kernel's lazy switch of the FPRs between tasks), otherwise no FP op faults. fcmpu /
+//           fcmpo and the moves are X's (the moves written through M). The FPRs are singles, as the 602's (rtl/ppc_fps.sv): lfd
+//           takes the nearest single, stfd waits a clock for its double.
 // The GPRs and FPRs are in RAM (rtl/ppc_regs.sv), read the clock before X (for the instruction it will hold, or SEQ's
 // next register): X takes what was written since from the writes it keeps (a clock back; two for X's own, which go to
 // the RAM a clock late). With FWD, a register written in a clock (M's load or move, a float unit's result) is forwarded
 // to X in that clock too; without it (the default: the forward is 3 ns of the worst path) an instruction using it waits a
-// clock.
-// Hazards stall X: a source or destination that a load in M or a float unit hasn't written yet; a second access while
-// one is out; the float units not free for the op. Multi-access instructions (lmw, stmw, lsw, stsw, dcbz, stwcx.)
+// clock. With FPF (the default), an op to the float pipeline takes the pipeline's results itself as they leave it, from
+// its last stage or its result register, so it doesn't wait for them either way; and the float pipeline's result
+// register (wv) is forwarded to X's own float instructions (compares, moves, stores) as with FWD.
+// Hazards stall X: a source or destination that a load in M or a float unit hasn't written yet; a third access while
+// two are out; the float units not free for the op. Multi-access instructions (lmw, stmw, lsw, stsw, dcbz, stwcx.)
 // run in X one access at a time with M empty (SEQ); divw in DIV. The instructions that change fetch translation
 // (mtmsr, mtsr, IBATs, HID0, esa / dsa, rfi, isync) and a store to an instruction already fetched refetch after them.
 // TGPR: r0-r3 are physical 32-35 while MSR[TGPR] (tsel), so taking a TLB-miss exception moves nothing.
@@ -36,9 +40,11 @@
 `default_nettype none
 module ppc_pipe #(
 	parameter bit FWD = 1'b0,           // forward the registers written in a clock to X then
+	parameter bit FPF = 1'b1,           // the float pipeline takes its own results as they leave it (FWD or not)
 	parameter bit BENCH = 1'b1,         // the bench's outputs of the registers (gpr_o, fpr_o; else 0)
 	parameter bit FP_EXT = 1'b0,        // the float units are outside, shared (rtl/ppc_fpx.sv) ...
-	parameter bit FP_ID = 1'b0          // ... and this CPU is this one of the two
+	parameter bit FP_ID = 1'b0,         // ... and this CPU is this one of the two
+	parameter bit FP_EXC = 1'b1         // the FP-unavailable exception (0: none, as MAME has it, for sim/ppcreplay's replay of its traces)
 ) (
 	input  logic        clk,
 	input  logic        rst,            // held while 1; on release, the 602's reset (PC 0xfff00100, MSR[IP])
@@ -56,8 +62,9 @@ module ppc_pipe #(
 
 	// data side: a request is taken at the edge when d_req && d_rdy, with d_va (its virtual address); the next clock
 	// (its address clock) the core drives it: d_pa (physical), d_we, d_size (1, 2, 4 or 8, any alignment), d_wdata
-	// (right-aligned, big-endian), or d_kill to drop it. d_valid answers it, in that clock or later (never one killed),
-	// with d_rdata for a read. One out at a time.
+	// (right-aligned, big-endian), or d_kill to drop it; and goes on driving them (but d_kill) until the next is taken.
+	// d_valid answers it, in that clock or later (never one killed), with d_rdata for a read. Two out at most: the next
+	// may be taken in one's address clock or later, and they're answered in order.
 	output logic        d_req,
 	output logic [31:0] d_va,
 	output logic        d_kill,
@@ -165,13 +172,26 @@ module ppc_pipe #(
 	endfunction
 
 	// ---- helpers ------------------------------------------------------------------------------------------------------
+	// (no adder on s: the word twice, shifted)
+	// verilator lint_off UNUSEDSIGNAL
 	function automatic logic [31:0] rol32(input logic [31:0] v, input logic [4:0] s);
-		return (v << s) | (v >> (6'd32 - {1'b0, s}));
+		logic [63:0] w;
+		w = {v, v} << s;
+		return w[63:32];
 	endfunction
-	function automatic logic [31:0] rlw_mask(input logic [4:0] mb, input logic [4:0] me);
+	// verilator lint_on UNUSEDSIGNAL
+	// bits mb to me (bit 0 the top), wrapping round if mb > me (wrap, which the caller knows early)
+	// verilator lint_off UNUSEDSIGNAL
+	function automatic logic [31:0] ror32(input logic [31:0] v, input logic [4:0] s);
+		logic [63:0] w;
+		w = {v, v} >> s;
+		return w[31:0];
+	endfunction
+	// verilator lint_on UNUSEDSIGNAL
+	function automatic logic [31:0] rlw_mask(input logic [4:0] mb, input logic [4:0] me, input logic wrap);
 		logic [31:0] m;
-		m = (32'hffffffff >> mb) ^ (me == 5'd31 ? 32'h0 : 32'hffffffff >> (me + 5'd1));
-		return mb > me ? ~m : m;
+		m = (32'hffffffff >> mb) ^ (32'h7fffffff >> me);
+		return wrap ? ~m : m;
 	endfunction
 	function automatic logic [3:0] cmp4(input logic lt, input logic gt, input logic so);
 		return {lt, gt, !lt && !gt, so};
@@ -191,13 +211,17 @@ module ppc_pipe #(
 	// (not all of these arguments' bits are used)
 	// verilator lint_off UNUSEDSIGNAL
 	// a store [a, a + n) may cover the instruction word at ia: their offsets in the page, which translation doesn't change,
-	// so this needs no translation (a match in another page only costs a refetch)
-	function automatic logic covers(input logic [11:0] a, input logic [3:0] n, input logic [11:0] ia);
+	// so this needs no translation (a match in another page only costs a refetch). w: the words after a's that it reaches,
+	// (a[1:0] + n - 1) / 4 (cov_w, with the address)
+	function automatic logic covers(input logic [11:0] a, input logic [2:0] w, input logic [11:0] ia);
 		logic [9:0] d;
-		logic [4:0] l;
 		d = ia[11:2] - a[11:2];
-		l = {3'b000, a[1:0]} + {1'b0, n} - 5'd1;
-		return d <= {7'd0, l[4:2]};
+		return d <= {7'd0, w};
+	endfunction
+	function automatic logic [2:0] cov_w(input logic [1:0] a, input logic [3:0] n);
+		logic [4:0] l;
+		l = {3'b000, a} + {1'b0, n} - 5'd1;
+		return l[4:2];
 	endfunction
 	// verilator lint_on UNUSEDSIGNAL
 
@@ -295,6 +319,10 @@ module ppc_pipe #(
 	xstate_t     xstate;
 	// verilator lint_on MULTIDRIVEN
 	logic        rst_q, hold_q, credit, dec_irq;
+	// int_ext a clock later: from the controllers' registers (a long way off) through X to everything after it was a long
+	// path; the level a clock late changes nothing a program can see
+	logic        int_q;
+	always_ff @(posedge clk) int_q <= int_ext;
 
 	// fetch and the instruction in X
 	logic        fo, fstop;             // a fetch is out (at fo_va); no more fetches (after a fetch fault) until a redirect
@@ -315,20 +343,33 @@ module ppc_pipe #(
 	logic        timer_q;
 	logic [31:0] mc_ipc, mc_op;         // the instruction a multi-clock state finishes
 
-	// M's address clock: the access taken last clock (X's, or SEQ's: a_seq), to translate
+	// M's address clock: the access taken last clock (X's, or SEQ's: a_seq), translated as it was taken (nothing that
+	// changes the translation runs in a clock X or SEQ takes an access), so its address clock starts from registers
 	logic        a_v, a_seq, a_we, a_upd;
 	logic [31:0] a_va, a_ipc, a_op, a_rav;  // a_rav: an update form's rA before
+	logic [31:0] a_pa;                  // its translation (kept for after: the data side may do it later)
+	logic        a_tok, a_tprot;
 	logic [3:0]  a_size;
+	logic [2:0]  a_cw;                  // (X's: the words after a_va's its store reaches, for a_cov)
 	logic [63:0] a_wdata;
 	logic [5:0]  a_ra;
 
-	// M: the access out
+	// M: the access out (the older, which d_valid answers)
 	typedef enum logic [2:0] { MK_LOAD, MK_LFD, MK_LFS, MK_ST, MK_FMOV } mkind_t;
 	logic        m_valid, m_wr_en, m_sext, m_bswap, m_resv;
 	mkind_t      m_kind;
 	logic [5:0]  m_rd;                  // the physical GPR, or the FPR
 	logic [3:0]  m_size;
 	logic [32:0] m_val;                 // MK_FMOV: the FPR's value
+`ifdef VERILATOR
+	logic [32:0] m_vchk;                // (what m_val and gw_v were set to, for the checks)
+	logic [31:0] gw_vchk;
+`endif
+	// N: the one behind it (never a move), to M when M's is answered
+	logic        n_valid, n_wr_en, n_sext, n_bswap, n_resv;
+	mkind_t      n_kind;
+	logic [5:0]  n_rd;
+	logic [3:0]  n_size;
 
 	// SEQ: the multi-access instructions
 	typedef enum logic [2:0] { Q_LMW, Q_STMW, Q_LSW, Q_STSW, Q_DCBZ, Q_STWCX } qkind_t;
@@ -351,6 +392,7 @@ module ppc_pipe #(
 	// the float units: the pipeline, and beside it the iterative one for divide and square root (which goes only with
 	// the pipeline empty, and stops it)
 	fdec_t       xf;
+	fpk_t        x_fk;                 // xf.op's, for the float control (pd.fk)
 	logic        x_slow;                // xf.op is the iterative unit's
 	logic        x_madd;                // ... a multiply-add (its addend may come late)
 	logic        fpu_busy, fpu_start, fpu_done;
@@ -359,17 +401,22 @@ module ppc_pipe #(
 	logic        fpp_issue, fpp_ok, fpp_dok, fpp_busy, fpp_ev, fpp_wv;
 	logic [4:0]  fpp_erd, fpp_wrd;
 	logic [32:0] fpp_evl, fpp_wval;
-	logic [31:0] fpp_pe, fpp_pw, fpp_pn, fpp_lb;   // FPRs it writes (ppc_fpp's pe / pw / pn), a late addend's (lb)
+	logic [31:0] fpp_pe, fpp_pw, fpp_pn, fpp_lb;   // FPRs it writes (ppc_fps_ctl's pe / pw / pn), a late addend's (lb)
 
 	wire m_done = m_valid && (m_kind == MK_FMOV || d_valid);
-	wire m_free = !m_valid || m_done;
+	wire m_free = !m_valid || (m_done && !n_valid);    // M empty after this clock (for a move)
+	wire n_free = !n_valid || m_done;                  // room for another access after this clock
+	// the access in its address clock faults: it's N's if N has one (the younger), else M's
+	wire n_flt = a_v && !a_seq && a_flt && n_valid;
 	wire fpu_free = !fpu_busy || fpu_done;
 	// a float op can go: to the pipeline (with the iterative unit free), or to the iterative unit (with both empty)
 	ppc_fpu_pkg::fp_res_t fr;
 	wire fp_free = x_slow ? fpu_free && !fpp_busy && fr.allow[FP_ID] && fr.ffree : fpp_ok && fpu_free;
 
 	// what's written this clock: M's load (to a GPR or an FPR) or move, the float units' results
-	logic [63:0] m_d;
+	// verilator lint_off UNUSEDSIGNAL
+	logic [63:0] m_d;                 // (lfd takes d_rdata whole)
+	// verilator lint_on UNUSEDSIGNAL
 	logic [32:0] m_fv;
 	logic [31:0] m_gv;
 	logic        m_gw, m_fw;
@@ -387,7 +434,22 @@ module ppc_pipe #(
 	logic [31:0] gr_a, gr_b, gr_s, gw_v, gm_v, gw2_v;
 	logic [5:0]  gw_r, gm_r, gw2_r;
 	logic        gw_en, gm_en, gw2_en;
-	function automatic logic [31:0] gx(input logic [5:0] p, input logic [31:0] q);
+	// ... which of those X's rA / rB / rS is ({s, b, a} for gw_ / gm_ / gw2_), found the clock before (gnext), so the
+	// compares aren't in front of X's adders and the BAT translation. gh_w is chosen from both ways (gh_wk: X kept its
+	// instruction, gh_wn: it took the next) by op_keep's last clock (gh_kq): from X's hazards through op_keep to X's
+	// writes' choices was a long path
+	logic [2:0]  gh_wk, gh_wn, gh_m, gh_w2;
+	logic        gh_kq;
+	wire  [2:0]  gh_w = gh_kq ? gh_wk : gh_wn;
+	function automatic logic [31:0] gx(input logic [5:0] p, input logic [1:0] k, input logic [31:0] q);
+		if (FWD && m_gw && m_rd == p) return m_gv;
+		if (gh_w[k]) return gw_v;
+		if (gh_m[k]) return gm_v;
+		if (gh_w2[k]) return gw2_v;
+		return q;
+	endfunction
+	// (SEQ's, through the rS port, compares)
+	function automatic logic [31:0] gxc(input logic [5:0] p, input logic [31:0] q);
 		if (FWD && m_gw && m_rd == p) return m_gv;
 		if (gw_en && gw_r == p) return gw_v;
 		if (gm_en && gm_r == p) return gm_v;
@@ -395,27 +457,38 @@ module ppc_pipe #(
 		return q;
 	endfunction
 	// the FPRs the same way (fr_a / fr_b / fr_c / fr_s for rA / rB / frC / rD), with the writes of the clock before (fu_*:
-	// the float units', fm_*: M's) and this one (FWD)
+	// the float units', fm_*: M's) and this one (FWD; the float pipeline's, a register, with FPF too)
 	logic [32:0] fr_a, fr_b, fr_c, fr_s, fu_v, fm_v;
 	logic [4:0]  fu_r, fm_r;
 	logic        fu_en, fm_en;
 	logic        fu_we;                 // the units' write (or the bench's) this clock
 	logic [4:0]  fu_wa;
 	logic [32:0] fu_wd;
-	function automatic logic [32:0] fx(input logic [4:0] f, input logic [32:0] q);
-		if (FWD && fpp_wv && fpp_wrd == f) return fpp_wval;
+	// ... which of X's rA / rB / frC / rD ({s, c, b, a}: k 0 to 3) the float pipeline's write (fpp_wrd), the units' (fu_r)
+	// and M's (fm_r) are, found the clock before both ways and chosen as gh_w is (the compares were in front of the
+	// float units' operands)
+	logic [3:0]  fh_pk, fh_pn, fh_uk, fh_un, fh_mk, fh_mn;
+	wire  [3:0]  fh_p = gh_kq ? fh_pk : fh_pn, fh_u = gh_kq ? fh_uk : fh_un, fh_m = gh_kq ? fh_mk : fh_mn;
+	function automatic logic [32:0] fx(input logic [4:0] f, input logic [1:0] k, input logic [32:0] q);
+		if ((FWD || FPF) && fpp_wv && fh_p[k]) return fpp_wval;
 		if (FWD && fpu_busy && fpu_done && fpu_rd == f) return fpu_res;
 		if (FWD && m_fw && m_rd[4:0] == f) return m_fv;
-		if (fu_en && fu_r == f) return fu_v;
-		if (fm_en && fm_r == f) return fm_v;
+		if (fu_en && fh_u[k]) return fu_v;
+		if (fm_en && fh_m[k]) return fm_v;
 		return q;
 	endfunction
 
+	function automatic logic gpend_n(input logic [5:0] p);
+		return n_valid && n_kind == MK_LOAD && n_wr_en && n_rd == p;
+	endfunction
 	function automatic logic gpend(input logic [5:0] p);
-		return m_valid && m_kind == MK_LOAD && m_wr_en && m_rd == p;
+		return (m_valid && m_kind == MK_LOAD && m_wr_en && m_rd == p) || gpend_n(p);
+	endfunction
+	function automatic logic fpend_n(input logic [4:0] f);
+		return n_valid && (n_kind == MK_LFD || n_kind == MK_LFS) && n_rd[4:0] == f;
 	endfunction
 	function automatic logic fpend_m(input logic [4:0] f);
-		return m_valid && (m_kind == MK_LFD || m_kind == MK_LFS || m_kind == MK_FMOV) && m_rd[4:0] == f;
+		return (m_valid && (m_kind == MK_LFD || m_kind == MK_LFS || m_kind == MK_FMOV) && m_rd[4:0] == f) || fpend_n(f);
 	endfunction
 	function automatic logic fpend_u(input logic [4:0] f);
 		return fpp_pn[f] || (fpu_busy && fpu_rd == f);
@@ -425,42 +498,58 @@ module ppc_pipe #(
 	endfunction
 	// the same for X's hazards: what's not written by the end of this clock (with FWD), or by its start
 	function automatic logic gpend_x(input logic [5:0] p);
-		return gpend(p) && !(FWD && m_done);
+		return (gpend(p) && !(FWD && m_done)) || gpend_n(p);
 	endfunction
 	function automatic logic fpend_mx(input logic [4:0] f);
-		return fpend_m(f) && !(FWD && m_done);
+		return (fpend_m(f) && !(FWD && m_done)) || fpend_n(f);
 	endfunction
 	function automatic logic fpend_ux(input logic [4:0] f);
-		return FWD ? fpp_pw[f] || (fpu_busy && !fpu_done && fpu_rd == f) : fpend_u(f);
+		return FWD || FPF ? fpp_pw[f] || (fpu_busy && !(FWD && fpu_done) && fpu_rd == f) : fpend_u(f);
 	endfunction
 	function automatic logic fpend_x(input logic [4:0] f);
 		return fpend_mx(f) || fpend_ux(f);
 	endfunction
-	// for an op to the float pipeline, which takes its results as they leave its last stage (ev): a source not ready
-	// then; a multiply-add's addend not ready by the time the op reaches A0; a destination written later by an op in
-	// flight
+	// for an op to the float pipeline, which takes its results as they leave its last stage (ev; FWD forwards them, with
+	// FPF it takes them itself): a source not ready then; a multiply-add's addend not ready by the time the op reaches A0;
+	// a destination written later by an op in flight. The float units' part (_u), then with M's
+	function automatic logic fpend_fu(input logic [4:0] f);
+		return fpu_busy && !(FWD && fpu_done) && fpu_rd == f;
+	endfunction
+	function automatic logic fpend_pu(input logic [4:0] f);
+		return FWD || FPF ? fpp_pe[f] || fpend_fu(f) : fpend_u(f);
+	endfunction
+	function automatic logic fpend_pbu(input logic [4:0] f);
+		return FWD || FPF ? (fpp_pe[f] && !fpp_lb[f]) || fpend_fu(f) : fpend_u(f);
+	endfunction
+	function automatic logic fpend_pdu(input logic [4:0] f);
+		return FWD || FPF ? (fpp_pn[f] && !fpp_dok) || fpend_fu(f) : fpend_u(f);
+	endfunction
 	function automatic logic fpend_p(input logic [4:0] f);
-		return FWD ? fpend_mx(f) || fpp_pe[f] || (fpu_busy && !fpu_done && fpu_rd == f) : fpend(f);
+		return fpend_mx(f) || fpend_pu(f);
 	endfunction
 	function automatic logic fpend_pb(input logic [4:0] f);
-		return FWD ? fpend_mx(f) || (fpp_pe[f] && !fpp_lb[f]) || (fpu_busy && !fpu_done && fpu_rd == f) : fpend(f);
+		return fpend_mx(f) || fpend_pbu(f);
 	endfunction
 	function automatic logic fpend_pd(input logic [4:0] f);
-		return FWD ? fpend_mx(f) || (fpp_pn[f] && !fpp_dok) || (fpu_busy && !fpu_done && fpu_rd == f) : fpend(f);
+		return fpend_mx(f) || fpend_pdu(f);
 	endfunction
 
 	// the float units' operands, with the float pipeline's results as they leave it
-	function automatic logic [32:0] fxe(input logic [4:0] f, input logic [32:0] q);
-		return FWD && fpp_ev && fpp_erd == f ? fpp_evl : fx(f, q);
+	function automatic logic [32:0] fxe(input logic [4:0] f, input logic [1:0] k, input logic [32:0] q);
+		return FWD && fpp_ev && fpp_erd == f ? fpp_evl : fx(f, k, q);
 	endfunction
-	wire [32:0] fa_u = fxe(op[20:16], fr_a), fb_u = fxe(op[15:11], fr_b), fc_u = fxe(op[10:6], fr_c);
-	logic [2:0]  fpp_bw;
+	// (an operand's bit 32, an integer's mark, isn't the units': they take its word as a single)
+	// verilator lint_off UNUSEDSIGNAL
+	wire [32:0] fa_u = fxe(op[20:16], 2'd0, fr_a), fb_u = fxe(op[15:11], 2'd1, fr_b), fc_u = fxe(op[10:6], 2'd2, fr_c);
+	// verilator lint_on UNUSEDSIGNAL
+	logic [2:0]  fpp_bw, fpp_fe, fpp_fw;
 	ppc_fps_ctl fpctl (
-		.clk, .rst, .allow(fr.allow[FP_ID]), .res_a(fr.res_a), .res_s(fr.res_s), .res_w(fr.res_w), .issue(fpp_issue), .op(xf.op),
-		.rd(op[25:21]), .rb(op[15:11]), .ok(fpp_ok), .dok(fpp_dok), .busy(fpp_busy), .bw(fpp_bw),
-		.pe(fpp_pe), .pw(fpp_pw), .pn(fpp_pn), .lb(fpp_lb)
+		.clk, .rst, .allow(fr.allow[FP_ID]), .res_a(fr.res_a), .res_s(fr.res_s), .res_w(fr.res_w),
+		.issue(fpp_issue), .pk(x_fk), .rd(op[25:21]), .ra(op[20:16]), .rb(op[15:11]), .rc(op[10:6]), .ok(fpp_ok),
+		.dok(fpp_dok), .busy(fpp_busy), .bw(fpp_bw), .fe(fpp_fe), .fw(fpp_fw), .pe(fpp_pe), .pw(fpp_pw), .pn(fpp_pn), .lb(fpp_lb)
 	);
-	assign fp_req = '{fpp_issue, fpu_start, xf.op, fmode, fa_u[31:0], fb_u[31:0], fc_u[31:0], op[25:21], fpp_bw};
+	assign fp_req = '{fpp_issue, fpu_start, xf.op, fmode, fa_u[31:0], fb_u[31:0], fc_u[31:0], op[25:21], fpp_bw,
+		FPF ? fpp_fe : 3'b0, FPF ? fpp_fw : 3'b0, xv && xf.go};
 	assign fpp_ev = fr.ev && fr.ecpu == FP_ID;
 	assign fpp_erd = fr.erd;
 	assign fpp_evl = fr.evl;
@@ -474,6 +563,240 @@ module ppc_pipe #(
 	else begin : g_fpint ppc_fpx #(.TWO(1'b0)) fpx (.clk, .rst, .req0(fp_req), .req1('0), .res(fr)); end
 	endgenerate
 
+	// the fields an instruction reads or writes, for the hazards (a little more than it uses: the cost is a stall):
+	// {g_a, g_b, g_d, f_a, f_b, f_c, f_d, x_fmov}
+	// verilator lint_off UNUSEDSIGNAL
+	function automatic logic [7:0] rw_dec(input logic [31:0] o);
+		logic ga, gb, gd, fa, fb, fc, fd, fm, fpx;
+		logic [9:0] x;
+		x = o[10:1];
+		fpx = o[31:26] == 6'h1f && (x == 10'h217 || x == 10'h237 || x == 10'h257 || x == 10'h277 || x == 10'h297 ||
+			x == 10'h2b7 || x == 10'h2d7 || x == 10'h2f7 || x == 10'h3d7);   // an indexed float load / store
+		{ga, gb, gd, fa, fb, fc, fd, fm} = '0;
+		case (o[31:26])
+			6'h10, 6'h11, 6'h12, 6'h13: ;
+			6'h1f: begin ga = 1'b1; gb = 1'b1; gd = !fpx; fd = fpx; end
+			6'h17: begin ga = 1'b1; gb = 1'b1; gd = 1'b1; end
+			6'h30, 6'h31, 6'h32, 6'h33, 6'h34, 6'h35, 6'h36, 6'h37: begin ga = 1'b1; fd = 1'b1; end
+			6'h3b:
+				case (o[5:1])
+					5'h12, 5'h14, 5'h15: {fa, fb, fd} = 3'b111;
+					5'h16, 5'h18: {fb, fd} = 2'b11;
+					5'h19: {fa, fc, fd} = 3'b111;
+					5'h1c, 5'h1d, 5'h1e, 5'h1f: {fa, fb, fc, fd} = 4'b1111;
+					default: ;
+				endcase
+			6'h3f:
+				if (o[5])
+					case (o[5:1])
+						5'h12, 5'h14, 5'h15: {fa, fb, fd} = 3'b111;
+						5'h16, 5'h1a: {fb, fd} = 2'b11;
+						5'h19: {fa, fc, fd} = 3'b111;
+						5'h17: begin {fa, fb, fc, fd} = 4'b1111; fm = 1'b1; end
+						5'h1c, 5'h1d, 5'h1e, 5'h1f: {fa, fb, fc, fd} = 4'b1111;
+						default: ;
+					endcase
+				else
+					case (x)
+						10'h000, 10'h020: {fa, fb} = 2'b11;
+						10'h00c, 10'h00e, 10'h00f: {fb, fd} = 2'b11;
+						10'h028, 10'h048, 10'h088, 10'h108: begin {fb, fd} = 2'b11; fm = 1'b1; end
+						10'h247: begin fd = 1'b1; fm = 1'b1; end
+						10'h2c7: fb = 1'b1;
+						default: ;
+					endcase
+			default: begin ga = 1'b1; gd = 1'b1; end
+		endcase
+		return {ga, gb, gd, fa, fb, fc, fd, fm};
+	endfunction
+	// the access an instruction makes, from its word alone (xm_*'s decode, which has the rest): a single one (xm_mem), a
+	// SEQ one (xm_seq), an stfd's conversion to a double (xm_cvt), a store (xm_we), an update form (xm_upd), an indexed one
+	typedef struct packed { logic mem, seq, cvt, we, upd, idx; } mdec_t;
+	function automatic mdec_t mem_dec(input logic [31:0] o);
+		mdec_t d;
+		d = '0;
+		d.idx = o[31:26] == 6'h1f;
+		if (o[31:26] == 6'h2e || o[31:26] == 6'h2f) d.seq = 1'b1;                                  // LMW, STMW
+		else if (o[31:30] == 2'b10 || o[31:29] == 3'b110)                                           // 0x20 to 0x37
+		begin
+			d.mem = 1'b1;
+			d.upd = o[26];
+			d.we = o[31:28] == 4'b1001 || o[31:27] == 5'b10110 || o[31:28] == 4'b1101;          // 0x24-27, 0x2c-2d, 0x34-37
+			d.cvt = o[31:27] == 5'b11011;                                                           // STFD, STFDU
+		end
+		else if (d.idx)
+			case (o[10:1])
+				10'h057, 10'h117, 10'h157, 10'h017, 10'h217, 10'h257, 10'h316, 10'h216, 10'h014: d.mem = 1'b1;
+				10'h077, 10'h137, 10'h177, 10'h037, 10'h237, 10'h277: begin d.mem = 1'b1; d.upd = 1'b1; end
+				10'h0d7, 10'h197, 10'h097, 10'h3d7, 10'h297, 10'h396, 10'h296: begin d.mem = 1'b1; d.we = 1'b1; end
+				10'h2d7: begin d.mem = 1'b1; d.we = 1'b1; d.cvt = 1'b1; end                         // STFDX
+				10'h0f7, 10'h1b7, 10'h0b7, 10'h2b7: begin d.mem = 1'b1; d.we = 1'b1; d.upd = 1'b1; end
+				10'h2f7: begin d.mem = 1'b1; d.we = 1'b1; d.upd = 1'b1; d.cvt = 1'b1; end            // STFDUX
+				10'h255, 10'h215, 10'h2d5, 10'h295, 10'h3f6, 10'h096: d.seq = 1'b1;
+				default: ;
+			endcase
+		return d;
+	endfunction
+	// X's result for a GPR (x_res) and a float move's (m_val), chosen from the word alone: which (rs); the adder's operands
+	// (ad_z rA's a zero, ad_n complemented; ad_b the other; ad_c the carry in); the logic ops' truth table on {rS, b} (lg_t)
+	// and their b (lg_b); the moves' (ms, spr, MFSPR's the one spr_rv reads); the float move (fm)
+	localparam logic [2:0] R_ADD = 3'd0, R_LOG = 3'd1, R_SH = 3'd2, R_MULL = 3'd3, R_MULH = 3'd4, R_MISC = 3'd5, R_EA = 3'd6;
+	localparam logic [2:0] AB_SIMM = 3'd0, AB_SHI = 3'd1, AB_RB = 3'd2, AB_ZERO = 3'd3, AB_ONES = 3'd4;
+	localparam logic [1:0] AC_0 = 2'd0, AC_1 = 2'd1, AC_CA = 2'd2;
+	localparam logic [1:0] LB_RB = 2'd0, LB_UIMM = 2'd1, LB_UHI = 2'd2;
+	localparam logic [2:0] MS_CLZ = 3'd0, MS_EXTSB = 3'd1, MS_EXTSH = 3'd2, MS_CR = 3'd3, MS_MSR = 3'd4, MS_SPR = 3'd5,
+		MS_SR = 3'd6, MS_SRIN = 3'd7;
+	localparam logic [2:0] FM_B = 3'd0, FM_SEL = 3'd1, FM_NEG = 3'd2, FM_NABS = 3'd3, FM_ABS = 3'd4, FM_FFS = 3'd5;
+	typedef struct packed {
+		logic [2:0] rs; logic ad_z, ad_n; logic [2:0] ad_b; logic [1:0] ad_c; logic [3:0] lg_t; logic [1:0] lg_b;
+		logic [2:0] ms; logic [5:0] spr;
+	} rdec_t;
+	// an SPR's for spr_rv: sprv's index, or 48 XER, 49 PVR, 50 DEC, 51 TBL, 52 TBU, 63 none
+	function automatic logic [5:0] spr_rd(input logic [9:0] n);
+		int k;
+		case (n)
+			10'd1:   return 6'd48;
+			10'd287: return 6'd49;
+			10'd22:  return 6'd50;
+			10'd268: return 6'd51;
+			10'd269: return 6'd52;
+			default:
+			begin
+				k = spr_idx(n);
+				return k >= 0 ? 6'(k) : 6'd63;
+			end
+		endcase
+	endfunction
+	function automatic rdec_t res_dec(input logic [31:0] o);
+		rdec_t d;
+		// (field by field: Quartus takes a pattern's member names for the module's signals of the same names)
+		d.rs = R_ADD; d.ad_z = 1'b0; d.ad_n = 1'b0; d.ad_b = AB_SIMM; d.ad_c = AC_0; d.lg_t = 4'h0; d.lg_b = LB_RB;
+		d.ms = MS_CLZ; d.spr = spr_rd({o[15:11], o[20:16]});
+		case (o[31:26])
+			6'h07: d.rs = R_MULL;                                                                    // MULLI
+			6'h08: begin d.ad_n = 1'b1; d.ad_c = AC_1; end                                            // SUBFIC
+			6'h0e: d.ad_z = o[20:16] == 5'd0;                                                         // ADDI
+			6'h0f: begin d.ad_z = o[20:16] == 5'd0; d.ad_b = AB_SHI; end                              // ADDIS
+			6'h14, 6'h15, 6'h17: d.rs = R_SH;
+			6'h18: begin d.rs = R_LOG; d.lg_t = 4'b1110; d.lg_b = LB_UIMM; end                        // ORI
+			6'h19: begin d.rs = R_LOG; d.lg_t = 4'b1110; d.lg_b = LB_UHI; end                         // ORIS
+			6'h1a: begin d.rs = R_LOG; d.lg_t = 4'b0110; d.lg_b = LB_UIMM; end                        // XORI
+			6'h1b: begin d.rs = R_LOG; d.lg_t = 4'b0110; d.lg_b = LB_UHI; end                         // XORIS
+			6'h1c: begin d.rs = R_LOG; d.lg_t = 4'b1000; d.lg_b = LB_UIMM; end                        // ANDI.
+			6'h1d: begin d.rs = R_LOG; d.lg_t = 4'b1000; d.lg_b = LB_UHI; end                         // ANDIS.
+			6'h1f:
+				case (o[10:1])
+					10'h10a, 10'h30a, 10'h00a, 10'h20a: d.ad_b = AB_RB;                               // ADD, ADDC
+					10'h08a, 10'h28a: begin d.ad_b = AB_RB; d.ad_c = AC_CA; end                       // ADDE
+					10'h0ca, 10'h2ca: begin d.ad_b = AB_ZERO; d.ad_c = AC_CA; end                     // ADDZE
+					10'h0ea, 10'h2ea: begin d.ad_b = AB_ONES; d.ad_c = AC_CA; end                     // ADDME
+					10'h028, 10'h228, 10'h008, 10'h208: begin d.ad_n = 1'b1; d.ad_b = AB_RB; d.ad_c = AC_1; end // SUBF, SUBFC
+					10'h088, 10'h288: begin d.ad_n = 1'b1; d.ad_b = AB_RB; d.ad_c = AC_CA; end       // SUBFE
+					10'h0c8, 10'h2c8: begin d.ad_n = 1'b1; d.ad_b = AB_ZERO; d.ad_c = AC_CA; end     // SUBFZE
+					10'h0e8, 10'h2e8: begin d.ad_n = 1'b1; d.ad_b = AB_ONES; d.ad_c = AC_CA; end     // SUBFME
+					10'h068, 10'h268: begin d.ad_n = 1'b1; d.ad_b = AB_ZERO; d.ad_c = AC_1; end      // NEG
+					10'h00b, 10'h04b: d.rs = R_MULH;                                                  // MULHWU, MULHW
+					10'h0eb, 10'h2eb: d.rs = R_MULL;                                                  // MULLW
+					10'h01c: begin d.rs = R_LOG; d.lg_t = 4'b1000; end                                // AND
+					10'h03c: begin d.rs = R_LOG; d.lg_t = 4'b0100; end                                // ANDC
+					10'h1dc: begin d.rs = R_LOG; d.lg_t = 4'b0111; end                                // NAND
+					10'h1bc: begin d.rs = R_LOG; d.lg_t = 4'b1110; end                                // OR
+					10'h19c: begin d.rs = R_LOG; d.lg_t = 4'b1101; end                                // ORC
+					10'h07c: begin d.rs = R_LOG; d.lg_t = 4'b0001; end                                // NOR
+					10'h13c: begin d.rs = R_LOG; d.lg_t = 4'b0110; end                                // XOR
+					10'h11c: begin d.rs = R_LOG; d.lg_t = 4'b1001; end                                // EQV
+					10'h018, 10'h218, 10'h318, 10'h338: d.rs = R_SH;                                  // SLW, SRW, SRAW, SRAWI
+					10'h01a: d.rs = R_MISC;                                                           // CNTLZW
+					10'h3ba: begin d.rs = R_MISC; d.ms = MS_EXTSB; end
+					10'h39a: begin d.rs = R_MISC; d.ms = MS_EXTSH; end
+					10'h013: begin d.rs = R_MISC; d.ms = MS_CR; end                                   // MFCR
+					10'h053: begin d.rs = R_MISC; d.ms = MS_MSR; end                                  // MFMSR
+					10'h153, 10'h173: begin d.rs = R_MISC; d.ms = MS_SPR; end                         // MFSPR, MFTB
+					10'h253: begin d.rs = R_MISC; d.ms = MS_SR; end                                   // MFSR
+					10'h293: begin d.rs = R_MISC; d.ms = MS_SRIN; end                                 // MFSRIN
+					default: ;
+				endcase
+			default: ;
+		endcase
+		return d;
+	endfunction
+	function automatic logic [2:0] fm_dec(input logic [31:0] o);
+		if (o[31:26] != 6'h3f) return FM_B;
+		if (o[5]) return FM_SEL;                                                                     // FSEL
+		case (o[10:1])
+			10'h028: return FM_NEG;
+			10'h088: return FM_NABS;
+			10'h108: return FM_ABS;
+			10'h247: return FM_FFS;                                                                  // MFFS
+			default: return FM_B;                                                                    // FMR
+		endcase
+	endfunction
+	// verilator lint_on UNUSEDSIGNAL
+	// X's decode, done as its instruction goes in (from op, it cost the hazards and all after them several levels):
+	// rw_dec's, the float op, a multiply-add, the iterative unit's, a two-clock one (x_mul), the access, its address's rA|0
+	// a zero
+	typedef struct packed {
+		logic [7:0] rw; fdec_t xf; fpk_t fk; logic madd, slow, mul; mdec_t m; logic ea_z;   // (fk: xf.op's, the float control's)
+		logic fpi;                                               // a float instruction (x_fpoff)
+		logic sh_r, sh_ar, sh_i, sh_x, sh_w, sh_wrap, sh_ins;   // the rotator's choices (sh_*)
+		rdec_t r; logic [2:0] fm;                                // X's result's (x_res), a float move's (m_val)
+		logic cr0w; logic [1:0] cr0o;                            // a record form's CR0 (cr0o: the overflow in its SO)
+		logic cmpw, cmp_s, cmp_i;                                // a compare's (signed, with the immediate)
+		logic fce;                                               // fcmpu / fcmpo (their operands may come as they leave the float pipeline)
+	} pdec_t;
+	function automatic pdec_t pdec(input logic [31:0] o);
+		pdec_t d;
+		d.rw = rw_dec(o);
+		d.xf = fpu_dec(o);
+		d.fk = fpk_s(d.xf.op);
+		d.madd = d.xf.op == F_MADD || d.xf.op == F_MSUB || d.xf.op == F_NMADD || d.xf.op == F_NMSUB || d.xf.op == F_MADDS ||
+			d.xf.op == F_MSUBS || d.xf.op == F_NMADDS || d.xf.op == F_NMSUBS;
+		d.slow = d.xf.op == F_DIV || d.xf.op == F_DIVS || d.xf.op == F_SQRT || d.xf.op == F_SQRTS || d.xf.op == F_RES ||
+			d.xf.op == F_RSQRTE;
+		d.mul = o[31:26] == 6'h07 || (o[31:26] == 6'h1f && (o[10:1] == 10'h00b || o[10:1] == 10'h04b || o[10:1] == 10'h0eb ||
+			o[10:1] == 10'h2eb)) || (o[31:26] == 6'h3f && !o[5] && (o[10:1] == 10'h000 || o[10:1] == 10'h020));
+		d.fpi = o[31:26] == 6'h3b || o[31:26] == 6'h3f || o[31:29] == 3'b110 || (o[31:26] == 6'h1f && (o[10:1] == 10'h217 ||
+			o[10:1] == 10'h237 || o[10:1] == 10'h257 || o[10:1] == 10'h277 || o[10:1] == 10'h297 || o[10:1] == 10'h2b7 ||
+			o[10:1] == 10'h2d7 || o[10:1] == 10'h2f7 || o[10:1] == 10'h3d7));
+		d.m = mem_dec(o);
+		d.ea_z = o[20:16] == 5'd0 && !d.m.upd;
+		d.sh_r = o[31:26] == 6'h1f && (o[10:1] == 10'h218 || o[10:1] == 10'h318 || o[10:1] == 10'h338);
+		d.sh_ar = o[31:26] == 6'h1f && (o[10:1] == 10'h318 || o[10:1] == 10'h338);
+		d.sh_i = o[31:26] == 6'h14 || o[31:26] == 6'h15 || (o[31:26] == 6'h1f && o[10:1] == 10'h338);
+		d.sh_x = o[31:26] == 6'h1f && o[10:1] != 10'h338;
+		d.sh_w = o[31:26] != 6'h1f;
+		d.sh_wrap = o[31:26] != 6'h1f && o[10:6] > o[5:1];
+		d.sh_ins = o[31:26] == 6'h14;
+		d.r = res_dec(o);
+		if (d.m.upd) d.r.rs = R_EA;
+		d.fm = fm_dec(o);
+		d.cr0w = 1'b0; d.cr0o = 2'd0;
+		case (o[31:26])
+			6'h0d, 6'h1c, 6'h1d: d.cr0w = 1'b1;                                                   // ADDIC., ANDI., ANDIS.
+			6'h14, 6'h15, 6'h17: d.cr0w = o[0];                                                   // RLWIMI, RLWINM, RLWNM
+			6'h1f:
+				case (o[10:1])
+					10'h10a, 10'h30a, 10'h00a, 10'h20a, 10'h08a, 10'h28a, 10'h0ca, 10'h2ca, 10'h0ea, 10'h2ea,
+					10'h028, 10'h228, 10'h008, 10'h208, 10'h088, 10'h288, 10'h0c8, 10'h2c8, 10'h0e8, 10'h2e8,
+					10'h068, 10'h268:
+						begin d.cr0w = o[0]; d.cr0o = o[10] ? 2'd1 : 2'd0; end                     // the adds, the subtracts, NEG
+					10'h0eb, 10'h2eb: begin d.cr0w = o[0]; d.cr0o = o[10] ? 2'd2 : 2'd0; end            // MULLW
+					10'h00b, 10'h04b, 10'h01c, 10'h03c, 10'h1dc, 10'h1bc, 10'h19c, 10'h07c, 10'h13c, 10'h11c,
+					10'h018, 10'h218, 10'h318, 10'h338, 10'h01a, 10'h3ba, 10'h39a: d.cr0w = o[0];       // MULHW(U), logic, shifts, CNTLZW, EXTS
+					default: ;
+				endcase
+			default: ;
+		endcase
+		d.cmpw = o[31:26] == 6'h0a || o[31:26] == 6'h0b || (o[31:26] == 6'h1f && (o[10:1] == 10'h000 || o[10:1] == 10'h020));
+		d.cmp_s = o[31:26] == 6'h0b || (o[31:26] == 6'h1f && o[10:1] == 10'h000);
+		d.cmp_i = o[31:26] == 6'h0a || o[31:26] == 6'h0b;
+		d.fce = o[31:26] == 6'h3f && (o[10:1] == 10'h000 || o[10:1] == 10'h020);
+		return d;
+	endfunction
+	pdec_t pd, spd;                     // op's, sins'
+	logic g_a, g_b, g_d, f_a, f_b, f_c, f_d, x_fmov;
+	assign {g_a, g_b, g_d, f_a, f_b, f_c, f_d, x_fmov} = pd.rw;
+
 	// ---- the instruction in X -----------------------------------------------------------------------------------------
 	wire [5:0]  opc = op[31:26];
 	wire [4:0]  rD = op[25:21], rA = op[20:16], rB = op[15:11], frC = op[10:6];
@@ -482,30 +805,53 @@ module ppc_pipe #(
 	wire [9:0]  xo = op[10:1];
 	wire        rc = op[0];
 	wire        oe = op[10];
-	wire [31:0] ra_v = gx(pg(rA), gr_a), rb_v = gx(pg(rB), gr_b), rs_v = gx(pg(rD), gr_s);
-	wire [32:0] fs_v = fx(rD, fr_s);    // rD's FPR (a store's source, mffs)
+	wire [31:0] ra_v = gx(pg(rA), 2'd0, gr_a), rb_v = gx(pg(rB), 2'd1, gr_b), rs_v = gx(pg(rD), 2'd2, gr_s);
+	wire [32:0] fs_v = fx(rD, 2'd3, fr_s);    // rD's FPR (a store's source)
 	wire [31:0] raz = rA == 0 ? 32'h0 : ra_v;
 	wire [9:0]  sprn = {op[15:11], op[20:16]};
 	wire [31:0] npc = ipc + 32'd4;
 
-	// the multiplies and fcmpu / fcmpo take two clocks in X: their results registered in the first, used in the second
-	// (mul_rdy), and so does stfd, its FPR made a double.
-	logic [63:0] mulw;
-	logic [31:0] mulhwu;
+	// the multiplies and fcmpu / fcmpo take two clocks in X: the multiplies' results registered in the first, used in the
+	// second (mul_rdy); the compares' operands registered in the first (a float pipeline's result as it leaves it, with FPF),
+	// compared in the second. So does stfd, its FPR made a double (cvt_r).
+	logic [63:0] mulw;                  // (one multiply for all of them: signed, but MULHWU's operands extended with zeros)
 	logic        mul_rdy;
-	logic [3:0]  fcmp_r;
+	logic [31:0] fcmp_a, fcmp_b;
+	wire  [3:0]  fcmp_r = cmp_s(fcmp_a, fcmp_b);
 	logic [63:0] cvt_r;
-	wire [32:0]  fc_a = fx(rA, fr_a), fc_b = fx(rB, fr_b);
 	// a float instruction with MSR[FP] clear: taken, it does nothing and comes back after the kernel's handler
-	wire         x_fpoff = !msr[13] && (opc == 6'h3b || opc == 6'h3f || opc[5:3] == 3'b110 || (opc == 6'h1f && (xo == 10'h217 ||
-		xo == 10'h237 || xo == 10'h257 || xo == 10'h277 || xo == 10'h297 || xo == 10'h2b7 || xo == 10'h2d7 || xo == 10'h2f7 || xo == 10'h3d7)));
-	wire         x_mul = opc == 6'h07 || (opc == 6'h1f && (xo == 10'h00b || xo == 10'h04b || xo == 10'h0eb || xo == 10'h2eb)) ||
-		(opc == 6'h3f && !op[5] && (xo == 10'h000 || xo == 10'h020));
+	wire         x_fpoff = FP_EXC && !msr[13] && pd.fpi;
+	wire         x_mul = pd.mul;
+	wire         mul_u = opc == 6'h1f && xo == 10'h00b;
+	wire  [31:0] mul_b = opc == 6'h07 ? simm : rb_v;
+	// one rotator and one mask for the rotates and shifts: a right shift by n is a left rotate by 32 - n, that is by 1 then by ~n
+	// (the choices from pd: sh_r SRW, SRAW, SRAWI; sh_ar SRAW, SRAWI; sh_i the amount in op; sh_x SLW, SRW, SRAW, which
+	// shift by 32 or more; sh_w the rotates, whose mask is in op, sh_wrap if it wraps; sh_ins RLWIMI)
+	wire  [4:0]  sh_n = pd.sh_i ? op[15:11] : rb_v[4:0];
+	wire         sh_big = pd.sh_x && rb_v[5];
+	wire  [31:0] sh_rot = rol32(pd.sh_r ? {rs_v[30:0], rs_v[31]} : rs_v, pd.sh_r ? ~sh_n : sh_n);
+	wire  [31:0] sh_m = sh_big ? 32'h0 : rlw_mask(pd.sh_w ? op[10:6] : pd.sh_r ? sh_n : 5'd0,
+		pd.sh_w ? op[5:1] : pd.sh_r ? 5'd31 : ~sh_n, pd.sh_wrap);
+	wire  [31:0] sh_res = (sh_rot & sh_m) | ((pd.sh_ins ? ra_v : {32{pd.sh_ar && rs_v[31]}}) & ~sh_m);
+	wire         sh_ca = rs_v[31] && (sh_rot & ~sh_m) != 32'h0;                                 // (SRAW, SRAWI: a one shifted out of a negative)
+	// whether sh_res is 0 (CR0's), beside the rotator rather than after it: the rotated bits under the mask are rS's under the
+	// mask rotated back (a rotate's mask from op; a left shift's the bits kept, rS's low 32 - n; a right shift's its high
+	// 32 - n, an arithmetic shift's sign among them), and RLWIMI's rA outside the mask. A shift by 32 or more leaves the sign
+	wire  [31:0] sh_wm = rlw_mask(op[10:6], op[5:1], pd.sh_wrap);
+	wire  [31:0] sh_zm = pd.sh_w ? ror32(sh_wm, sh_n) : pd.sh_r ? 32'hffffffff << sh_n : 32'hffffffff >> sh_n;
+	wire         sh_zero = sh_big ? !(pd.sh_ar && rs_v[31]) : (rs_v & sh_zm) == 32'h0 && !(pd.sh_ins && (ra_v & ~sh_wm) != 32'h0);
 	always_ff @(posedge clk)
 	begin
-		mulw <= $signed({{32{ra_v[31]}}, ra_v}) * $signed({{32{(opc == 6'h07) ? simm[31] : rb_v[31]}}, (opc == 6'h07) ? simm : rb_v});
-		mulhwu <= 32'(({32'h0, ra_v} * {32'h0, rb_v}) >> 32);
-		fcmp_r <= cmp_s(fc_a[31:0], fc_b[31:0]);
+		mulw <= $signed({{32{!mul_u && ra_v[31]}}, ra_v}) * $signed({{32{!mul_u && mul_b[31]}}, mul_b});
+		// verilator lint_off UNUSEDSIGNAL
+		begin
+			logic [32:0] fa, fb;
+			fa = (FWD || FPF) && fpp_ev && fpp_erd == rA ? fpp_evl : fx(rA, 2'd0, fr_a);
+			fb = (FWD || FPF) && fpp_ev && fpp_erd == rB ? fpp_evl : fx(rB, 2'd1, fr_b);
+			fcmp_a <= fa[31:0];
+			fcmp_b <= fb[31:0];
+		end
+		// verilator lint_on UNUSEDSIGNAL
 		cvt_r <= f2d(fs_v);
 	end
 
@@ -588,50 +934,6 @@ module ppc_pipe #(
 		xm_we = xm_kind == MK_ST;
 	end
 
-	// the fields an instruction reads or writes, for the hazards (a little more than it uses: the cost is a stall)
-	logic g_a, g_b, g_d, f_a, f_b, f_c, f_d, x_fmov;
-	always_comb
-	begin
-		logic fpx;                      // an indexed float load / store
-		fpx = opc == 6'h1f && (xo == 10'h217 || xo == 10'h237 || xo == 10'h257 || xo == 10'h277 || xo == 10'h297 ||
-			xo == 10'h2b7 || xo == 10'h2d7 || xo == 10'h2f7 || xo == 10'h3d7);
-		{g_a, g_b, g_d, f_a, f_b, f_c, f_d, x_fmov} = '0;
-		case (opc)
-			6'h10, 6'h11, 6'h12, 6'h13: ;
-			6'h1f: begin g_a = 1'b1; g_b = 1'b1; g_d = !fpx; f_d = fpx; end
-			6'h17: begin g_a = 1'b1; g_b = 1'b1; g_d = 1'b1; end
-			6'h30, 6'h31, 6'h32, 6'h33, 6'h34, 6'h35, 6'h36, 6'h37: begin g_a = 1'b1; f_d = 1'b1; end
-			6'h3b:
-				case (op[5:1])
-					5'h12, 5'h14, 5'h15: {f_a, f_b, f_d} = 3'b111;
-					5'h16, 5'h18: {f_b, f_d} = 2'b11;
-					5'h19: {f_a, f_c, f_d} = 3'b111;
-					5'h1c, 5'h1d, 5'h1e, 5'h1f: {f_a, f_b, f_c, f_d} = 4'b1111;
-					default: ;
-				endcase
-			6'h3f:
-				if (op[5])
-					case (op[5:1])
-						5'h12, 5'h14, 5'h15: {f_a, f_b, f_d} = 3'b111;
-						5'h16, 5'h1a: {f_b, f_d} = 2'b11;
-						5'h19: {f_a, f_c, f_d} = 3'b111;
-						5'h17: begin {f_a, f_b, f_c, f_d} = 4'b1111; x_fmov = 1'b1; end
-						5'h1c, 5'h1d, 5'h1e, 5'h1f: {f_a, f_b, f_c, f_d} = 4'b1111;
-						default: ;
-					endcase
-				else
-					case (xo)
-						10'h000, 10'h020: {f_a, f_b} = 2'b11;
-						10'h00c, 10'h00e, 10'h00f: {f_b, f_d} = 2'b11;
-						10'h028, 10'h048, 10'h088, 10'h108: begin {f_b, f_d} = 2'b11; x_fmov = 1'b1; end
-						10'h247: begin f_d = 1'b1; x_fmov = 1'b1; end
-						10'h2c7: f_b = 1'b1;
-						default: ;
-					endcase
-			default: begin g_a = 1'b1; g_d = 1'b1; end
-		endcase
-	end
-
 	// branches: taken (rfi and isync too), and where
 	logic        br_taken;
 	logic [31:0] br_target;
@@ -665,13 +967,71 @@ module ppc_pipe #(
 		(xo == 10'h1d3 && ((sprn >= 10'd528 && sprn <= 10'd535) || sprn == 10'd1008)));
 
 	// ---- X control ----------------------------------------------------------------------------------------------------
-	tr_t ftr, atr;
+	tr_t ftr, dtr;
+	// verilator lint_off UNUSEDSIGNAL
+	tr_t dts;                           // (its pa)
+	// verilator lint_on UNUSEDSIGNAL
 	assign ftr = translate(fo_va, 2'd2);
-	assign atr = translate(a_va, a_we ? 2'd1 : 2'd0);
+	assign dtr = translate(d_va, (xstate == XS_SEQ ? sq_wr : pd.m.we) ? 2'd1 : 2'd0);     // (the check's)
 
-	wire f_flt  = fo && !ftr.ok;
-	wire f_resp = fo && (f_flt || if_valid);
-	wire [1:0] f_rflt = f_flt ? (ftr.prot ? 2'd2 : 2'd1) : 2'd0;
+	// the data side's translation, its parts apart (translate's, one after another, were a long path from the address
+	// adder): whether it may (dck: {ok, prot}, the DBATs side by side); and where, with every valid DBAT mapping to itself
+	// (dt_id, as the games set them) the address as it is, else a clock later for X (xt_va, the address held while X
+	// waits a clock; SEQ's sq_ea is a register already)
+	function automatic logic [1:0] dchk(input logic [31:0] a, input logic wr);
+		logic [3:0] m, okn;
+		logic ok;
+		if (!msr[4]) return 2'b10;
+		for (int n = 0; n < 4; n++)
+		begin
+			logic [31:0] upper, mask;
+			logic [1:0]  pp;
+			upper = sprv[X_DBAT + 2 * n];
+			pp = sprv[X_DBAT + 2 * n + 1][1:0];
+			mask = (~upper << 15) & 32'hfffe0000;
+			m[n] = upper[{4'd0, !msr[14]}] && ((a ^ upper) & mask) == 32'h0;
+			okn[n] = wr ? pp == 2'd2 : pp != 2'd0;
+		end
+		ok = m[0] ? okn[0] : m[1] ? okn[1] : m[2] ? okn[2] : m[3] ? okn[3] : sprv[X_HID0][7];
+		return {ok, m != 4'h0 && !ok};
+	endfunction
+	function automatic logic dbat_ident();
+		for (int n = 0; n < 4; n++)
+		begin
+			logic [31:0] upper, lower, mask;
+			upper = sprv[X_DBAT + 2 * n];
+			lower = sprv[X_DBAT + 2 * n + 1];
+			mask = (~upper << 15) & 32'hfffe0000;
+			if (upper[1:0] != 2'b00 && ((upper ^ lower) & mask) != 32'h0) return 1'b0;
+		end
+		return 1'b1;
+	endfunction
+	wire  [1:0]  dck = dchk(d_va, xstate == XS_SEQ ? sq_wr : pd.m.we);
+	logic        dt_id, xt_rdy;
+	logic [31:0] xt_va;
+	assign dts = translate(xstate == XS_SEQ ? sq_ea : xt_va, 2'd0);
+
+	// the fetch's translation, kept (ut_*) for the 128K block it was done for (a BAT's smallest, so all of it translates
+	// alike): a fetch in another block, or the first after what may change it (msr's IR and PR, the IBATs, HID0, the SRs:
+	// the reset, the bench's writes, an exception, rfi and the x_ser instructions as they go, but an mtmsr that leaves IR
+	// and PR, as the idle loops' do), translates (ftr, into ut_*) and goes out again, a clock later
+	logic        ut_v, ut_ok, ut_prot;
+	logic [31:17] ut_blk, ut_pa;
+	wire ut_hit  = ut_v && fo_va[31:17] == ut_blk;
+	wire f_retry = fo && !ut_hit;
+	wire ut_keep = opc == 6'h1f && xo == 10'h092 && rs_v[5] == msr[5] && rs_v[14] == msr[14];
+	wire ut_clr  = dbg_we || xstate == XS_EXC || (x_exec && ((x_ser && !ut_keep) || (opc == 6'h13 && xo == 10'h032)));
+	always_ff @(posedge clk)
+		if (rst || ut_clr) ut_v <= 1'b0;
+		else if (f_retry)
+		begin
+			ut_v <= 1'b1; ut_blk <= fo_va[31:17];
+			ut_ok <= ftr.ok; ut_prot <= ftr.prot; ut_pa <= ftr.pa[31:17];
+		end
+
+	wire f_flt  = fo && ut_hit && !ut_ok;
+	wire f_resp = fo && ut_hit && (!ut_ok || if_valid);
+	wire [1:0] f_rflt = f_flt ? (ut_prot ? 2'd2 : 2'd1) : 2'd0;
 
 	logic x_go, x_run, x_int, x_try, x_haz0, x_haz, x_ok, x_cons, x_exec, a_flt, a_cov, a_snoop, x_redir, x_take, hold_flush, sq_fin;
 	logic [31:0] x_target, vec;
@@ -679,28 +1039,29 @@ module ppc_pipe #(
 	begin
 		x_go = !dbg_hold || credit;
 		x_run = xstate == XS_RUN;
-		x_int = (int_ext || dec_irq) && msr[15];
+		x_int = (int_q || dec_irq) && msr[15];
 		// M's address clock: X's access faults, or a store covers an instruction fetched after it (which X then doesn't
 		// take)
-		a_flt = a_v && !atr.ok;
-		a_cov = a_v && !a_seq && a_we && ((xv && covers(a_va[11:0], a_size, ipc[11:0])) ||
-			(sv && covers(a_va[11:0], a_size, spc[11:0])) || (fo && covers(a_va[11:0], a_size, fo_va[11:0])));
-		a_snoop = a_cov && atr.ok;
+		a_flt = a_v && !a_tok;
+		a_cov = a_v && !a_seq && a_we && ((xv && covers(a_va[11:0], a_cw, ipc[11:0])) ||
+			(sv && covers(a_va[11:0], a_cw, spc[11:0])) || (fo && covers(a_va[11:0], a_cw, fo_va[11:0])));
+		a_snoop = a_cov && a_tok;
 		x_try = x_run && xv && x_go && !(a_v && !a_seq && (a_flt || a_cov));
-		xf = fpu_dec(op);
-		x_madd = xf.op == F_MADD || xf.op == F_MSUB || xf.op == F_NMADD || xf.op == F_NMSUB || xf.op == F_MADDS ||
-			xf.op == F_MSUBS || xf.op == F_NMADDS || xf.op == F_NMSUBS;
-		x_slow = xf.op == F_DIV || xf.op == F_DIVS || xf.op == F_SQRT || xf.op == F_SQRTS || xf.op == F_RES ||
-			xf.op == F_RSQRTE;
+		xf = pd.xf;
+		x_fk = pd.fk;
+		x_madd = pd.madd;
+		x_slow = pd.slow;
 		x_haz0 = (g_a && gpend_x(pg(rA))) || (g_b && gpend_x(pg(rB))) || (g_d && gpend_x(pg(rD))) ||
 			(xf.go && !x_slow ?
 				(f_a && fpend_p(rA)) || (f_b && (x_madd ? fpend_pb(rB) : fpend_p(rB))) || (f_c && fpend_p(frC)) ||
 				(f_d && fpend_pd(rD)) :
+			 (FWD || FPF) && pd.fce ?
+				(f_a && fpend_p(rA)) || (f_b && fpend_p(rB)) :
 				(f_a && fpend_x(rA)) || (f_b && fpend_x(rB)) || (f_c && fpend_x(frC)) || (f_d && fpend_x(rD))) ||
-			((xm_mem || x_fmov) && !m_free) || (xm_seq && m_valid) || (xf.go && !fp_free);
-		x_haz = x_haz0 || ((x_mul || xm_cvt) && !mul_rdy);
+			(pd.m.mem && !n_free) || (x_fmov && !m_free) || (pd.m.seq && m_valid) || (xf.go && !fp_free);
+		x_haz = x_haz0 || ((x_mul || pd.m.cvt) && !mul_rdy) || (pd.m.mem && !dt_id && !xt_rdy);
 		x_ok = x_try && !x_int && xflt == 2'd0 && !x_fpoff && !x_haz;
-		x_exec = x_ok && (!xm_mem || d_rdy);
+		x_exec = x_ok && (!pd.m.mem || d_rdy);
 		x_cons = x_try && (x_int || xflt != 2'd0 || x_fpoff || x_exec);
 		fpu_start = x_exec && xf.go && x_slow;
 		fpp_issue = x_exec && xf.go && !x_slow;
@@ -712,15 +1073,131 @@ module ppc_pipe #(
 		hold_flush = dbg_hold && !credit && x_run;
 
 		// the data request: X's single access, or SEQ's; the access, in its address clock
-		d_req = xstate == XS_SEQ ? !sq_out : x_ok && xm_mem;
-		d_va = xstate == XS_SEQ ? sq_ea : xm_ea;
+		d_req = xstate == XS_SEQ ? !sq_out : x_ok && pd.m.mem;
+		// one adder for X's address (rA|0 + d or rB; the update forms' rA + d or rB) and SEQ's, each operand chosen before it
+		// (where the adder's own LUTs take the choice)
+		d_va = (xstate == XS_SEQ ? sq_ea : pd.ea_z ? 32'h0 : ra_v) + (xstate == XS_SEQ ? 32'h0 : pd.m.idx ? rb_v : simm);
 		d_kill = a_flt;
-		d_pa = atr.pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
+		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
+	end
+
+	// X's GPR result, from units whose choices pd has (rdec_t): gw_v takes it with no decode in front, and CR0 its zero
+	function automatic logic [31:0] spr_rv(input logic [5:0] k);
+		case (k)
+			6'd48: return {xerso, xer};
+			6'd49: return 32'h00050200;
+			6'd50: return dec;
+			6'd51: return tb[31:0];
+			6'd52: return {8'h0, tb[55:32]};
+			default: return k < 6'(NSPR) ? sprv[k] : 32'h0;
+		endcase
+	endfunction
+	logic [31:0] ad_b, lg_v, ms_v, x_res;
+	logic        ad_c, x_neg, x_zero;
+	wire  [31:0] ad_a = (pd.r.ad_z ? 32'h0 : ra_v) ^ {32{pd.r.ad_n}};
+	wire  [32:0] ad_s = {1'b0, ad_a} + {1'b0, ad_b} + {32'h0, ad_c};
+	wire         ad_ov = !(ad_a[31] ^ ad_b[31]) && (ad_a[31] ^ ad_s[31]);
+	// the sum's zero test without the carries: a + b + c is zero when each bit's a ^ b is the carry a zero sum brings it,
+	// c or the bit below's a | b
+	wire         ad_zero = (ad_a ^ ad_b) == {ad_a[30:0] | ad_b[30:0], ad_c};
+	wire  [31:0] lg_b = pd.r.lg_b == LB_RB ? rb_v : pd.r.lg_b == LB_UIMM ? uimm : {op[15:0], 16'h0};
+	always_comb
+	begin
+		case (pd.r.ad_b)
+			AB_SIMM: ad_b = simm;
+			AB_SHI:  ad_b = {op[15:0], 16'h0};
+			AB_RB:   ad_b = rb_v;
+			AB_ZERO: ad_b = 32'h0;
+			default: ad_b = 32'hffffffff;
+		endcase
+		ad_c = pd.r.ad_c == AC_1 || (pd.r.ad_c == AC_CA && xer[29]);
+		for (int i = 0; i < 32; i++) lg_v[i] = pd.r.lg_t[{rs_v[i], lg_b[i]}];
+		case (pd.r.ms)
+			MS_CLZ:   ms_v = clz32(rs_v);
+			MS_EXTSB: ms_v = {{24{rs_v[7]}}, rs_v[7:0]};
+			MS_EXTSH: ms_v = {{16{rs_v[15]}}, rs_v[15:0]};
+			MS_CR:    ms_v = get_cr();
+			MS_MSR:   ms_v = msr;
+			MS_SPR:   ms_v = spr_rv(pd.r.spr);
+			MS_SR:    ms_v = sr[op[19:16]];
+			default:  ms_v = sr[rb_v[31:28]];
+		endcase
+		case (pd.r.rs)
+			R_ADD:   x_res = ad_s[31:0];
+			R_LOG:   x_res = lg_v;
+			R_SH:    x_res = sh_res;
+			R_MULL:  x_res = mulw[31:0];
+			R_MULH:  x_res = mulw[63:32];
+			R_MISC:  x_res = ms_v;
+			default: x_res = d_va;
+		endcase
+		// CR0's sign and zero, only from the units a record form takes its result from, each unit's own compare and the
+		// choice after it (R_MISC's are CNTLZW's, a zero when rS's top bit is set, EXTSB's and EXTSH's)
+		case (pd.r.rs)
+			R_ADD:   begin x_neg = ad_s[31]; x_zero = ad_zero; end
+			R_LOG:   begin x_neg = lg_v[31]; x_zero = lg_v == 32'h0; end
+			R_SH:    begin x_neg = sh_res[31]; x_zero = sh_zero; end
+			R_MULL:  begin x_neg = mulw[31]; x_zero = mulw[31:0] == 32'h0; end
+			R_MULH:  begin x_neg = mulw[63]; x_zero = mulw[63:32] == 32'h0; end
+			default:
+			begin
+				x_neg = pd.r.ms == MS_EXTSB ? rs_v[7] : pd.r.ms == MS_EXTSH && rs_v[15];
+				x_zero = pd.r.ms == MS_CLZ ? rs_v[31] : pd.r.ms == MS_EXTSB ? rs_v[7:0] == 8'h0 : rs_v[15:0] == 16'h0;
+			end
+		endcase
+	end
+`ifdef VERILATOR
+	always_ff @(posedge clk)
+	begin
+		if (xv && pd.r.rs == R_SH && sh_zero != (sh_res == 32'h0)) $display("PIPE sh_zero wrong: %08x %08x", op, rs_v);
+		if (x_exec && pd.cr0w && (x_neg != x_res[31] || x_zero != (x_res == 32'h0))) $display("PIPE cr0 wrong: %08x %08x", op, x_res);
+	end
+`endif
+	function automatic logic [3:0] cr0x(input logic so);
+		return {x_neg, !x_neg && !x_zero, x_zero, so};
+	endfunction
+	// a record form's CR0 (its overflow in SO with OE: the adder's, NEG's among them, which is rA = 0x80000000's; MULLW's) and
+	// a compare's field, which X writes with x_exec the only late choice (in the clock's block, after the states': from X's
+	// hazards through exec's choices to CRF was a long path)
+	wire         x_cr0ov = pd.cr0o == 2'd1 ? ad_ov : pd.cr0o == 2'd2 ? mulw[63:32] != {32{mulw[31]}} : 1'b0;
+	wire  [31:0] cmp_b = !pd.cmp_i ? rb_v : pd.cmp_s ? simm : uimm;
+	wire  [3:0]  cmp_d = pd.cmp_s ? cmp4($signed(ra_v) < $signed(cmp_b), $signed(ra_v) > $signed(cmp_b), xerso) :
+		cmp4(ra_v < cmp_b, ra_v > cmp_b, xerso);
+
+	// the float moves' value, from pd.fm (FSEL: c if a >= 0.0, not NaN and positive or a zero, else b; MFFS: an integer, as
+	// the manual has it)
+	logic [32:0] m_val_d;
+	always_comb
+	begin
+		// verilator lint_off UNUSEDSIGNAL
+		logic [32:0] fa, v;
+		// verilator lint_on UNUSEDSIGNAL
+		fa = fx(rA, 2'd0, fr_a);
+		v = pd.fm == FM_FFS ? {1'b1, fpscr} :
+			pd.fm == FM_SEL && !snan(fa[31:0]) && (!fa[31] || fa[30:0] == 31'h0) ? fx(frC, 2'd2, fr_c) : fx(rB, 2'd1, fr_b);
+		case (pd.fm)
+			FM_NEG:  v[31] = !v[31];
+			FM_NABS: v[31] = 1'b1;
+			FM_ABS:  v[31] = 1'b0;
+			default: ;
+		endcase
+		m_val_d = v;
 	end
 	always_ff @(posedge clk)
-		if (rst || x_exec || !(x_try && !x_int && xflt == 2'd0 && !x_fpoff && (x_mul || xm_cvt) && !x_haz0))
-			mul_rdy <= 1'b0;
+		if (rst || x_exec || !(x_try && !x_int && xflt == 2'd0 && !x_fpoff && (x_mul || pd.m.cvt) && !x_haz0)) mul_rdy <= 1'b0;
 		else mul_rdy <= 1'b1;
+	// (dt_id cleared as a DBAT's written, by mtspr or the bench: the clock after uses the slow way, then dbat_ident's new
+	// answer; with a DBAT not mapping to itself, X's access waits a clock, its address held for translate)
+	always_ff @(posedge clk)
+		dt_id <= !(rst || dbg_we || (x_exec && opc == 6'h1f && xo == 10'h1d3 && sprn >= 10'd536 && sprn <= 10'd543)) &&
+			dbat_ident();
+	always_ff @(posedge clk)
+		if (rst || x_exec || !(x_try && !x_int && xflt == 2'd0 && pd.m.mem && !dt_id && !x_haz0)) xt_rdy <= 1'b0;
+		else
+		begin
+			xt_rdy <= 1'b1;
+			xt_va <= d_va;
+		end
 	function automatic logic seq_last();
 		case (sq_kind)
 			Q_LMW, Q_STMW: return sq_reg == 5'd31;
@@ -749,10 +1226,10 @@ module ppc_pipe #(
 	begin
 		skid_after = sv ? !x_take : f_resp && !x_take;
 		f_want = (!fo || f_resp) && !skid_after && !fstop && !f_flt;
-		if_req = x_redir || (!hold_flush && f_want);
-		if_va = x_redir ? x_target : nfpc;
-		if_kill = x_redir || hold_flush ? fo : f_flt;
-		if_pa = ftr.pa;
+		if_req = x_redir || (!hold_flush && (f_want || f_retry));
+		if_va = x_redir ? x_target : f_retry ? fo_va : nfpc;
+		if_kill = x_redir || hold_flush ? fo : f_flt || f_retry;
+		if_pa = {ut_pa, fo_va[16:0]};
 	end
 
 	always_ff @(posedge clk)
@@ -780,18 +1257,18 @@ module ppc_pipe #(
 			begin
 				if (sv)
 				begin
-					xv <= 1'b1; ipc <= spc; op <= sins; xflt <= sflt; xpred <= spred;
+					xv <= 1'b1; ipc <= spc; op <= sins; pd <= spd; xflt <= sflt; xpred <= spred;
 					sv <= 1'b0;
 				end
 				else
 				begin
 					xv <= f_resp;
-					ipc <= fo_va; op <= if_data; xflt <= f_rflt; xpred <= f_pt;
+					ipc <= fo_va; op <= if_data; pd <= pdec(if_data); xflt <= f_rflt; xpred <= f_pt;
 				end
 			end
 			else if (f_resp)
 			begin
-				sv <= 1'b1; spc <= fo_va; sins <= if_data; sflt <= f_rflt; spred <= f_pt;
+				sv <= 1'b1; spc <= fo_va; sins <= if_data; spd <= pdec(if_data); sflt <= f_rflt; spred <= f_pt;
 			end
 			if (f_flt) fstop <= 1'b1;
 			if (f_want && if_rdy)
@@ -805,12 +1282,37 @@ module ppc_pipe #(
 				if (f_resp) fo <= 1'b0;
 				fpc <= nfpc;
 			end
+			// (fo_va's again, out now, or later as fpc)
+			if (f_retry)
+			begin
+				fo <= if_rdy;
+				if (!if_rdy) fpc <= fo_va;
+			end
 		end
 	end
 
-	// X's GPRs for the next clock: its next instruction's (what the fetch block puts in op)
+	// X's GPRs for the next clock: its next instruction's (what the fetch block puts in op): op's again if op_keep, else
+	// op_nx's (op_keep comes late, so the register files have both)
+	wire        op_keep = x_redir || hold_flush || !x_take;
 	// verilator lint_off UNUSEDSIGNAL
-	wire [31:0] op_n = x_redir || hold_flush || !x_take ? op : sv ? sins : if_data;
+	wire [31:0] op_nx = sv ? sins : if_data;
+	// verilator lint_on UNUSEDSIGNAL
+	// which of X's rA / rB / rS ({s, b, a}) a GPR written now (p) is next clock (for gh_*)
+	function automatic logic [2:0] gnext(input logic [5:0] p);
+		return op_keep ? {p == pg(op[25:21]), p == pg(op[15:11]), p == pg(op[20:16])} :
+			{p == pg(op_nx[25:21]), p == pg(op_nx[15:11]), p == pg(op_nx[20:16])};
+	endfunction
+	// ... and which of its rA / rB / frC / rD ({s, c, b, a}) an FPR r is: op's (fnk), op_nx's (fnn), X's now (fnow)
+	function automatic logic [3:0] fnk(input logic [4:0] r);
+		return {r == op[25:21], r == op[10:6], r == op[15:11], r == op[20:16]};
+	endfunction
+	function automatic logic [3:0] fnn(input logic [4:0] r);
+		return {r == op_nx[25:21], r == op_nx[10:6], r == op_nx[15:11], r == op_nx[20:16]};
+	endfunction
+	// verilator lint_off UNUSEDSIGNAL
+	function automatic logic [3:0] fnow(input logic [4:0] r);
+		return {r == rD, r == frC, r == rB, r == rA};
+	endfunction
 	// verilator lint_on UNUSEDSIGNAL
 	// (rS, through SEQ: the register it reads when its access is answered)
 	logic [5:0] seq_rs;
@@ -821,11 +1323,34 @@ module ppc_pipe #(
 			default: seq_rs = pg(sq_reg);
 		endcase
 	wire seq_rd = xstate == XS_SEQ && !sq_fin;
+	// the value gw_v takes every clock, what's written if anything is (wgp has the register, its enable): X's x_res; a
+	// faulted update form's rA put back; the bench's; DIV's, SEQ's
+	logic [31:0] gw_v_d;
+	always_comb
+	begin
+		gw_v_d = x_res;
+		if (a_flt) gw_v_d = a_rav;
+		case (xstate)
+			XS_RUN: if (hold_flush && dbg_we && (dbg_idx < 11'd32 || (dbg_idx >= 11'd72 && dbg_idx < 11'd76))) gw_v_d = dbg_val[31:0];
+			XS_CHK: gw_v_d = 32'h0;
+			XS_DIV: gw_v_d = dv_neg_q ? -dv_q : dv_q;
+			XS_SEQ:
+				if (!sq_out || sq_kind != Q_LSW) gw_v_d = sq_out ? d_rdata[31:0] : 32'h0;
+				else
+				begin
+					gw_v_d = sq_byte == 0 ? 32'h0 : gxc(seq_rs, gr_s);
+					gw_v_d[31 - 8 * sq_byte -: 8] = d_rdata[7:0];
+				end
+			default: ;
+		endcase
+		if (rst) gw_v_d = dbg_val[31:0];
+	end
 	ppc_regs #(.W(32), .AW(6), .NR(3)) gregs (
 		.clk,
 		.we0(gw_en), .wa0(gw_r), .wd0(gw_v),
 		.we1(m_gw && !rst), .wa1(m_rd), .wd1(m_gv),
-		.ra({seq_rd ? seq_rs : pg(op_n[25:21]), pg(op_n[15:11]), pg(op_n[20:16])}),
+		.ra_k({seq_rd ? seq_rs : pg(op[25:21]), pg(op[15:11]), pg(op[20:16])}),
+		.ra_n({seq_rd ? seq_rs : pg(op_nx[25:21]), pg(op_nx[15:11]), pg(op_nx[20:16])}), .keep(op_keep),
 		.rd({gr_s, gr_b, gr_a})
 	);
 	// the FPRs: the float units' (and the bench's) writes win over M's (never the same one in a clock)
@@ -840,14 +1365,39 @@ module ppc_pipe #(
 		.clk,
 		.we0(m_fw && !rst), .wa0(m_rd[4:0]), .wd0(m_fv),
 		.we1(fu_we), .wa1(fu_wa), .wd1(fu_wd),
-		.ra({op_n[25:21], op_n[10:6], op_n[15:11], op_n[20:16]}),
+		.ra_k({op[25:21], op[10:6], op[15:11], op[20:16]}),
+		.ra_n({op_nx[25:21], op_nx[10:6], op_nx[15:11], op_nx[20:16]}), .keep(op_keep),
 		.rd({fr_s, fr_c, fr_b, fr_a})
 	);
 	always_ff @(posedge clk)
 	begin
 		gw2_en <= gw_en; gw2_r <= gw_r; gw2_v <= gw_v;
+		gh_w2 <= gw_en ? gnext(gw_r) : 3'b0;
+`ifdef VERILATOR
+		if (xv && (gh_w != {gw_en && gw_r == pg(rD), gw_en && gw_r == pg(rB), gw_en && gw_r == pg(rA)} ||
+			gh_m != {gm_en && gm_r == pg(rD), gm_en && gm_r == pg(rB), gm_en && gm_r == pg(rA)} ||
+			gh_w2 != {gw2_en && gw2_r == pg(rD), gw2_en && gw2_r == pg(rB), gw2_en && gw2_r == pg(rA)}))
+			$display("PIPE gh_* wrong at %08x", ipc);
+		// (the decode done as the instruction went in: X's, and its access's against xm_*)
+		if (xv && (pd != pdec(op) || pd.m.mem != xm_mem || pd.m.seq != xm_seq || pd.m.cvt != xm_cvt || pd.m.we != xm_we ||
+			pd.m.upd != xm_upd || (xm_mem && xstate != XS_SEQ && d_va != xm_ea)))
+			$display("PIPE pd wrong at %08x", ipc);
+		// (X's result, and a float move's, against what the decode in exec has)
+		if (gw_en && gw_v != gw_vchk) $display("PIPE gw_v wrong at %08x", ret_ipc);
+		if (m_valid && m_kind == MK_FMOV && m_val != m_vchk) $display("PIPE m_val wrong at %08x", ret_ipc);
+		// (the data side's translation, its parts apart, against translate's)
+		if (d_req && d_rdy && ((dt_id ? d_va : dts.pa) != dtr.pa || dck != {dtr.ok, dtr.prot} || (!dt_id && !dbat_ident() && xstate != XS_SEQ && xt_va != d_va)))
+			$display("PIPE dtr wrong at %08x", ipc);
+`endif
 		fu_en <= fu_we; fu_r <= fu_wa; fu_v <= fu_wd;
 		fm_en <= m_fw && !rst; fm_r <= m_rd[4:0]; fm_v <= m_fv;
+		fh_pk <= fnk(fpp_erd); fh_pn <= fnn(fpp_erd);
+		fh_uk <= fnk(fu_wa); fh_un <= fnn(fu_wa);
+		fh_mk <= fnk(m_rd[4:0]); fh_mn <= fnn(m_rd[4:0]);
+`ifdef VERILATOR
+		if (xv && ((fpp_wv && fh_p != fnow(fpp_wrd)) || (fu_en && fh_u != fnow(fu_r)) || (fm_en && fh_m != fnow(fm_r))))
+			$display("PIPE fh_* wrong at %08x", ipc);
+`endif
 	end
 
 	// ---- bench outputs ------------------------------------------------------------------------------------------------
@@ -885,7 +1435,11 @@ module ppc_pipe #(
 	begin
 		logic fm, ff;
 		fm = (f_a && fpend_mx(rA)) || (f_b && fpend_mx(rB)) || (f_c && fpend_mx(frC)) || (f_d && fpend_mx(rD));
-		ff = (f_a && fpend_ux(rA)) || (f_b && fpend_ux(rB)) || (f_c && fpend_ux(frC)) || (f_d && fpend_ux(rD));
+		ff = xf.go && !x_slow ?
+			(f_a && fpend_pu(rA)) || (f_b && (x_madd ? fpend_pbu(rB) : fpend_pu(rB))) || (f_c && fpend_pu(frC)) ||
+			(f_d && fpend_pdu(rD)) :
+			(FWD || FPF) && pd.fce ? (f_a && fpend_pu(rA)) || (f_b && fpend_pu(rB)) :
+			(f_a && fpend_ux(rA)) || (f_b && fpend_ux(rB)) || (f_c && fpend_ux(frC)) || (f_d && fpend_ux(rD));
 		perf_pc_o = ipc;
 		if (!x_run) perf_o = 4'd7;
 		else if (!xv) perf_o = 4'd1;
@@ -905,11 +1459,16 @@ module ppc_pipe #(
 	task automatic wg(input logic [4:0] r, input logic [31:0] v);
 		wgp(pg(r), v);
 	endtask
+	// (gw_v has gw_v_d; v is the bench's, its copy, and the check's)
 	task automatic wgp(input logic [5:0] p, input logic [31:0] v);
 		gpr[p] <= v;
 		gw_en <= 1'b1;
 		gw_r <= p;
-		gw_v <= v;
+`ifdef VERILATOR
+		gw_vchk <= v;
+`endif
+		gh_wk <= {p == pg(op[25:21]), p == pg(op[15:11]), p == pg(op[20:16])};
+		gh_wn <= {p == pg(op_nx[25:21]), p == pg(op_nx[15:11]), p == pg(op_nx[20:16])};
 	endtask
 
 	task automatic raise(input logic [4:0] e, input logic [31:0] param);
@@ -946,17 +1505,24 @@ module ppc_pipe #(
 	begin
 		rst_q <= rst;
 		hold_q <= dbg_hold;
+		gw_v <= gw_v_d;
+		m_val <= m_val_d;           // (a move's in M a clock, the one after it's here)
 		ret_x <= 1'b0;
 		ret_m <= 1'b0;
 		a_v <= 1'b0;
 		gw_en <= 1'b0;
+		gh_wk <= 3'b0;
+		gh_wn <= 3'b0;
+		gh_kq <= op_keep;
 		gm_en <= m_gw;
 		gm_r <= m_rd;
 		gm_v <= m_gv;
+		gh_m <= m_gw ? gnext(m_rd) : 3'b0;
 		if (rst)
 		begin
 			xstate <= XS_RUN;
 			m_valid <= 1'b0;
+			n_valid <= 1'b0;
 			fpu_busy <= 1'b0;
 			credit <= 1'b0;
 			dec_irq <= 1'b0;
@@ -996,6 +1562,7 @@ module ppc_pipe #(
 				a_v <= 1'b1;
 				a_seq <= xstate == XS_SEQ;
 				a_va <= d_va;
+				a_pa <= dt_id ? d_va : dts.pa; a_tok <= dck[1]; a_tprot <= dck[0];
 				if (xstate == XS_SEQ)
 				begin
 					a_we <= sq_wr; a_size <= sq_size; a_wdata <= sq_wdata; a_upd <= 1'b0;
@@ -1004,19 +1571,21 @@ module ppc_pipe #(
 				else
 				begin
 					a_we <= xm_we; a_size <= xm_size; a_wdata <= xm_wdata; a_upd <= xm_upd;
+					a_cw <= cov_w(d_va[1:0], xm_size);
 					a_ipc <= ipc; a_op <= op; a_ra <= pg(rA); a_rav <= ra_v;
 				end
 			end
-			// M's address clock: a fault (X's access out of M, its update undone; SEQ's not out), or X's retires
+			// M's address clock: a fault (X's access out of M or N, its update undone; SEQ's not out), or X's retires
 			if (a_v)
 			begin
 				if (a_flt)
 				begin
-					dfault(a_va, a_we, atr.prot);
+					dfault(a_va, a_we, a_tprot);
 					if (a_seq) sq_out <= 1'b0;
 					else
 					begin
-						m_valid <= 1'b0;
+						if (n_valid) n_valid <= 1'b0;
+						else m_valid <= 1'b0;
 						if (a_upd) wgp(a_ra, a_rav);
 					end
 				end
@@ -1028,13 +1597,19 @@ module ppc_pipe #(
 				end
 			end
 
-			// M: the access out is answered
+			// M: the access out is answered; N's to M
 			if (m_done)
 			begin
 				if (m_gw) gpr[m_rd] <= m_gv;
 				if (m_fw) fpr[m_rd[4:0]] <= m_fv;
 				if (m_kind == MK_LOAD && m_resv) reserved <= 1'b1;
-				m_valid <= 1'b0;
+				if (n_valid && !n_flt)
+				begin
+					m_kind <= n_kind; m_rd <= n_rd; m_size <= n_size; m_sext <= n_sext; m_bswap <= n_bswap; m_resv <= n_resv;
+					m_wr_en <= n_wr_en;
+				end
+				else m_valid <= 1'b0;
+				n_valid <= 1'b0;
 			end
 			// the float units' results
 			if (fpu_busy && fpu_done)
@@ -1059,8 +1634,8 @@ module ppc_pipe #(
 						mc_op <= op;
 						if (x_int)
 						begin
-							raise(int_ext ? EX_EI : EX_DECREMENT, 32'h0);
-							if (!int_ext) dec_irq <= 1'b0;
+							raise(int_q ? EX_EI : EX_DECREMENT, 32'h0);
+							if (!int_q) dec_irq <= 1'b0;
 						end
 						else if (xflt != 2'd0) raise(xflt == 2'd2 ? EX_ISI : EX_ITLBMISS, xflt == 2'd2 ? 32'h08000000 : 32'h0);
 						else if (x_fpoff) raise(EX_FPU, 32'h0);
@@ -1165,6 +1740,9 @@ module ppc_pipe #(
 
 				default: xstate <= XS_RUN;
 			endcase
+			// (CRF's other writes are the other states', the debug write's, or another opcode's)
+			if (x_exec && pd.cr0w) crf[0] <= cr0x(xerso | x_cr0ov);
+			if (x_exec && pd.cmpw) crf[op[25:23]] <= cmp_d;
 
 			// the float units take X's op
 			if (fpu_start)
@@ -1208,15 +1786,13 @@ module ppc_pipe #(
 
 	// ---- EXEC (X takes the instruction) -------------------------------------------------------------------------------
 	task automatic exec();
-		logic [31:0] res;
-		logic [32:0] s33;
 		pc <= br_taken ? br_target : npc;
 		ret_x <= 1'b1;
 		ret_ipc <= ipc;
 		ret_op <= op;
 		exc_q <= 5'd0;
 		timer_q <= 1'b0;
-		if (xm_mem)
+		if (pd.m.mem)
 		begin
 			ret_x <= 1'b0;
 			mem_issue();
@@ -1233,15 +1809,12 @@ module ppc_pipe #(
 					xstate <= XS_CHK;
 				end
 				6'h07: wg(rD, mulw[31:0]);                                                             // MULLI
-				6'h08: begin wg(rD, simm - ra_v); xer[29] <= ra_v <= simm; end                         // SUBFIC
-				6'h0a: crf[op[25:23]] <= cmp4(ra_v < uimm, ra_v > uimm, xerso);                        // CMPLI
-				6'h0b: crf[op[25:23]] <= cmp4($signed(ra_v) < $signed(simm), $signed(ra_v) > $signed(simm), xerso); // CMPI
-				6'h0c, 6'h0d:                                                                          // ADDIC, ADDIC.
+				6'h08: begin wg(rD, simm - ra_v); xer[29] <= ad_s[32]; end                             // SUBFIC
+				6'h0a, 6'h0b: ;                                                                        // CMPLI, CMPI (cmp_d)
+				6'h0c, 6'h0d:                                                                          // ADDIC, ADDIC. (CR0: cr0w)
 				begin
-					s33 = {1'b0, ra_v} + {1'b0, simm};
-					wg(rD, s33[31:0]);
-					xer[29] <= s33[32];
-					if (opc == 6'h0d) set_cr0(s33[31:0]);
+					wg(rD, ra_v + simm);
+					xer[29] <= ad_s[32];
 				end
 				6'h0e: wg(rD, raz + simm);                                                             // ADDI
 				6'h0f: wg(rD, raz + {op[15:0], 16'h0});                                                // ADDIS
@@ -1249,15 +1822,13 @@ module ppc_pipe #(
 				6'h11: raise(EX_SYSCALL, 32'h0);                                                  // SC
 				6'h12: if (op[0]) sprv[X_LR] <= npc;                                                   // Bx
 				6'h13: op13();
-				6'h14: begin res = (ra_v & ~rlw_mask(op[10:6], op[5:1])) | (rol32(rs_v, op[15:11]) & rlw_mask(op[10:6], op[5:1])); wg(rA, res); if (rc) set_cr0(res); end
-				6'h15: begin res = rol32(rs_v, op[15:11]) & rlw_mask(op[10:6], op[5:1]); wg(rA, res); if (rc) set_cr0(res); end
-				6'h17: begin res = rol32(rs_v, rb_v[4:0]) & rlw_mask(op[10:6], op[5:1]); wg(rA, res); if (rc) set_cr0(res); end
+				6'h14, 6'h15, 6'h17: wg(rA, sh_res);                                                   // RLWIMI, RLWINM, RLWNM
 				6'h18: wg(rA, rs_v | uimm);
 				6'h19: wg(rA, rs_v | {op[15:0], 16'h0});
 				6'h1a: wg(rA, rs_v ^ uimm);
 				6'h1b: wg(rA, rs_v ^ {op[15:0], 16'h0});
-				6'h1c: begin res = rs_v & uimm; wg(rA, res); set_cr0(res); end
-				6'h1d: begin res = rs_v & {op[15:0], 16'h0}; wg(rA, res); set_cr0(res); end
+				6'h1c: wg(rA, rs_v & uimm);
+				6'h1d: wg(rA, rs_v & {op[15:0], 16'h0});
 				6'h1f: op1f();
 				6'h2e: begin sq_count <= 7'd32 - {2'b0, rD}; sq_reg <= rD; seq_start(Q_LMW, raz + simm, 4'd4); end
 				6'h2f: begin sq_count <= 7'd32 - {2'b0, rD}; sq_reg <= rD; sq_wdata <= {32'h0, rs_v}; seq_start(Q_STMW, raz + simm, 4'd4); end
@@ -1266,18 +1837,26 @@ module ppc_pipe #(
 			endcase
 	endtask
 
-	// a single access: out to the data side (taken this clock) and into M (which may yet fault it)
+	// a single access: out to the data side (taken this clock) and into M, or N behind M's (which may yet fault it)
 	task automatic mem_issue();
-		m_valid <= 1'b1;
-		m_kind <= xm_kind;
-		m_rd <= xm_kind == MK_LOAD ? pg(rD) : {1'b0, rD};
-		m_size <= xm_size;
-		m_sext <= xm_sext;
-		m_bswap <= xm_bswap;
-		m_resv <= xm_resv;
+		logic [5:0] rd;
+		logic       wr_en;
+		rd = xm_kind == MK_LOAD ? pg(rD) : {1'b0, rD};
 		// the update form's rA wins over rD (MAME writes it last)
-		m_wr_en <= !(xm_upd && xm_kind == MK_LOAD && rD == rA);
-		if (xm_upd) wg(rA, xm_ea);
+		wr_en = !(xm_upd && xm_kind == MK_LOAD && rD == rA);
+		if (m_valid && (!m_done || n_valid))
+		begin
+			n_valid <= 1'b1;
+			n_kind <= xm_kind; n_rd <= rd; n_size <= xm_size; n_sext <= xm_sext; n_bswap <= xm_bswap; n_resv <= xm_resv;
+			n_wr_en <= wr_en;
+		end
+		else
+		begin
+			m_valid <= 1'b1;
+			m_kind <= xm_kind; m_rd <= rd; m_size <= xm_size; m_sext <= xm_sext; m_bswap <= xm_bswap; m_resv <= xm_resv;
+			m_wr_en <= wr_en;
+		end
+		if (pd.m.upd) wg(rA, d_va);
 	endtask
 
 	task automatic seq_start(input qkind_t k, input logic [31:0] ea, input logic [3:0] size);
@@ -1330,8 +1909,6 @@ module ppc_pipe #(
 
 	task automatic op1f();
 		logic [31:0] res, a, b, s;
-		logic [32:0] s33;
-		logic [5:0] n;
 		a = ra_v;
 		b = rb_v;
 		s = rs_v;
@@ -1353,40 +1930,32 @@ module ppc_pipe #(
 				bb = xo[7:0] == 8'h0a || xo[7:0] == 8'h8a ? b : xo[7:0] == 8'hca ? 32'h0 : 32'hffffffff;
 				cin = xo[7:0] == 8'h0a ? 1'b0 : xo[7:0] == 8'h8a || xo[7:0] == 8'hca || xo[7:0] == 8'hea ? xer[29] : 1'b0;
 				if (xo[8:0] == 9'h10a) cin = 1'b0;
-				s33 = {1'b0, a} + {1'b0, bb} + {32'h0, cin};
-				res = s33[31:0];
+				res = a + bb + 32'(cin);
 				wca = xo[8:0] != 9'h10a;
-				if (wca) xer[29] <= s33[32];
-				if (oe) begin xer[30] <= (~(a[31] ^ bb[31])) & (a[31] ^ res[31]); if ((~(a[31] ^ bb[31])) & (a[31] ^ res[31])) xerso <= 1'b1; end
+				if (wca) xer[29] <= ad_s[32];
+				if (oe) begin xer[30] <= ad_ov; if (ad_ov) xerso <= 1'b1; end
 				wg(rD, res);
-				if (rc) crf[0] <= {res[31], !res[31] && res != 0, res == 0, xerso | (oe & (~(a[31] ^ bb[31])) & (a[31] ^ res[31]))};
 			end
 			10'h028, 10'h228, 10'h008, 10'h208, 10'h088, 10'h288, 10'h0c8, 10'h2c8, 10'h0e8, 10'h2e8:
 			begin
 				// SUBF, SUBFC, SUBFE, SUBFZE, SUBFME: ~a + b + cin
 				logic [31:0] bb;
-				logic cin, ov;
+				logic cin;
 				bb = xo[7:0] == 8'h28 || xo[7:0] == 8'h08 || xo[7:0] == 8'h88 ? b : xo[7:0] == 8'hc8 ? 32'h0 : 32'hffffffff;
 				cin = xo[7:0] == 8'h28 || xo[7:0] == 8'h08 ? 1'b1 : xer[29];
-				s33 = {1'b0, ~a} + {1'b0, bb} + {32'h0, cin};
-				res = s33[31:0];
-				ov = (~(~a[31] ^ bb[31])) & (~a[31] ^ res[31]);
-				if (xo[7:0] != 8'h28) xer[29] <= s33[32];
-				if (oe) begin xer[30] <= ov; if (ov) xerso <= 1'b1; end
+				res = ~a + bb + 32'(cin);
+				if (xo[7:0] != 8'h28) xer[29] <= ad_s[32];
+				if (oe) begin xer[30] <= ad_ov; if (ad_ov) xerso <= 1'b1; end
 				wg(rD, res);
-				if (rc) crf[0] <= {res[31], !res[31] && res != 0, res == 0, xerso | (oe & ov)};
 			end
 			10'h068, 10'h268:                                                                      // NEG
 			begin
-				res = -a;
 				if (oe) begin xer[30] <= a == 32'h80000000; if (a == 32'h80000000) xerso <= 1'b1; end
-				wg(rD, res);
-				if (rc) crf[0] <= {res[31], !res[31] && res != 0, res == 0, xerso | (oe & (a == 32'h80000000))};
+				wg(rD, -a);
 			end
-			10'h000: crf[op[25:23]] <= cmp4($signed(a) < $signed(b), $signed(a) > $signed(b), xerso);  // CMP
-			10'h020: crf[op[25:23]] <= cmp4(a < b, a > b, xerso);                                  // CMPL
-			10'h00b: begin res = mulhwu; wg(rD, res); if (rc) set_cr0(res); end                    // MULHWU
-			10'h04b: begin res = mulw[63:32]; wg(rD, res); if (rc) set_cr0(res); end               // MULHW
+			10'h000, 10'h020: ;                                                                    // CMP, CMPL (cmp_d)
+			10'h00b: begin res = mulw[63:32]; wg(rD, res); end                                     // MULHWU
+			10'h04b: begin res = mulw[63:32]; wg(rD, res); end                                     // MULHW
 			10'h0eb, 10'h2eb:                                                                      // MULLW
 			begin
 				logic ov;
@@ -1394,7 +1963,6 @@ module ppc_pipe #(
 				ov = mulw[63:32] != {32{mulw[31]}};
 				if (oe) begin xer[30] <= ov; if (ov) xerso <= 1'b1; end
 				wg(rD, res);
-				if (rc) crf[0] <= {res[31], !res[31] && res != 0, res == 0, xerso | (oe & ov)};
 			end
 			10'h1cb, 10'h3cb, 10'h1eb, 10'h3eb:                                                    // DIVWU, DIVW
 			begin
@@ -1408,42 +1976,19 @@ module ppc_pipe #(
 				ret_x <= 1'b0;
 				xstate <= XS_CHK;
 			end
-			10'h01c: begin res = s & b; wg(rA, res); if (rc) set_cr0(res); end                     // AND
-			10'h03c: begin res = s & ~b; wg(rA, res); if (rc) set_cr0(res); end                    // ANDC
-			10'h1dc: begin res = ~(s & b); wg(rA, res); if (rc) set_cr0(res); end                  // NAND
-			10'h1bc: begin res = s | b; wg(rA, res); if (rc) set_cr0(res); end                     // OR
-			10'h19c: begin res = s | ~b; wg(rA, res); if (rc) set_cr0(res); end                    // ORC
-			10'h07c: begin res = ~(s | b); wg(rA, res); if (rc) set_cr0(res); end                  // NOR
-			10'h13c: begin res = s ^ b; wg(rA, res); if (rc) set_cr0(res); end                     // XOR
-			10'h11c: begin res = ~(s ^ b); wg(rA, res); if (rc) set_cr0(res); end                  // EQV
-			10'h018: begin n = b[5:0]; res = n > 31 ? 32'h0 : s << n[4:0]; wg(rA, res); if (rc) set_cr0(res); end // SLW
-			10'h218: begin n = b[5:0]; res = n > 31 ? 32'h0 : s >> n[4:0]; wg(rA, res); if (rc) set_cr0(res); end // SRW
-			10'h318:                                                                               // SRAW
-			begin
-				n = b[5:0];
-				if (n >= 32)
-				begin
-					res = {32{s[31]}};
-					xer[29] <= s[31];
-				end
-				else
-				begin
-					res = $signed(s) >>> n[4:0];
-					xer[29] <= s[31] && (s & ~(32'hffffffff << n[4:0])) != 0;
-				end
-				wg(rA, res);
-				if (rc) set_cr0(res);
-			end
-			10'h338:                                                                               // SRAWI
-			begin
-				res = $signed(s) >>> op[15:11];
-				xer[29] <= s[31] && (s & ~(32'hffffffff << op[15:11])) != 0;
-				wg(rA, res);
-				if (rc) set_cr0(res);
-			end
-			10'h01a: begin res = clz32(s); wg(rA, res); if (rc) set_cr0(res); end                  // CNTLZW
-			10'h3ba: begin res = {{24{s[7]}}, s[7:0]}; wg(rA, res); if (rc) set_cr0(res); end      // EXTSB
-			10'h39a: begin res = {{16{s[15]}}, s[15:0]}; wg(rA, res); if (rc) set_cr0(res); end    // EXTSH
+			10'h01c: begin res = s & b; wg(rA, res); end                                         // AND
+			10'h03c: begin res = s & ~b; wg(rA, res); end                                        // ANDC
+			10'h1dc: begin res = ~(s & b); wg(rA, res); end                                      // NAND
+			10'h1bc: begin res = s | b; wg(rA, res); end                                         // OR
+			10'h19c: begin res = s | ~b; wg(rA, res); end                                        // ORC
+			10'h07c: begin res = ~(s | b); wg(rA, res); end                                      // NOR
+			10'h13c: begin res = s ^ b; wg(rA, res); end                                         // XOR
+			10'h11c: begin res = ~(s ^ b); wg(rA, res); end                                      // EQV
+			10'h018, 10'h218: begin res = sh_res; wg(rA, res); end                               // SLW, SRW
+			10'h318, 10'h338: begin res = sh_res; xer[29] <= sh_ca; wg(rA, res); end             // SRAW, SRAWI
+			10'h01a: begin res = clz32(s); wg(rA, res); end                                      // CNTLZW
+			10'h3ba: begin res = {{24{s[7]}}, s[7:0]}; wg(rA, res); end                          // EXTSB
+			10'h39a: begin res = {{16{s[15]}}, s[15:0]}; wg(rA, res); end                        // EXTSH
 
 			10'h255, 10'h215:                                                                      // LSWI, LSWX
 			begin
@@ -1553,17 +2098,24 @@ module ppc_pipe #(
 	endtask
 
 	// ---- floating point: to the float unit, or done here (the moves, through M) ---------------------------------------
+	// (m_val has m_val_d; v is the check's)
+	// verilator lint_off UNUSEDSIGNAL
 	task automatic fmov(input logic [32:0] v);
+	// verilator lint_on UNUSEDSIGNAL
 		m_valid <= 1'b1;
 		m_kind <= MK_FMOV;
 		m_rd <= {1'b0, rD};
-		m_val <= v;
+`ifdef VERILATOR
+		m_vchk <= v;
+`endif
 	endtask
 
 	task automatic opfp();
+		// verilator lint_off UNUSEDSIGNAL
 		logic [32:0] fa, fb;
-		fa = fx(rA, fr_a);
-		fb = fx(rB, fr_b);
+		// verilator lint_on UNUSEDSIGNAL
+		fa = fx(rA, 2'd0, fr_a);
+		fb = fx(rB, 2'd1, fr_b);
 		if (xf.go)
 		begin
 			// out to a float unit (fpp_issue, fpu_start); with Rc, but for fctiw[z], CR1 is FPSCR's top (MAME), which
@@ -1574,7 +2126,7 @@ module ppc_pipe #(
 		else if (xo[4])
 			case (op[5:1])
 				// FSEL: c if a >= 0.0 (not NaN, and positive or a zero), else b; no CR1 even with Rc (MAME)
-				5'h17: fmov(!snan(fa[31:0]) && (!fa[31] || fa[30:0] == 31'h0) ? fx(frC, fr_c) : fb);
+				5'h17: fmov(!snan(fa[31:0]) && (!fa[31] || fa[30:0] == 31'h0) ? fx(frC, 2'd2, fr_c) : fb);
 				default: raise(EX_PROGRAM, 32'h80000);
 			endcase
 		else
@@ -1640,13 +2192,13 @@ module ppc_pipe #(
 				end
 				Q_STMW:
 				begin
-					sq_wdata <= {32'h0, gx(seq_rs, gr_s)};
+					sq_wdata <= {32'h0, gxc(seq_rs, gr_s)};
 					sq_reg <= sq_reg + 5'd1;
 				end
 				Q_LSW:
 				begin
 					logic [31:0] v;
-					v = sq_byte == 0 ? 32'h0 : gx(seq_rs, gr_s);
+					v = sq_byte == 0 ? 32'h0 : gxc(seq_rs, gr_s);
 					v[31 - 8 * sq_byte -: 8] = d_rdata[7:0];
 					wg(sq_reg, v);
 					sq_byte <= sq_byte + 2'd1;
@@ -1659,7 +2211,7 @@ module ppc_pipe #(
 					logic [31:0] v;
 					byte_n = sq_byte + 2'd1;
 					reg_n = sq_byte == 2'd3 ? sq_reg + 5'd1 : sq_reg;
-					v = gx(seq_rs, gr_s);
+					v = gxc(seq_rs, gr_s);
 					sq_wdata <= {56'h0, v[31 - 8 * byte_n -: 8]};
 					sq_byte <= byte_n;
 					sq_reg <= reg_n;

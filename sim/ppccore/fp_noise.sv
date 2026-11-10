@@ -34,11 +34,12 @@ module fp_noise (
 	wire slow = op == F_DIVS || op == F_RSQRTE;
 
 	logic ok, go, f_mine;
-	logic [2:0] bw;
+	logic [2:0] bw, fe, fw;
 	// verilator lint_off PINCONNECTEMPTY
-	ppc_fpp_ctl ctl (
-		.clk, .rst, .allow(res.allow[1]), .res_a(res.res_a), .res_s(res.res_s), .res_w(res.res_w), .issue(go && !slow), .op,
-		.rd(x[16:12]), .rb(x[21:17]), .ok, .dok(), .busy(), .bw, .pe(), .pw(), .pn(), .lb()
+	ppc_fps_ctl ctl (
+		.clk, .rst, .allow(res.allow[1]), .res_a(res.res_a), .res_s(res.res_s), .res_w(res.res_w),
+		.issue(go && !slow), .pk(fpk_s(op)), .rd(x[16:12]), .ra(x[56:52]), .rb(x[21:17]), .rc(x[61:57]), .ok, .dok(), .busy(), .bw, .fe, .fw, .pe(), .pw(), .pn(),
+		.lb()
 	);
 	// verilator lint_on PINCONNECTEMPTY
 	wire busy_burst = x[40:38] != 3'd0;
@@ -49,21 +50,22 @@ module fp_noise (
 		else if (res.fdone && res.fcpu) f_mine <= 1'b0;
 
 	// (operands from a table of a few, to go through the units' cases)
-	logic [63:0] va, vb;
+	logic [31:0] va, vb;
 	always_comb
 	begin
 		case (x[23:22])
-			2'd0: va = 64'h3ff8000000000000;
-			2'd1: va = {x[63:24], x[31:8]};
-			2'd2: va = 64'h0000000000000001;
-			default: va = {x[51:0], x[63:52]};
+			2'd0: va = 32'h3fc00000;
+			2'd1: va = x[55:24];
+			2'd2: va = 32'h00000001;
+			default: va = {x[19:0], x[63:52]};
 		endcase
 		case (x[25:24])
-			2'd0: vb = 64'hc000000000000000;
-			2'd1: vb = {x[47:0], x[63:48]};
-			2'd2: vb = 64'h7ff8000000000000;
-			default: vb = {x[35:0], x[63:36]};
+			2'd0: vb = 32'hc0000000;
+			2'd1: vb = {x[15:0], x[63:48]};
+			2'd2: vb = 32'h7fc00000;
+			default: vb = {x[3:0], x[63:36]};
 		endcase
 	end
-	assign req = '{go && !slow, go && slow, op, x[27:26], va, vb, {va[31:0], vb[63:32]}, x[16:12], bw};
+	assign req = '{go && !slow, go && slow, op, x[27:26], va, vb, {va[15:0], vb[31:16]}, x[16:12], bw, fe, fw,
+		!rst && busy_burst && x[4]};
 endmodule

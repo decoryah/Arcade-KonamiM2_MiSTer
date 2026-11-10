@@ -22,4 +22,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_te.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_dspp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_cdda.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_bda.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_prof.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_boot.sv

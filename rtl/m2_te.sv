@@ -190,11 +190,15 @@ module m2_te (
 	// a texture load streams: lines asked for ahead of what's taken, a word a clock when they keep up. A beat's readable the clock after next
 	logic [26:0] ms_a;
 	logic [28:0] ms_left;               // bytes still to ask for, from the first line's start
+	logic        ms_more;               // some (ms_left above 0: set with it, so the memory request doesn't wait on the compare)
 	logic [4:0]  ms_req, ms_wp, ms_wpd, ms_rp;
 	logic [1:0]  ms_skip;               // beats of the first line before the source
-	wire         ms_more = !ms_left[28] && ms_left != 29'd0;
+	wire [28:0]  ml_ld = 29'(tm_count[27:0]) + 29'(tm_src[4:0]), ml_dn = ms_left - 29'd32;
 	wire [4:0]   ms_out = ms_req - ms_rp;
 	wire         ms_rd = st == T_MM && ms_more && ms_out <= 5'd12 && !m_owned;   // (a write-back asking waits for the load: m_other)
+`ifdef VERILATOR
+	always_ff @(posedge clk) if (ms_more != (!ms_left[28] && ms_left != 29'd0)) $display("TE ms_more wrong");
+`endif
 	wire         ms_have = ms_wpd != ms_rp;
 	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have;
 	// (a whole word in one clock, when source and place are in step and it's the texture memory)
@@ -276,15 +280,13 @@ module m2_te (
 		v = 14'(m >> (8'd150 - e));
 		return f[31] ? -$signed(v) : $signed(v);
 	endfunction
-	function automatic logic [31:0] itof(input logic signed [29:0] i);
-		// exact below 2^24, then to nearest, ties to even
-		logic [29:0] u, s;
+	function automatic logic [31:0] utof(input logic neg, input logic [29:0] u);
+		// a sign and magnitude's (not 0); exact below 2^24, then to nearest, ties to even
+		logic [29:0] s;
 		logic [4:0] n;
 		logic [24:0] m;
 		logic [7:0] e;
 		logic rnd;
-		if (i == 30'sh0) return 32'h0;
-		u = i < 0 ? 30'(-i) : 30'(i);
 		n = 5'd0;
 		for (int b = 0; b < 30; b++) if (u[b]) n = 5'(b);
 		s = u << (5'd29 - n);
@@ -292,7 +294,10 @@ module m2_te (
 		m = {1'b0, s[29:6]} + 25'(rnd);
 		e = 8'd127 + 8'(n);
 		if (m[24]) begin e = e + 8'd1; m = m >> 1; end
-		return {i < 0, e, m[22:0]};
+		return {neg, e, m[22:0]};
+	endfunction
+	function automatic logic [31:0] itof(input logic signed [29:0] i);
+		return i == 30'sh0 ? 32'h0 : utof(i < 0, i < 0 ? 30'(-i) : 30'(i));
 	endfunction
 
 	// ---- vertices: 3 of 16: 2-5 r g b a (scaled, whole), 6 w, 7 uw, 8 vw. X, Y and W's exponent are registers --------------
@@ -322,6 +327,8 @@ module m2_te (
 	logic [1:0]  v_top, v_mid, v_bot;
 	logic [1:0]  wrange;
 	logic signed [29:0] aria;
+	logic [29:0] ar_u;                      // |aria|, and its sign, for its float a clock later
+	logic        ar_n;
 	logic        scan_lr;
 	logic [31:0] fa_aria;
 	logic signed [13:0] fc_c;
@@ -1225,7 +1232,7 @@ module m2_te (
 				begin
 					st <= regs_end ? I_AFTER : I_REGS;
 					mm_src <= tm_src; mm_dst <= tm_lod0[13:0]; mm_n <= tm_count[27:0];
-					ms_a <= tm_src[31:5]; ms_left <= 29'(tm_count[27:0]) + 29'(tm_src[4:0]); ms_skip <= tm_src[4:3];
+					ms_a <= tm_src[31:5]; ms_left <= ml_ld; ms_more <= !ml_ld[28] && ml_ld != 29'd0; ms_skip <= tm_src[4:3];
 					ms_req <= 5'd0; ms_wp <= 5'd0; ms_wpd <= 5'd0; ms_rp <= 5'd0;
 					ms_arm <= tm_src[1:0] != 2'd0;
 					if (tm_ldcntl[9:8] == 2'd1)
@@ -1247,7 +1254,7 @@ module m2_te (
 					if (ms_rd && !m_busy)
 					begin
 						ms_a <= ms_a + 27'd1;
-						ms_left <= ms_left - 29'd32;
+						ms_left <= ml_dn; ms_more <= !ml_dn[28] && ml_dn != 29'd0;
 						ms_req <= ms_req + 5'd4;
 					end
 					if (mm_n == 28'd0 && !ms_more && ms_req == ms_wp) st <= regs_end ? I_AFTER : I_REGS;
@@ -1381,20 +1388,23 @@ module m2_te (
 						4'd1: begin mx_a <= 18'(x2); mx_b <= 18'(y31); end
 						4'd2: begin mx_a <= 18'(x3); mx_b <= 18'(y12); aria <= 30'(mx_r); end
 						4'd3, 4'd4: aria <= aria + 30'(mx_r);
+						4'd5:
+						begin
+							// (the magnitude a clock before the float: the negation was much of a long path)
+							ar_u <= aria < 0 ? 30'(-aria) : 30'(aria);
+							ar_n <= aria < 0;
+							scan_lr <= aria > 0;
+							if (aria == 30'sh0) st <= E_NEXT;
+						end
 						default:
 						begin
-							if (aria == 30'sh0) st <= E_NEXT;
-							else
-							begin
-								fa_aria <= itof(aria);
-								scan_lr <= aria > 0;
-								fd_i <= 5'd0;
-								fd_r <= 26'h0800000;
-								fd_q <= 27'd0;
-								fd_run <= 1'b1;
-								div_i <= 2'd0;
-								st <= S_DIV0;
-							end
+							fa_aria <= utof(ar_n, ar_u);
+							fd_i <= 5'd0;
+							fd_r <= 26'h0800000;
+							fd_q <= 27'd0;
+							fd_run <= 1'b1;
+							div_i <= 2'd0;
+							st <= S_DIV0;
 						end
 					endcase
 				end
@@ -1907,8 +1917,10 @@ module te_cache (
 	wire  [50:0] t2_q = t2_f ? t_wr : t2_m;
 	wire  [50:0] t3_q = t3_f ? t_wr : t3_m;
 	wire  [15:0] r_t = r_a[27:12], w_t = w_a[27:12];
-	wire         r_hit = t1_q[18] && t1_q[17] && t1_q[15:0] == r_t;
-	wire         w_hit = t2_q[18] && t2_q[15:0] == w_t;
+	// (each port's compares on the RAM's word and on the word just written, the choice after them: the RAM's word is late,
+	// and its hit goes on to the stalls and everything they hold)
+	wire         r_hit = t1_f ? t_wr[18] && t_wr[17] && t_wr[15:0] == r_t : t1_m[18] && t1_m[17] && t1_m[15:0] == r_t;
+	wire         w_hit = t2_f ? t_wr[18] && t_wr[15:0] == w_t : t2_m[18] && t2_m[15:0] == w_t;
 	wire         idle = st == C_IDLE;
 
 	// the write-back: a dirty line goes to memory from its own read of the data while the pixels go on. It's the line after the one
@@ -1944,7 +1956,7 @@ module te_cache (
 	te_ram #(.W(64), .AW(6)) q_data (.clk, .we(b_go), .wa({q_wp, b_n}), .wd(d2_q), .re(1'b1), .ra({q_rp, q_n + 2'(q_go)}), .rd(q_d));
 	te_ram #(.W(55), .AW(4)) q_meta (.clk, .we(q_push), .wa(q_wp), .wd({b_t, b_i, b_mask}), .re(1'b1), .ra(q_rp), .rd(q_m));
 	// (a write takes a line that nothing needs at once: a clean one's just replaced)
-	wire         w_clean = !(t2_q[18] && t2_q[16]);
+	wire         w_clean = t2_f ? !(t_wr[18] && t_wr[16]) : !(t2_m[18] && t2_m[16]);
 	wire         w_ok = idle && (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i);
 	assign r_stall = r_v && !(idle && r_hit);
 	assign       w_stall = w_v && !w_done && !w_ok;
@@ -2413,19 +2425,27 @@ module te_fadd (
 	wire         bs = b[31] ^ sub;
 	wire         swap = b[30:0] > a[30:0];
 	wire  [7:0]  el = swap ? b[30:23] : a[30:23];
-	wire  [7:0]  es = swap ? a[30:23] : b[30:23];
 	wire  [22:0] fl = swap ? b[22:0] : a[22:0];
-	wire  [22:0] fs = swap ? a[22:0] : b[22:0];
 	wire         sl = swap ? bs : a[31];
 	wire         ss = swap ? a[31] : bs;
-	wire  [7:0]  d = el - es;
-	wire  [26:0] ms = es == 8'd0 ? 27'd0 : {1'b1, fs, 3'b000};
-	// (with a sticky bit)
-	logic [26:0] msd;
+	// the smaller one aligned, with a sticky bit: which is shifted and by how much from the exponents alone (swap only
+	// chooses when they're the same, unshifted), the sticky bit from the bits a mask says are shifted out (from swap
+	// through the exponents' difference and two shifts was a long path)
+	wire  [7:0]  ea = a[30:23], eb = b[30:23];
+	wire         e_b = eb > ea;
+	wire  [7:0]  d = e_b ? eb - ea : ea - eb;
+	wire  [26:0] ma = ea == 8'd0 ? 27'd0 : {1'b1, a[22:0], 3'b000};
+	wire  [26:0] mb = eb == 8'd0 ? 27'd0 : {1'b1, b[22:0], 3'b000};
+	wire  [26:0] ms = e_b ? ma : mb;
 	wire  [26:0] mst = ms >> d[4:0];
+	logic [26:0] msk, msd;
 	always_comb
-		if (d >= 8'd27) msd = 27'(ms != 27'd0);
-		else msd = {mst[26:1], mst[0] | ((mst << d[4:0]) != ms)};
+	begin
+		for (int i = 0; i < 27; i++) msk[i] = 5'(i) < d[4:0];
+		if (ea == eb) msd = swap ? ma : mb;
+		else if (d >= 8'd27) msd = 27'(ms != 27'd0);
+		else msd = {mst[26:1], mst[0] | ((ms & msk) != 27'd0)};
+	end
 
 	logic [26:0] p1_l, p1_s;
 	logic [7:0]  p1_e;

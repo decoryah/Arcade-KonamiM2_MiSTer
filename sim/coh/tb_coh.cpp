@@ -5,6 +5,8 @@
 //   - a reader's values of a word never go back;
 //   - a load or fetch whose address clock is STALE clocks after DDR3 took a write reads that write or a later one.
 // So a line kept after another master wrote it, a line refilled with older data, and a lost invalidate are all caught.
+// The data sides are driven as rtl/ppc_pipe.sv does: up to two accesses out, a new one asked for in the clock an answer
+// comes, and now and then a load dropped (d_kill) in its address clock.
 #include "Vcoh_top.h"
 #include "verilated.h"
 #include <cstdint>
@@ -18,11 +20,12 @@
 static const int STALE = 5;
 static const int NWORDS = 64;
 
-// addresses: lines 8 KB apart share an index; a few of them and their neighbours
+// addresses: lines 16 KB apart share a data index (ppc_cache's ways), 32 KB apart an instruction one; four lines on each
+// of two data indexes, so the two ways are always evicting
 static uint32_t word_addr(int w)
 {
 	int line = w / 8, off = w % 8;
-	return 0x40000000u + ((line % 4) * 32) + (line / 4) * 0x2000u + off * 4;
+	return 0x40000000u + ((line % 2) * 32) + (line / 2) * 0x4000u + off * 4;
 }
 static int writer_of(int w) { return (w + 1) / 2 % 3; }   // 0, 1: the caches; 2: the DMA (an odd word's next is the same one's)
 
@@ -56,11 +59,11 @@ int main(int argc, char **argv)
 		while (taken[w].size() > 8 && taken[w][1].t + STALE <= at) taken[w].pop_front();
 		return v;
 	};
-	auto check = [&](int c, int side, int w, uint32_t val, uint64_t at, bool writer_own) {
+	auto check = [&](int c, int side, int w, uint32_t val, uint64_t at, bool writer_own, uint32_t ownv) {
 		uint32_t a = word_addr(w);
-		if (writer_own && val != own[w])
+		if (writer_own && val != ownv)
 		{
-			printf("clock %llu: cache %d's own load of %08X read %u, it wrote %u\n", (unsigned long long)now, c, a, val, own[w]);
+			printf("clock %llu: cache %d's own load of %08X read %u, it wrote %u\n", (unsigned long long)now, c, a, val, ownv);
 			errors++;
 		}
 		if (val < floor_[c][side][w])
@@ -78,8 +81,11 @@ int main(int argc, char **argv)
 		}
 	};
 
-	// each side's request state
-	struct dside { bool aph = false, out = false, we = false; int w = 0; uint64_t at = 0; int pending = 0; uint32_t pa = 0; int size = 4; uint64_t wdata = 0; bool cross = false; bool kill = false; } ds[2];
+	// each side's request state: the data side's accesses out (two at most, answered in order; a load's ownv is what its
+	// cache last wrote to the word before it), and the last one taken, whose signals the core drives until it takes the
+	// next (d_kill only in its address clock: now and then a load's, which then isn't answered)
+	struct dacc { bool we = false; int w = 0; uint64_t at = 0; uint32_t pa = 0; int size = 4; uint64_t wdata = 0; uint32_t ownv = 0; };
+	struct dside { bool aph = false, kill = false; dacc cur; std::deque<dacc> out; } ds[2];
 	struct iside { bool aph = false; int w = 0; uint64_t at = 0; uint32_t pa = 0; bool kill = false; } is[2];
 
 	t.rst = 1; t.clk = 0;
@@ -103,15 +109,12 @@ int main(int argc, char **argv)
 		uint8_t ifr = 0, drq = 0, ifk = 0, dk = 0, dwe = 0;
 		for (int c = 0; c < 2; c++)
 		{
-			// the address clocks
-			if (ds[c].aph)
-			{
-				t.d_pa[c] = ds[c].pa;
-				t.d_size[c] = ds[c].size;
-				t.d_wdata[c] = ds[c].wdata;
-				if (ds[c].we) dwe |= 1 << c;
-				if (ds[c].kill) dk |= 1 << c;
-			}
+			// the last access taken (in its address clock, or after)
+			t.d_pa[c] = ds[c].cur.pa;
+			t.d_size[c] = ds[c].cur.size;
+			t.d_wdata[c] = ds[c].cur.wdata;
+			if (ds[c].cur.we) dwe |= 1 << c;
+			if (ds[c].aph && ds[c].kill) dk |= 1 << c;
 			if (is[c].aph)
 			{
 				t.if_pa[c] = is[c].pa;
@@ -125,10 +128,8 @@ int main(int argc, char **argv)
 		static bool d_next_we[2], d_next_cross[2];
 		for (int c = 0; c < 2; c++)
 		{
-			if (!ds[c].out && !ds[c].aph ? true : ds[c].aph)
-			{
-				// (may ask while an address clock is on, if the core-side says it's ready: the contract's next access)
-			}
+			// another access if that leaves two out at most after this clock's answer (none in a kill's clock)
+			bool can = !(ds[c].aph && ds[c].kill) && int(ds[c].out.size()) - int(t.d_valid >> c & 1) < 2;
 			int r = rng() % 16;
 			int w = rng() % NWORDS;
 			// bias to the words nearby the last, so hits happen
@@ -137,7 +138,7 @@ int main(int argc, char **argv)
 			d_next_w[c] = w;
 			d_next_we[c] = writer_of(w) == c && rng() % 2;
 			d_next_cross[c] = d_next_we[c] && rng() % 16 == 0 && (word_addr(w) & 4) && w + 1 < NWORDS && word_addr(w + 1) == word_addr(w) + 4 && writer_of(w + 1) == c;
-			if (r < 12 && !ds[c].out) drq |= 1 << c;
+			if (r < 12 && can) drq |= 1 << c;
 			t.d_va[c] = word_addr(w);
 
 			int fw = rng() % NWORDS;
@@ -173,16 +174,23 @@ int main(int argc, char **argv)
 			if ((t.if_valid >> c & 1) && is[c].aph && !is[c].kill)
 			{
 				fetches++;
-				check(c, 1, is[c].w, t.if_data[c], is[c].at, false);
+				check(c, 1, is[c].w, t.if_data[c], is[c].at, false, 0);
 			}
-			if ((t.d_valid >> c & 1) && ds[c].out)
+			if (t.d_valid >> c & 1)
 			{
-				if (!ds[c].we)
+				if (ds[c].out.empty())
+				{
+					printf("clock %llu: cache %d answered with no access out\n", (unsigned long long)now, c);
+					errors++;
+					continue;
+				}
+				dacc a = ds[c].out.front();
+				ds[c].out.pop_front();
+				if (!a.we)
 				{
 					loads++;
-					check(c, 0, ds[c].w, uint32_t(t.d_rdata[c]), ds[c].at, writer_of(ds[c].w) == c);
+					check(c, 0, a.w, uint32_t(t.d_rdata[c]), a.at, writer_of(a.w) == c, a.ownv);
 				}
-				ds[c].out = false;
 			}
 		}
 
@@ -225,13 +233,17 @@ int main(int argc, char **argv)
 				is[c].pa = word_addr(i_next_w[c]);
 				is[c].kill = false;
 			}
-			if (ds[c].aph) ds[c].aph = false;
+			if (ds[c].aph)
+			{
+				if (ds[c].kill) ds[c].out.pop_back();
+				ds[c].aph = false;
+			}
 			if ((t.d_req >> c & 1) && dok)
 			{
 				int w = d_next_w[c];
-				auto &d = ds[c];
-				d.aph = true; d.out = true; d.w = w; d.at = now + 1; d.pa = word_addr(w); d.size = 4; d.we = d_next_we[c];
-				d.kill = false;
+				dacc d;
+				d.w = w; d.at = now + 1; d.pa = word_addr(w); d.size = 4; d.we = d_next_we[c];
+				if (!d.we) d.ownv = own[w];
 				if (d.we)
 				{
 					uint32_t v = next[w]++;
@@ -246,6 +258,15 @@ int main(int argc, char **argv)
 						d.wdata = uint64_t(v) << 32 | v2;
 					}
 					stores++;
+				}
+				ds[c].cur = d;
+				ds[c].out.push_back(d);
+				ds[c].aph = true;
+				ds[c].kill = !d.we && rng() % 16 == 0;
+				if (ds[c].out.size() > 2)
+				{
+					printf("clock %llu: cache %d took a third access\n", (unsigned long long)now, c);
+					errors++;
 				}
 			}
 		}

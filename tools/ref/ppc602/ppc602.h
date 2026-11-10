@@ -13,6 +13,8 @@
 //   * floats are x86 SSE's (MAME's x64 back end): denormals kept (no FTZ / DAZ), a NaN operand comes back quieted (the
 //     first if both), an invalid operation gives the default NaN 0xfff8000000000000;
 //   * fneg, fmr, fabs, fnabs, fctiw[z] and fsel leave CR1 alone even with Rc.
+// With sp and fpu_exc (sim/ppccore's pipeline bench) it follows the RTL's pipeline instead, which has the 602's single-
+// precision FPRs and its FP-unavailable exception.
 // MAME skips CR0 / XER[CA] updates no later instruction reads; this model always makes them (see the replay bench).
 // FPSCR is kept only as far as the move-to / move-from instructions and the rounding mode need.
 #pragma once
@@ -38,7 +40,7 @@ class ppc602
 public:
 	enum
 	{
-		EX_NONE = 0, EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_ALIGN = 6, EX_PROGRAM = 7, EX_DECREMENT = 9, EX_SYSCALL = 12,
+		EX_NONE = 0, EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_ALIGN = 6, EX_PROGRAM = 7, EX_FPU = 8, EX_DECREMENT = 9, EX_SYSCALL = 12,
 		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18
 	};
 
@@ -77,6 +79,18 @@ public:
 	uint64_t timebase = 0;
 	uint32_t decrementer = 0;
 	bool timer_read = false;    // set when the last instruction read TB or DEC
+
+	// as the RTL's float pipeline (rtl/ppc_fpu_pkg.sv's rnd_sd): fadds, fsubs, fmuls and the single multiply-adds give a
+	// zero for a result under the single normals, where MAME gives a single denormal
+	bool single_ftz = true;
+
+	// as the RTL's pipeline has them (rtl/ppc_fps.sv, rtl/ppc_pipe.sv): the 602's single-precision FPRs (sp: f holds each as
+	// stfd stores it, the double of the single, or an integer's word with its bit in fint, the 602's LT bit; the arithmetic is
+	// the unit's, fused, a NaN its own) and the FP-unavailable exception (fpu_exc: a float instruction with MSR[FP] clear)
+	bool sp = false;
+	bool fpu_exc = false;
+	uint32_t fint = 0;
+	void sp_canon();            // sp: each FPR as lfd (and the RTL's debug write) takes it
 
 	// reservation (lwarx / stwcx.)
 	bool reserved = false;
@@ -133,6 +147,16 @@ private:
 	double fd(int n) const;
 	void setfd(int n, double v);
 	void fp_cr1(uint32_t op);
+	uint32_t fs(int n) const;   // sp: an FPR's 32 bits
+	void setfs(int n, uint32_t v);
+	void setfi(int n, uint32_t v);
+	void setf33(int n, uint64_t v);
+	void ld_fs(int n, uint32_t v);
+	void ld_fd(int n, uint64_t v);
+	uint32_t st_fs(int n);
+	uint32_t st_fiw(int n);
+	void sp_a(uint32_t op);
+	void sp_x(uint32_t op);
 
 	uint32_t mfspr(uint32_t n);
 	void mtspr(uint32_t n, uint32_t v);

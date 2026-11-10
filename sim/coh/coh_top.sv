@@ -65,7 +65,7 @@ module coh_top (
 			.d_mem(1'b1), .d_cacheable(1'b1), .d_writable(1'b1),
 			.u_req(), .u_pa(), .u_we(), .u_size(), .u_wdata(), .u_ack(1'b0), .u_rdata(64'h0),
 			.mem_rd(c_rd[g]), .mem_we(c_we[g]), .mem_a(c_a[g]), .mem_burst(c_burst[g]), .mem_wd(c_wd[g]), .mem_be(c_be[g]),
-			.mem_busy(c_busy[g]), .mem_ready(c_ready[g]), .mem_dout(ddr_dout)
+			.mem_busy(c_busy[g]), .mem_ready(c_ready[g]), .mem_dout(ddr_dout), .pf()
 		);
 		// verilator lint_on PINCONNECTEMPTY
 	end

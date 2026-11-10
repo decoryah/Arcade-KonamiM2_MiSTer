@@ -15,14 +15,14 @@ The title screen and stage 1, from MAME 0.289.
 
 No ROMs or CD images are in this repository; you supply your own MAME set.
 
-**Status.** Plays on a real MiSTer: the owner has run the attract mode for 90 minutes and played games, with its music and sound
-effects throughout. **Gameplay runs at about 83 % of the real board's speed**, and the game slows with it: the attract mode's gameplay
-demo, from STAGE 1 START to the first OPTION x2, takes 102.9 s against 85.0 s in a video of the real board. The title and intro scenes run
-at the real board's pace. Built with Quartus 17.0: 41,451 of 41,910 ALMs (99 %), timing 0.362 ns short on the machine's clock and met on the HDMI clock.
+**Status.** Plays on a real MiSTer: the owner has played the whole game through, more than once, with its music and sound effects.
+**Gameplay runs at full speed:** stage 3, timed against a video of the real board, takes 154.8 s where the board takes 173.6 s (112 %
+of its speed; 110 % before the lava, 133 % in it, 106 % after). Where the real board slows down, the core slows down less. Built with
+Quartus 17.0: 36,562 of 41,910 ALMs (87 %), timing met on every clock (+1.592 ns on the machine's, +0.221 ns on HDMI's).
 
 | Game | Set | On this core |
 |---|---|---|
-| Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, about 83 % of full speed in gameplay |
+| Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, at full speed |
 | Total Vice (ver EBA, 1997) | `totlvice` | planned |
 | Evil Night / Hell Night (1998) | `evilngt`, `hellngt` | planned |
 | Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not working in MAME 0.289, not planned |
@@ -33,7 +33,7 @@ at the real board's pace. Built with Quartus 17.0: 41,451 of 41,910 ALMs (99 %),
 
 1. Unzip `KonamiM2_MiSTer_<date>.zip` (`tools/package.py` writes it to `dist/`) over the root of the SD card (`/media/fat/`): the core goes
    to `_Arcade/cores/`, `Tobe! Polystars (ver JAA).mra` to `_Arcade/`. By hand from the repository: `releases/KonamiM2_<date>.rbf` to
-   `_Arcade/cores/`, the contents of `mra/` to `_Arcade/`.
+   `_Arcade/cores/`, `mra/Tobe! Polystars (ver JAA).mra` to `_Arcade/`.
 2. Make the disc's images from your MAME set's `623jaa02.chd` (`polystar/623jaa02.chd`), in either of these ways:
 
    - **In a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/) and download the
@@ -48,14 +48,24 @@ at the real board's pace. Built with Quartus 17.0: 41,451 of 41,910 ALMs (99 %),
      ```
 
      The first makes the whole disc, for the music (`polystar_full.bin`, 546 MB, with its `.cue`); the second its data track (`polystar_cd.bin`, 24 MB).
-3. Put the files on the SD card:
+3. Repair the music with this repository's `tools/cdfix.py` (Python 3, nothing else needed):
+
+   ```
+   python3 tools/cdfix.py polystar_full.bin
+   ```
+
+   MAME marks `623jaa02.chd` as a bad dump: its music has 28 stretches of 0.35 s of silence, where the ripper's reads failed, 16 of
+   them in the stage 7 boss's music. On the board they're short gaps in the music. The tool fills each from the same music
+   elsewhere in its track (the music repeats), in place. It checks the file first, and leaves alone one that isn't this image or
+   is already repaired. The tool holds only positions; all the audio comes from your image.
+4. Put the files on the SD card:
 
    | File | Goes in |
    |---|---|
    | `polystar.zip` (your MAME 0.289 set) and `polystar_cd.zip` | `/media/fat/games/mame/` |
    | `polystar_full.bin` and `polystar_full.cue` | `/media/fat/games/polystar/` |
 
-4. Start `Tobe! Polystars (ver JAA)` from the Arcade menu. Once, open the OSD and choose `polystar_full.bin` under *CD audio image*; Main
+5. Start `Tobe! Polystars (ver JAA)` from the Arcade menu. Once, open the OSD and choose `polystar_full.bin` under *CD audio image*; Main
    remembers it and mounts it at each start. (The MRA also asks for it, but Main releases up to 20261010 don't act on that.)
    Without it the game runs without its music.
 
@@ -77,8 +87,8 @@ is opened, and loads at the next start.
 
 ## Known limits
 
-- About 83 % of the real board's speed in gameplay.
-- No CRT Adjust: the chip has no room for it now.
+- Where the real board slows down, the core slows down less (above).
+- No CRT Adjust yet.
 - Only Tobe! Polystars is supported (the table above). Total Vice (ver EBA) and Evil Night / Hell Night are planned; they work in
   MAME, and may need more of the board, such as Evil Night's light guns.
 - The 3DO M2's MPEG video decoder isn't in the core. No Konami M2 game is known to need it: MAME has only an empty stand-in for it
@@ -89,10 +99,10 @@ is opened, and loads at the next start.
 - From power-on, in simulation (`sim/m2boot`), the machine loads the OS from the CD image and shows the same boot checks and title
   screen as MAME.
 - The Triangle Engine's writes are the same as MAME's, byte for byte, on the lists dumped from the game (`sim/te`).
-- The CPUs against MAME's instruction traces (`sim/ppcreplay`), the caches' coherence (`sim/coh`).
-- On a real MiSTer, HDMI and a Sony CRT: the attract mode for 60 minutes, then a game.
-
-Not checked: stages beyond those played, and a whole game to its end.
+- The CPUs against MAME's instruction traces (`sim/ppcreplay`) and against a reference model with random programs and interrupts
+  (`sim/ppccore`), the caches' coherence (`sim/coh`).
+- On a real MiSTer, HDMI and a Sony CRT: the attract mode for 60 minutes; the whole game played through, with the repaired disc
+  image without a gap in the music.
 
 The plan and how the machine is built are in [docs/design.md](docs/design.md); what is known of the hardware is in
 [docs/hardware.md](docs/hardware.md).
@@ -134,6 +144,8 @@ or from a given frame, for `sim/ppcreplay`; how to run it is at the top of the s
 
 * **MAME**: the konamim2 driver and the 3DO M2 devices (`3dom2.cpp`, `3dom2_te.cpp`; Phil Bennett), the PowerPC core (Aaron Giles,
   R. Belmont; `tools/ref/`'s reference model follows it), the CD drive; the hardware knowledge and the reference for every comparison.
+* tallendorf: the single-precision float units and the FP-unavailable exception, triangle engine and DSP fixes, Heat of Eleven's
+  build, `tools/cdimage.py`'s older CHDs.
 * The owner's Gaelco 3D core: the platform layer, the way each block is checked, the benches and the release packaging.
 * The MiSTer framework (Sorgelig and contributors).
 

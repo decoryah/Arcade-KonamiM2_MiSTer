@@ -1,9 +1,9 @@
 #!/bin/bash
-# run.sh [cases] [steps] [seed] [lat]: builds the PPC602 core bench in WSL (~/build_m2/ppccore) and runs random programs on
+# run.sh [cases] [steps] [seed] [lat] [irq]: builds the PPC602 core bench in WSL (~/build_m2/ppccore) and runs random programs on
 # the RTL core and on the reference model (tools/ref/ppc602). PIPE=1: the pipeline (rtl/ppc_pipe.sv; ~/build_m2/ppccore_pipe),
-# with random memory delays if lat is 1.
+# with random memory delays if lat is 1, and random external interrupts if irq is 1.
 set -e
-R=/mnt/c/repos/konamim2-mister/mister
+R=${R:-/mnt/c/repos/konamim2-mister/mister}
 export PATH=~/tools/oss-cad-suite/bin:$PATH
 # CACHE=1 too: with its caches (rtl/ppc_cache.sv; ~/build_m2/ppccore_cache).
 EXTRA=
