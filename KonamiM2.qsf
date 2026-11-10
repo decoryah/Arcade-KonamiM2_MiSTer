@@ -59,11 +59,11 @@ set_global_assignment -name SEED 4
 #do not enable DEBUG_NOHDMI in release!
 #set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
-# Heat of Eleven's build: its Low Res draws 640 x 240, so 38 blocks of Z, with the small memories out of block RAM to pay for them, and a seed that routes it (2; 11 misses the HDMI clock).
+# Heat of Eleven's build: its Low Res draws 640 x 240, so 38 blocks of Z, with the small memories out of block RAM to pay for them, and a seed that routes it (4; 2 meets timing but a TV showed no picture over HDMI, 11 misses the HDMI clock).
 # Its RBF goes in _Arcade/cores as KonamiM2Heat_<date>.rbf, the name its MRA asks for (a KonamiM2_... name would also be found by the other MRAs' "KonamiM2")
 #set_global_assignment -name VERILOG_MACRO "Z_BLOCKS=38"
 #set_global_assignment -name VERILOG_MACRO "SMALL_MEMS=1"
-#set_global_assignment -name SEED 2
+#set_global_assignment -name SEED 4
 
 # The CPUs' caches, KB a side (rtl/m2_boot.sv): 4 is the 602's own (the real board's speed and slowdowns, and much less block RAM);
 # without it, 32
