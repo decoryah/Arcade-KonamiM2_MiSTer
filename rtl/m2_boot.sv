@@ -550,13 +550,19 @@ module m2_boot #(
 			audio_r <= mix_ymz(mix0_r, ymz_r);
 		end
 	end
+	// (the CD's data sectors streamed from the mounted image: only in a build with CD_STREAM, for its read-ahead ring's 32 KB of block RAM)
+`ifdef CD_STREAM
+	wire         ata_stream = cd_stream && cd_mounted;
+`else
+	wire         ata_stream = 1'b0;
+`endif
 	m2_atapi cd
 	(
 		.clk, .rst,
 		.a(u_pa[4:1]), .re(u_req && !u_we && u_ata), .we(u_req && u_we && u_ata), .wd(u_wdata[15:0]), .rd(atapi_rd), .intrq(cd_int),
 		.ata_rd(cd_rd), .ata_valid(cd_valid), .ata_d(cd_d),
 		.m_rd(ata_m_rd), .m_a(ata_m_a), .m_busy(ata_m_busy), .m_ready(ata_m_ready), .m_dout(ddr_dout),
-		.stream(cd_stream && cd_mounted), .sd_lba(ata_sd_lba), .sd_rd(ata_sd_rd), .sd_ack(sd_ack && sd_own == 2'd2), .sd_wr(sd_wr && sd_own == 2'd2), .sd_d,
+		.stream(ata_stream), .sd_lba(ata_sd_lba), .sd_rd(ata_sd_rd), .sd_ack(sd_ack && sd_own == 2'd2), .sd_wr(sd_wr && sd_own == 2'd2), .sd_d,
 		.play(cd_play), .play_stop(cd_stop), .play_lba(cd_lba), .play_len(cd_len), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
 		.paused(cd_paused), .vol_l(cd_vol_l), .vol_r(cd_vol_r)
 	);

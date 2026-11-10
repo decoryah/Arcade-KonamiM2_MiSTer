@@ -125,7 +125,11 @@ module m2_atapi #(
 	logic [55:0]   s_w;
 	logic [7:0]    cq;
 	wire           c_we = g_st == G_DATA && sd_wr && !g_n[12] && !g_drop;
+`ifdef CD_STREAM
 	ppc_ram #(.W(8), .AW(CW)) cache (.clk, .we(c_we), .wa(g_wa), .wd(sd_d), .ra(s_r), .rd(cq));
+`else
+	assign cq = 8'h00;              // (no ring: stream is 0 in such a build, rtl/m2_boot.sv)
+`endif
 	wire           s_take = f_st == F_COPY && s_rv;
 	// a fetch starts this clock (F_CHK's restart must count it as on its way: it's for the ring's old place)
 	wire           g_go = g_st == G_IDLE && stream && c_v && !playing && c_fill <= (CW + 1)'(2 ** CW - 4096);

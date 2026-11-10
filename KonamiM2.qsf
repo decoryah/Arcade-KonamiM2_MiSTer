@@ -73,6 +73,7 @@ set_global_assignment -name SEED 4
 # KonamiM2Tryst_<date>.rbf, the name its MRA asks for. It needs the SDRAM board. (Seed 5; 8 also meets timing, 2, 3, 4, 6, 7, 9, 11 don't, most of
 # them short on the SDRAM's read data, from the pins' registers into the Z line)
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
+#set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_TRAP=1"
