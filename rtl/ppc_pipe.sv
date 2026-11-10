@@ -363,6 +363,13 @@ module ppc_pipe #(
 	typedef enum logic [2:0] { MK_LOAD, MK_LFD, MK_LFS, MK_ST, MK_FMOV } mkind_t;
 	logic        m_valid, m_wr_en, m_sext, m_bswap, m_resv;
 	mkind_t      m_kind;
+`ifndef PPC_NO_FPDOUBLE
+	function automatic logic is_lfd(input mkind_t k); return k == MK_LFD; endfunction
+`else
+	// (no lfd then: nothing compares with MK_LFD, which Quartus 17 can't take in m_kind and n_kind, never set to it: a crash
+	// in synthesis, VRFX "orig->HasXZ()")
+	function automatic logic is_lfd(input mkind_t k); return 1'b0; endfunction
+`endif
 	logic [5:0]  m_rd;                  // the physical GPR, or the FPR
 	logic [3:0]  m_size;
 	logic [32:0] m_val;                 // MK_FMOV: the FPR's value
@@ -435,7 +442,7 @@ module ppc_pipe #(
 		m_fv = m_kind == MK_LFS ? {1'b0, d_rdata[31:0]} : m_val;
 `endif
 		m_gw = m_done && m_kind == MK_LOAD && m_wr_en;
-		m_fw = m_done && (m_kind == MK_LFD || m_kind == MK_LFS || m_kind == MK_FMOV);
+		m_fw = m_done && (is_lfd(m_kind) || m_kind == MK_LFS || m_kind == MK_FMOV);
 	end
 	// X's GPRs, read the clock before (gr_a / gr_b / gr_s, for its rA / rB / rS) with what was written since: in that
 	// clock (gw_*: X, DIV, SEQ; gm_*: M's load), the one before (gw2_*: X's, which reach the RAM a clock late), this one
@@ -494,10 +501,10 @@ module ppc_pipe #(
 		return (m_valid && m_kind == MK_LOAD && m_wr_en && m_rd == p) || gpend_n(p);
 	endfunction
 	function automatic logic fpend_n(input logic [4:0] f);
-		return n_valid && (n_kind == MK_LFD || n_kind == MK_LFS) && n_rd[4:0] == f;
+		return n_valid && (is_lfd(n_kind) || n_kind == MK_LFS) && n_rd[4:0] == f;
 	endfunction
 	function automatic logic fpend_m(input logic [4:0] f);
-		return (m_valid && (m_kind == MK_LFD || m_kind == MK_LFS || m_kind == MK_FMOV) && m_rd[4:0] == f) || fpend_n(f);
+		return (m_valid && (is_lfd(m_kind) || m_kind == MK_LFS || m_kind == MK_FMOV) && m_rd[4:0] == f) || fpend_n(f);
 	endfunction
 	function automatic logic fpend_u(input logic [4:0] f);
 		return fpp_pn[f] || (fpu_busy && fpu_rd == f);
