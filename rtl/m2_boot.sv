@@ -395,7 +395,11 @@ module m2_boot #(
 	wire         u_ata = u_pa[31:24] == 8'h3f;
 	wire         u_te = u_pa[31:16] == 16'h0004;
 	wire         u_dsp = u_pa[31:16] == 16'h0006;
+`ifdef MPEG_CTL
 	wire         u_mpg = u_pa[31:16] == 16'h0008;
+`else
+	wire         u_mpg = 1'b0;          // (no MPEG unit in this build: its registers are stubs, as before it had one)
+`endif
 	wire         u_tk = u_pa[31:14] == 18'h0db00;       // 0x36c00000-0x36c03fff
 	wire         u_ymz = u_pa[31:4] == 28'h3e80000;     // 0x3e800000-0x3e80000f: the YMZ280B, on Evil Night's sub board
 	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd, mpg_rd;
@@ -460,13 +464,20 @@ module m2_boot #(
 `else
 	assign rgb = v_rgb;
 `endif
-	// the MPEG unit: its control, no pictures (rtl/m2_mpeg.sv)
+	// the MPEG unit: its control, no pictures (rtl/m2_mpeg.sv); only in a build with MPEG_CTL (Battle Tryst's)
+`ifdef MPEG_CTL
 	m2_mpeg mpeg
 	(
 		.clk, .rst,
 		.a(u_pa[9:2]), .we(u_req && u_we && u_mpg), .wd(u_wdata[31:0]), .rd(mpg_rd), .intr(mpg_int),
 		.m_rd(mpg_m_rd), .m_a(mpg_m_a), .m_busy(mpg_m_busy), .m_ready(mpg_m_ready), .m_dout(ddr_dout)
 	);
+`else
+	assign mpg_rd = 32'h0;
+	assign mpg_int = 1'b0;
+	assign mpg_m_rd = 1'b0;
+	assign mpg_m_a = '0;
+`endif
 	// 44.1 kHz, from 66.67 MHz
 	logic [10:0] dac_n;
 	logic [15:0] dac_l, dac_r;

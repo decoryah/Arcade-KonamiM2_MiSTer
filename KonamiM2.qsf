@@ -74,6 +74,8 @@ set_global_assignment -name SEED 4
 # them short on the SDRAM's read data, from the pins' registers into the Z line)
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
+#set_global_assignment -name VERILOG_MACRO "MPEG_CTL=1"
+#set_global_assignment -name VERILOG_MACRO "TE_COMPRESSED=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_TRAP=1"

@@ -7,6 +7,7 @@ B=${B:-~/build_m2/te}
 if [ -n "$PROF" ]; then B=~/build_m2/te_prof; VFLAGS=--public-flat-rw; CF=-DTE_PROF; fi
 # ZSDRAM=1: the Z buffer in SDRAM (the core's Z_SDRAM), its own build; ZLAT, ZBEAT, ZWR (tb_te.cpp) its timing
 if [ -n "$ZSDRAM" ]; then B=${B}_z; VFLAGS="$VFLAGS +define+Z_SDRAM"; CF="$CF -DZ_SDRAM"; fi
+VFLAGS="$VFLAGS +define+TE_COMPRESSED"   # (compressed TEXLOADs, a build option in the core: Battle Tryst's captures need them)
 mkdir -p $B
 export PATH=~/tools/oss-cad-suite/bin:$PATH
 if [ -z "$NOBUILD" ]; then

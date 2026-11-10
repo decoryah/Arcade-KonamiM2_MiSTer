@@ -108,6 +108,11 @@ module m2_te (
 	// verilator lint_off UNUSEDSIGNAL
 	typedef logic signed [26:0] val_t;
 	localparam int A_R = 0, A_G = 1, A_B = 2, A_A = 3, A_UW = 4, A_VW = 5, A_W = 6;
+`ifdef TE_COMPRESSED
+	localparam bit TXCOMP = 1'b1;       // compressed TEXLOADs (Battle Tryst's build)
+`else
+	localparam bit TXCOMP = 1'b0;       // without TE_COMPRESSED a compressed TEXLOAD isn't decoded, as before there was a decoder
+`endif
 
 	typedef enum logic [6:0] {
 		I_STOP, I_FLUSH, I_FETCH, I_REGS, I_REGW, I_AFTER, T_LOAD, T_MM,
@@ -1548,7 +1553,7 @@ module m2_te (
 					ms_req <= 5'd0; ms_wp <= 5'd0; ms_wpd <= 5'd0; ms_rp <= 5'd0;
 					ms_arm <= tm_src[1:0] != 2'd0;
 					mm_cmp <= 1'b0;
-					if (tm_ldcntl[9:8] == 2'd0 && tm_ldcntl[10] && cx_dbits != 6'd0)
+					if (TXCOMP && tm_ldcntl[9:8] == 2'd0 && tm_ldcntl[10] && cx_dbits != 6'd0)
 					begin
 						// compressed: as many source bytes as it takes (asked for until the texels are done), from bit 0 of the first
 						mm_cmp <= 1'b1;
