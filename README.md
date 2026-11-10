@@ -85,14 +85,14 @@ service coin isn't on a button: Coin does the same.
 The service menu's settings (Free Play and the rest) are kept in the game's EEPROM, which MiSTer saves to `config/nvram/` when the OSD
 is opened, and loads at the next start.
 
-## Known limits
+## Notes
 
-- Where the real board slows down, the core slows down less (above).
-- No CRT Adjust yet.
-- Only Tobe! Polystars is supported (the table above). Total Vice (ver EBA) and Evil Night / Hell Night are planned; they work in
+- **Speed:** where the real board slows down, the core slows down less (above).
+- **Games:** Tobe! Polystars so far (the table above). Total Vice (ver EBA) and Evil Night / Hell Night are planned; they work in
   MAME, and may need more of the board, such as Evil Night's light guns.
-- The 3DO M2's MPEG video decoder isn't in the core. No Konami M2 game is known to need it: MAME has only an empty stand-in for it
-  and runs Polystars, Total Vice and Evil Night without one.
+- **MPEG:** the 3DO M2's MPEG video decoder isn't in the core. No Konami M2 game is known to need it: MAME has only an empty stand-in
+  for it and runs Polystars, Total Vice and Evil Night without one.
+- **CRT Adjust:** not yet.
 
 ## What is verified
 
