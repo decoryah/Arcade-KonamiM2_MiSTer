@@ -289,14 +289,14 @@ module ppc_pipe #(
 		if (o[31:26] == 6'h3b)
 			case (o[5:1])
 				5'h15: d.op = F_ADDS; 5'h14: d.op = F_SUBS; 5'h19: d.op = F_MULS; 5'h12: d.op = F_DIVS;
-				5'h16: d.op = F_SQRTS; 5'h18: d.op = F_RES; 5'h1d: d.op = F_MADDS; 5'h1c: d.op = F_MSUBS;
+				5'h18: d.op = F_RES; 5'h1d: d.op = F_MADDS; 5'h1c: d.op = F_MSUBS;   // (no fsqrts: illegal on the 602, user's manual 4.5.7.2)
 				5'h1f: d.op = F_NMADDS; 5'h1e: d.op = F_NMSUBS;
 				default: d.go = 1'b0;
 			endcase
 		else if (o[31:26] == 6'h3f && o[5])
 			case (o[5:1])
 				5'h15: d.op = F_ADD; 5'h14: d.op = F_SUB; 5'h19: d.op = F_MUL; 5'h12: d.op = F_DIV;
-				5'h16: d.op = F_SQRT; 5'h1a: d.op = F_RSQRTE; 5'h1d: d.op = F_MADD; 5'h1c: d.op = F_MSUB;
+				5'h1a: d.op = F_RSQRTE; 5'h1d: d.op = F_MADD; 5'h1c: d.op = F_MSUB;    // (no fsqrt: illegal)
 				5'h1f: d.op = F_NMADD; 5'h1e: d.op = F_NMSUB;
 				default: d.go = 1'b0;
 			endcase
@@ -751,8 +751,7 @@ module ppc_pipe #(
 		d.fk = fpk_s(d.xf.op);
 		d.madd = d.xf.op == F_MADD || d.xf.op == F_MSUB || d.xf.op == F_NMADD || d.xf.op == F_NMSUB || d.xf.op == F_MADDS ||
 			d.xf.op == F_MSUBS || d.xf.op == F_NMADDS || d.xf.op == F_NMSUBS;
-		d.slow = d.xf.op == F_DIV || d.xf.op == F_DIVS || d.xf.op == F_SQRT || d.xf.op == F_SQRTS || d.xf.op == F_RES ||
-			d.xf.op == F_RSQRTE;
+		d.slow = d.xf.op == F_DIV || d.xf.op == F_DIVS || d.xf.op == F_RES;   // (frsqrte: the pipeline's, as the 602's)
 		d.mul = o[31:26] == 6'h07 || (o[31:26] == 6'h1f && (o[10:1] == 10'h00b || o[10:1] == 10'h04b || o[10:1] == 10'h0eb ||
 			o[10:1] == 10'h2eb)) || (o[31:26] == 6'h3f && !o[5] && (o[10:1] == 10'h000 || o[10:1] == 10'h020));
 		d.fpi = o[31:26] == 6'h3b || o[31:26] == 6'h3f || o[31:29] == 3'b110 || (o[31:26] == 6'h1f && (o[10:1] == 10'h217 ||

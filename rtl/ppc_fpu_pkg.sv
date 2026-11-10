@@ -26,6 +26,7 @@ package ppc_fpu_pkg;
 		logic neg;                      // ... negated (fnmadd)
 		logic rs;                       // then a round to single
 		logic cv, cvz;                  // or a conversion to an integer (truncating)
+		logic rq;                       // or frsqrte: the 602's table, in S (rsqrte602)
 	} cls_t;
 	function automatic cls_t cls(input logic [4:0] o);
 		cls_t k;
@@ -40,6 +41,7 @@ package ppc_fpu_pkg;
 			F_NMSUB, F_NMSUBS: begin k.mul = 1'b1; k.add = 1'b1; k.sub = 1'b1; k.swap = 1'b1; end
 			F_CTIW:            k.cv = 1'b1;
 			F_CTIWZ:           begin k.cv = 1'b1; k.cvz = 1'b1; end
+			F_RSQRTE:          k.rq = 1'b1;
 			default: ;
 		endcase
 		case (fop_t'(o))
@@ -56,9 +58,9 @@ package ppc_fpu_pkg;
 	function automatic logic [3:0] at_a(input cls_t k, input logic f);
 		return k.mul ? at_m(f) + 4'd1 : 4'd1;
 	endfunction
-	// S takes only frsp and fctiw(z), from issue: a single op's round to single is in its last M or A stage (rnd_sd)
+	// S takes only frsp, fctiw(z) and frsqrte, from issue: a single op's round to single is in its last M or A stage (rnd_sd)
 	function automatic logic need_s(input cls_t k);
-		return k.cv || (k.rs && !k.mul && !k.add);
+		return k.cv || k.rq || (k.rs && !k.mul && !k.add);
 	endfunction
 	function automatic logic [3:0] at_s(input cls_t k);
 		return 4'd1 + (k.mul ? 4'(LM) : 4'd0) + (k.add ? 4'(LA) : 4'd0);
@@ -549,6 +551,41 @@ package ppc_fpu_pkg;
 		p.s = sat_s(p.k);
 		p.w0 = sat_w(p.k); p.w1 = p.w0;
 		return p;
+	endfunction
+	// frsqrte as the 602 does it (measured on a Panasonic FZ-35S, as the M2 emulator's ppccom_frsqrte_602): not 1 / sqrt but a
+	// table of 32 estimates, chosen by the exponent's parity and the top 4 mantissa bits, each a 7-bit mantissa; frsqrte(4^k x) is
+	// frsqrte(x) / 2^k. For 1.m x 2^e: e even, A[m's top 4] x 2^(-e/2); e odd, B[...] x 2^(-(e-1)/2); A and B in [0.5, 1)
+	function automatic logic [31:0] rsqrte602(input logic [31:0] v);
+		logic [6:0] t;
+		logic [3:0] i;
+		logic signed [9:0] e;
+		logic [22:0] m;
+		logic p;
+		logic signed [9:0] re;
+		if (v[30:23] == 8'hff) return v[22:0] != 23'h0 ? (v | 32'h00400000) : v[31] ? 32'h7fc00000 : 32'h0;   // NaN quieted; -inf, +inf
+		if (v[30:0] == 31'h0) return {v[31], 31'h7f800000};                                                   // +-0: +-inf
+		if (v[31]) return 32'h7fc00000;                                                                       // below 0: the default NaN, positive
+		if (v[30:23] == 8'h00)
+		begin
+			// a denormal, normalized: 0.m x 2^-126
+			e = -10'sd127; m = v[22:0];
+			for (int j = 0; j < 23; j++) if (!m[22]) begin m = {m[21:0], 1'b0}; e = e - 10'sd1; end
+			m = {m[21:0], 1'b0};
+		end
+		else
+		begin
+			e = $signed({2'b00, v[30:23]}) - 10'sd127; m = v[22:0];
+		end
+		p = e[0];
+		i = m[22:19];
+		case ({p, i})
+			5'h00: t = 7'h7c; 5'h01: t = 7'h75; 5'h02: t = 7'h6e; 5'h03: t = 7'h68; 5'h04: t = 7'h62; 5'h05: t = 7'h5d; 5'h06: t = 7'h58; 5'h07: t = 7'h53;
+			5'h08: t = 7'h4f; 5'h09: t = 7'h4b; 5'h0a: t = 7'h47; 5'h0b: t = 7'h43; 5'h0c: t = 7'h40; 5'h0d: t = 7'h3d; 5'h0e: t = 7'h39; 5'h0f: t = 7'h36;
+			5'h10: t = 7'h32; 5'h11: t = 7'h2d; 5'h12: t = 7'h28; 5'h13: t = 7'h24; 5'h14: t = 7'h20; 5'h15: t = 7'h1c; 5'h16: t = 7'h19; 5'h17: t = 7'h15;
+			5'h18: t = 7'h12; 5'h19: t = 7'h0f; 5'h1a: t = 7'h0d; 5'h1b: t = 7'h0a; 5'h1c: t = 7'h08; 5'h1d: t = 7'h05; 5'h1e: t = 7'h03; default: t = 7'h01;
+		endcase
+		re = -10'sd1 - ((e - {9'h0, p}) >>> 1) + 10'sd127;                                                    // (63 to 201: always normal)
+		return {1'b0, re[7:0], t, 16'h0};
 	endfunction
 	function automatic logic snan(input logic [31:0] x);
 		return x[30:23] == 8'hff && x[22:0] != 23'h0;

@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 
+double rsqrte602(double in);    // (below sp_a: frsqrte as the 602's table)
+
 enum { TR_READ = 0, TR_WRITE = 1, TR_FETCH = 2 };
 
 static constexpr uint32_t DSISR_NOT_FOUND = 0x40000000, DSISR_PROTECTED = 0x08000000, DSISR_STORE = 0x02000000;
@@ -792,7 +794,7 @@ void ppc602::op3b(uint32_t op)
 		case 0x14: v = rnds(x86_sub(a, b)); break;                                                        // FSUBS
 		case 0x19: v = rnds(x86_mul(a, c)); break;                                                        // FMULS
 		case 0x12: v = ::rnds(x86_div(a, b)); break;                                                      // FDIVS
-		case 0x16: v = ::rnds(std::sqrt(b)); break;                                                    // FSQRTS
+		case 0x16: raise(EX_PROGRAM, 0x80000);                                                          // FSQRTS: illegal on the 602
 		case 0x18: { volatile float s = float(b); volatile float q = 1.0f / s; v = double(q); break; } // FRES
 		case 0x1d: { double p = x86_mul(a, c); v = rnds(x86_add(p, b)); break; }                             // FMADDS
 		case 0x1c: { double p = x86_mul(a, c); v = rnds(x86_sub(p, b)); break; }                             // FMSUBS
@@ -818,8 +820,8 @@ void ppc602::op3f(uint32_t op)
 			case 0x14: setfd(RD, x86_sub(a, b)); break;                                                   // FSUB
 			case 0x19: setfd(RD, x86_mul(a, c)); break;                                                   // FMUL
 			case 0x12: setfd(RD, x86_div(a, b)); break;                                                   // FDIV
-			case 0x16: setfd(RD, std::sqrt(b)); break;                                                 // FSQRT
-			case 0x1a: { volatile double s = std::sqrt(b); setfd(RD, 1.0 / s); break; }                // FRSQRTE
+			case 0x16: raise(EX_PROGRAM, 0x80000);                                                      // FSQRT: illegal on the 602
+			case 0x1a: setfd(RD, rsqrte602(b)); break;                                                  // FRSQRTE: the 602's table
 			case 0x17: f[RD] = a >= 0.0 ? f[RC_] : f[RB]; return;                                      // FSEL
 			case 0x1d: p = x86_mul(a, c); setfd(RD, x86_add(p, b)); break;                                   // FMADD
 			case 0x1c: p = x86_mul(a, c); setfd(RD, x86_sub(p, b)); break;                                   // FMSUB
@@ -922,6 +924,40 @@ void ppc602::ld_fd(int n, uint64_t v) { if (sp) setf33(n, d2f33(v)); else f[n] =
 uint32_t ppc602::st_fs(int n) { return sp ? fs(n) : fbits(float(fd(n))); }
 uint32_t ppc602::st_fiw(int n) { return sp ? fs(n) : uint32_t(f[n]); }
 
+// frsqrte as the 602 does it (measured on a Panasonic FZ-35S; the M2 emulator's ppccom_frsqrte_602 and rtl/ppc_fps.sv's rsqrte602):
+// a table of 32 estimates, chosen by the exponent's parity and the top 4 mantissa bits, each a 7-bit mantissa; not 1 / sqrt
+double rsqrte602(double in)
+{
+	static const uint8_t table[2][16] = {
+		{ 0x7c, 0x75, 0x6e, 0x68, 0x62, 0x5d, 0x58, 0x53, 0x4f, 0x4b, 0x47, 0x43, 0x40, 0x3d, 0x39, 0x36 },
+		{ 0x32, 0x2d, 0x28, 0x24, 0x20, 0x1c, 0x19, 0x15, 0x12, 0x0f, 0x0d, 0x0a, 0x08, 0x05, 0x03, 0x01 } };
+	uint64_t b, r;
+	std::memcpy(&b, &in, sizeof(b));
+	const bool neg = b >> 63;
+	int exp = int((b >> 52) & 0x7ff);
+	uint64_t man = b & 0x000fffffffffffffULL;
+	if (exp == 0x7ff)
+		r = man ? (b | 0x0008000000000000ULL) : neg ? 0x7ff8000000000000ULL : 0;
+	else if (exp == 0 && man == 0)
+		r = neg ? 0xfff0000000000000ULL : 0x7ff0000000000000ULL;
+	else if (neg)
+		r = 0x7ff8000000000000ULL;
+	else
+	{
+		if (exp == 0)
+		{
+			exp = 1;
+			while (!(man & 0x0010000000000000ULL)) { man <<= 1; exp--; }
+			man &= 0x000fffffffffffffULL;
+		}
+		const int e = exp - 1023, p = e & 1;
+		r = (uint64_t(-1 - (e - p) / 2 + 1023) << 52) | (uint64_t(table[p][(man >> 48) & 0xf]) << 45);
+	}
+	double out;
+	std::memcpy(&out, &r, sizeof(out));
+	return out;
+}
+
 // the A-form ops, double forms as the single ones: the host's floats, in the mode, fused; a NaN the unit's (the first NaN
 // operand quieted: a then c (the product) before b, b first for fnmsub (b - the product); with none, the default NaN
 // 0x7fc00000), fnmadd's negated, its exact zero too (the unit negates the sum before its round: its zero is the sum's negated)
@@ -937,15 +973,14 @@ void ppc602::sp_a(uint32_t op)
 		case 0x14: v = fbits(fa - fb); nan = snanb(a) ? squiet(a) : snanb(b) ? squiet(b) : SDNAN; break;           // FSUB(S)
 		case 0x19: v = fbits(fa * fc); nan = snanb(a) ? squiet(a) : snanb(c) ? squiet(c) : SDNAN; break;           // FMUL(S)
 		case 0x12: v = fbits(fa / fb); nan = snanb(a) ? squiet(a) : snanb(b) ? squiet(b) : SDNAN; break;           // FDIV(S)
-		case 0x16: v = fbits(sqrtf(fb)); nan = snanb(b) ? squiet(b) : SDNAN; break;                                // FSQRT(S)
+		case 0x16: raise(EX_PROGRAM, 0x80000);                                                                      // FSQRT(S): illegal on the 602
 		case 0x18:                                                                                                  // FRES
 			if ((op >> 26) != 0x3b) raise(EX_PROGRAM, 0x80000);
 			v = fbits(1.0f / fb); nan = snanb(b) ? squiet(b) : SDNAN; break;
 		case 0x1a:                                                                                                  // FRSQRTE
 		{
 			if ((op >> 26) != 0x3f) raise(EX_PROGRAM, 0x80000);
-			volatile float r = sqrtf(fb);
-			v = fbits(1.0f / r); nan = snanb(b) ? squiet(b) : SDNAN; break;
+			v = fbits(float(rsqrte602(double(fb)))); nan = snanb(b) ? squiet(b) : SDNAN; break;   // the 602's table (exact as a single)
 		}
 		case 0x17:                                                                                                  // FSEL
 			if ((op >> 26) != 0x3f) raise(EX_PROGRAM, 0x80000);
