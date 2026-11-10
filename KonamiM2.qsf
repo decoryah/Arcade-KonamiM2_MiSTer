@@ -59,19 +59,19 @@ set_global_assignment -name SEED 4
 #do not enable DEBUG_NOHDMI in release!
 #set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
-# Heat of Eleven's build: its Low Res draws 640 x 240, so 38 blocks of Z, with the small memories out of block RAM to pay for them, and a seed that routes it (7 doesn't).
+# Heat of Eleven's build: its Low Res draws 640 x 240, so 38 blocks of Z, with the small memories out of block RAM to pay for them, and a seed that routes it (2; 11 misses the HDMI clock).
 # Its RBF goes in _Arcade/cores as KonamiM2Heat_<date>.rbf, the name its MRA asks for (a KonamiM2_... name would also be found by the other MRAs' "KonamiM2")
 #set_global_assignment -name VERILOG_MACRO "Z_BLOCKS=38"
 #set_global_assignment -name VERILOG_MACRO "SMALL_MEMS=1"
-#set_global_assignment -name SEED 11
+#set_global_assignment -name SEED 2
 
 # The CPUs' caches, KB a side (rtl/m2_boot.sv): 4 is the 602's own (the real board's speed and slowdowns, and much less block RAM);
 # without it, 32
 #set_global_assignment -name VERILOG_MACRO "PPC_CACHE_KB=4"
 # Battle Tryst's build: its 800 x 300 Z buffer in the SDRAM board's memory, and what the game doesn't use left out to make room for its compressed
 # texture loads, the MPEG unit's control and the CD streaming (see rtl/m2_te.sv and rtl/ppc_pipe.sv). Its RBF goes in _Arcade/cores as
-# KonamiM2Tryst_<date>.rbf, the name its MRA asks for. It needs the SDRAM board. (Seed 5; 8 also meets timing, 2, 3, 4, 6, 7, 9, 11 don't, most of
-# them short on the SDRAM's read data, from the pins' registers into the Z line)
+# KonamiM2Tryst_<date>.rbf, the name its MRA asks for. It needs the SDRAM board. (Seed 8; its timing rests on the seed, most misses short on
+# the SDRAM's read data, from the pins' registers into the Z line)
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
 #set_global_assignment -name VERILOG_MACRO "MPEG_CTL=1"
@@ -85,7 +85,7 @@ set_global_assignment -name SEED 4
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_A=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_Z=1"
-#set_global_assignment -name SEED 5
+#set_global_assignment -name SEED 8
 
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
