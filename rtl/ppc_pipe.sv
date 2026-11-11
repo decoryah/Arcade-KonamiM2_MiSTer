@@ -633,6 +633,9 @@ module ppc_pipe #(
 		d = '0;
 		d.idx = o[31:26] == 6'h1f;
 		if (o[31:26] == 6'h2e || o[31:26] == 6'h2f) d.seq = 1'b1;                                  // LMW, STMW
+`ifdef PPC_NO_FPDOUBLE
+		else if (o[31:26] == 6'h32 || o[31:26] == 6'h33 || o[31:26] == 6'h36 || o[31:26] == 6'h37) ;   // (left out: illegal)
+`endif
 		else if (o[31:30] == 2'b10 || o[31:29] == 3'b110)                                           // 0x20 to 0x37
 		begin
 			d.mem = 1'b1;
@@ -642,13 +645,20 @@ module ppc_pipe #(
 		end
 		else if (d.idx)
 			case (o[10:1])
-				10'h057, 10'h117, 10'h157, 10'h017, 10'h217, 10'h257, 10'h316, 10'h216, 10'h014: d.mem = 1'b1;
-				10'h077, 10'h137, 10'h177, 10'h037, 10'h237, 10'h277: begin d.mem = 1'b1; d.upd = 1'b1; end
+				10'h057, 10'h117, 10'h157, 10'h017, 10'h217, 10'h316, 10'h216, 10'h014: d.mem = 1'b1;
+				10'h077, 10'h137, 10'h177, 10'h037, 10'h237: begin d.mem = 1'b1; d.upd = 1'b1; end
 				10'h0d7, 10'h197, 10'h097, 10'h3d7, 10'h297, 10'h396, 10'h296: begin d.mem = 1'b1; d.we = 1'b1; end
-				10'h2d7: begin d.mem = 1'b1; d.we = 1'b1; d.cvt = 1'b1; end                         // STFDX
 				10'h0f7, 10'h1b7, 10'h0b7, 10'h2b7: begin d.mem = 1'b1; d.we = 1'b1; d.upd = 1'b1; end
+`ifndef PPC_NO_FPDOUBLE
+				10'h257: d.mem = 1'b1;                                                              // LFDX
+				10'h277: begin d.mem = 1'b1; d.upd = 1'b1; end                                      // LFDUX
+				10'h2d7: begin d.mem = 1'b1; d.we = 1'b1; d.cvt = 1'b1; end                         // STFDX
 				10'h2f7: begin d.mem = 1'b1; d.we = 1'b1; d.upd = 1'b1; d.cvt = 1'b1; end            // STFDUX
-				10'h255, 10'h215, 10'h2d5, 10'h295, 10'h3f6, 10'h096: d.seq = 1'b1;
+`endif
+`ifndef PPC_NO_STRING
+				10'h255, 10'h215, 10'h2d5, 10'h295: d.seq = 1'b1;                                   // the strings
+`endif
+				10'h3f6, 10'h096: d.seq = 1'b1;                                                     // DCBZ, STWCX.
 				default: ;
 			endcase
 		return d;
