@@ -259,13 +259,36 @@ module m2_boot #(
 	// verilator lint_on UNUSEDSIGNAL
 	// (the CD image's address is the drive's own: no CPU sees it)
 	assign m_g = g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
-	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
 	wire [27:3] ld_ddr = ld_ymz ? {6'b011000, ld_a[21:3]} : ld_cd ? {ld_a[25] ? 3'b010 : 3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
+	// verilator lint_off UNUSEDSIGNAL
+	logic        vdu_frame, vdu_flip;   // (for M2_FPS)
+	// verilator lint_on UNUSEDSIGNAL
+`ifdef M2_FPS
+	// a debug build's frame rate (rtl/m2_fps.sv): its writes go in the clocks nothing else uses DDR3
+	logic        fps_wr;
+	logic [28:0] fps_a;
+	logic [63:0] fps_d;
+	wire         fps_go = fps_wr && !ld_pend && !g_rd && !g_we && !ddr_busy;
+	m2_fps fps
+	(
+		.clk, .rst, .frame(vdu_frame), .flip(vdu_flip),
+		.ret1({c_ret[0] && c_ret2[0], c_ret[0] && !c_ret2[0]}), .ret2({c_ret[1] && c_ret2[1], c_ret[1] && !c_ret2[1]}),
+		.wr(fps_wr), .wr_ok(fps_go), .wr_a(fps_a), .wr_d(fps_d)
+	);
+	assign ddr_burstcnt = ld_pend || fps_go ? 8'd1 : g_burst;
+	assign ddr_addr = fps_go ? fps_a : {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
+	assign ddr_rd = g_rd;
+	assign ddr_we = ld_pend || g_we || fps_go;
+	assign ddr_din = fps_go ? fps_d : ld_pend ? {8{ld_d}} : g_wd;
+	assign ddr_be = fps_go ? 8'hff : ld_pend ? 8'h01 << ld_a[2:0] : g_be;
+`else
+	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
 	assign ddr_addr = {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
 	assign ddr_rd = g_rd;
 	assign ddr_we = ld_pend || g_we;
 	assign ddr_din = ld_pend ? {8{ld_d}} : g_wd;
 	assign ddr_be = ld_pend ? 8'h01 << ld_a[2:0] : g_be;
+`endif
 
 	// ---- the CPUs' resets (rst, or the CDE's: the CPU that asks): held until DDR3 has answered all its caches asked (so nothing
 	// it answers reaches a request made after) -----------------------------------------------------------------------------
@@ -382,7 +405,7 @@ module m2_boot #(
 	(
 		.clk, .rst,
 		.a(u_pa[5:2]), .we(u_req && u_we && u_pa[31:8] == 24'h000300), .wd(u_wdata[31:0]),
-		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on),
+		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on), .frame(vdu_frame), .flip(vdu_flip),
 		.m_rd(vdu_m_rd), .m_four(vdu_m_four), .m_a(vdu_m_a), .m_busy(vdu_m_busy), .m_ready(vdu_m_ready), .m_dout(ddr_dout)
 	);
 	// verilator lint_off PINCONNECTEMPTY
