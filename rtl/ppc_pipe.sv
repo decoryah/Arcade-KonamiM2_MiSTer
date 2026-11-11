@@ -581,7 +581,7 @@ module ppc_pipe #(
 			6'h3b:
 				case (o[5:1])
 					5'h12, 5'h14, 5'h15: {fa, fb, fd} = 3'b111;
-					5'h16, 5'h18: {fb, fd} = 2'b11;
+					5'h18: {fb, fd} = 2'b11;          // (no fsqrts: illegal on the 602)
 					5'h19: {fa, fc, fd} = 3'b111;
 					5'h1c, 5'h1d, 5'h1e, 5'h1f: {fa, fb, fc, fd} = 4'b1111;
 					default: ;
@@ -590,7 +590,7 @@ module ppc_pipe #(
 				if (o[5])
 					case (o[5:1])
 						5'h12, 5'h14, 5'h15: {fa, fb, fd} = 3'b111;
-						5'h16, 5'h1a: {fb, fd} = 2'b11;
+						5'h1a: {fb, fd} = 2'b11;          // (no fsqrt: illegal on the 602)
 						5'h19: {fa, fc, fd} = 3'b111;
 						5'h17: begin {fa, fb, fc, fd} = 4'b1111; fm = 1'b1; end
 						5'h1c, 5'h1d, 5'h1e, 5'h1f: {fa, fb, fc, fd} = 4'b1111;
