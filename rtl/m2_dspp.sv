@@ -288,11 +288,30 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 		else if (shift_n == 5'd16) shifted = !f_v ? res : f_n ? 20'h7ffff : 20'h80000;
 		else shifted = res << shift_n;
 
+	// the same in the ALU's clock, for an instruction's own shift (not by an operand, nor 16 with its saturation)
+	logic [4:0]  shift_f;
+	always_comb
+		case (op[3] ? 3'(4'd0 - op[3:0]) : op[2:0])
+			3'd0: shift_f = 5'd0;
+			3'd1: shift_f = 5'd1;
+			3'd2: shift_f = 5'd2;
+			3'd3: shift_f = 5'd3;
+			3'd4: shift_f = 5'd4;
+			3'd5: shift_f = 5'd5;
+			3'd6: shift_f = 5'd8;
+			default: shift_f = 5'd16;
+		endcase
+	logic [19:0] shifted_f;
+	always_comb
+		if (op[3]) shifted_f = alu_op < 4'd8 ? 20'($signed(alu_r[19:0]) >>> shift_f) : alu_r[19:0] >> shift_f;
+		else if (op[2:0] == 3'd7) shifted_f = !alu_v ? alu_r[19:0] : alu_r[19] ? 20'h7ffff : 20'h80000;
+		else shifted_f = alu_r[19:0] << shift_f;
+
 	// the multiplier
 	// verilator lint_off UNUSEDSIGNAL
 	logic signed [31:0] mul_q;
 	// verilator lint_on UNUSEDSIGNAL
-	always_ff @(posedge clk) mul_q <= $signed(mul_a) * $signed(rv);
+	always_ff @(posedge clk) mul_q <= $signed(mul_a_n) * $signed(rv_n);     // (the operands as they'll be: the product's ready when they are)
 
 	wire         hw = we && h_data;     // the host's write to the data space: it goes first, the program waits a clock
 	wire [9:0]   w_a = hw ? a[9:0] : wa;
@@ -321,6 +340,8 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	wire         o_there = o_i < o_n;
 	wire         o_is_imm = o_there && o_imm[o_i[2:0]];
 
+	logic        a9;
+	logic [19:0] a9_v;
 	// after the operands of an operand word, more?
 	always_comb
 	begin
@@ -336,6 +357,7 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 		p_fw = 1'b0; p_fwd = f_q; p_fwa = {ra_ch, 4'd8};
 		push_ev = 1'b0; stk_push = 1'b0; under = 1'b0;
 		osc_we = 1'b0; osc_phase_n = osc_phase; last_osc_n = last_osc;
+		a9 = 1'b0; a9_v = 20'h0;
 		if (!hw && (s == S_OP || w_then_op))
 		begin
 			s_n = S_OP;
@@ -470,10 +492,9 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 			S_A1:
 			begin
 				mul_a_n = rv;
-				if (op[12]) begin s_ret_n = S_A2; s_n = S_RN; end
-				else begin rv_n = acc[19:4]; s_n = S_A2; end
+				if (op[12]) begin s_ret_n = S_MR; s_n = S_RN; end
+				else begin rv_n = acc[19:4]; s_n = S_MR; end
 			end
-			S_A2: s_n = S_MR;
 			// (A, then B, each without a clock of its own unless it has to read)
 			S_MR, S_A3:
 			begin
@@ -506,28 +527,10 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				flags_we = 1'b1;
 				barrel_n = op[3:0];
 				if (op[3:0] == 4'd8) begin s_ret_n = S_A8; s_n = S_RN; end
-				else s_n = S_A9;
+								else begin a9 = 1'b1; a9_v = shifted_f; end
 			end
 			S_A8: begin barrel_n = rv[3:0]; s_n = S_A9; end
-			S_A9:
-			begin
-				acc_n = shifted;
-				s_n = S_OP;
-				if (wb_v)
-				begin
-					wa_n = wb_a; wv_n = shifted[19:4]; wb_v_n = 1'b0;
-					s_n = S_W;
-				end
-				else if (o_i < n_ops)
-				begin
-					o_i_n = o_i + 3'd1;
-					if (!o_imm[o_i[2:0]])
-					begin
-						wa_n = o_cur; wv_n = shifted[19:4];
-						s_n = S_W;
-					end
-				end
-			end
+			S_A9: begin a9 = 1'b1; a9_v = shifted; end
 			S_W:
 			begin
 				s_n = S_OP;
@@ -575,12 +578,12 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 				if (s_ret == S_A1 && !ra_needs_f)   // S_A1 without its clock, and the next read
 				begin
 					mul_a_n = ra_spec;
-					if (!op[12]) begin rv_n = acc[19:4]; s_n = S_A2; end
+					if (!op[12]) begin rv_n = acc[19:4]; s_n = S_MR; end
 					else
 					begin
-						s_ret_n = S_A2;
+						s_ret_n = S_MR;
 						o_i_n = o_i + 3'd1;
-						if (o_is_imm) begin rv_n = o_v[o_i[2:0]]; s_n = S_A2; end
+						if (o_is_imm) begin rv_n = o_v[o_i[2:0]]; s_n = S_MR; end
 						else begin ra_n = o_there ? o_cur : 10'h3ff; s_n = S_R; end
 					end
 				end
@@ -604,6 +607,39 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 			end
 			default: s_n = S_OP;
 		endcase
+		// S_RN's work in the clock that would have gone to it: the operand's read starts a clock sooner. On from the operands' parsing, the last
+		// may be the one being stored this clock, so it comes from there
+		if (!hw && s_n == S_RN)
+		begin
+			logic        fw, there, imm;
+			logic [15:0] v;
+			fw = o_we_p && o_n == o_i;
+			there = o_i < o_n_n;
+			imm = there && (fw ? o_imm_w : o_imm[o_i[2:0]]);
+			v = fw ? o_wv : o_v[o_i[2:0]];
+			o_i_n = o_i + 3'd1;
+			if (imm) begin rv_n = v; s_n = s_ret_n; end
+			else begin ra_n = there ? v[9:0] : 10'h3ff; s_n = S_R; end
+		end
+		if (a9)   // the result: the accumulator, and where it goes
+		begin
+			acc_n = a9_v;
+			s_n = S_OP;
+			if (wb_v)
+			begin
+				wa_n = wb_a; wv_n = a9_v[19:4]; wb_v_n = 1'b0;
+				s_n = S_W;
+			end
+			else if (o_i < n_ops)
+			begin
+				o_i_n = o_i + 3'd1;
+				if (!o_imm[o_i[2:0]])
+				begin
+					wa_n = o_cur; wv_n = a9_v[19:4];
+					s_n = S_W;
+				end
+			end
+		end
 		if (w_pc) pc_n = w_v[9:0];
 		if (dev_reset) pc_n = 10'h0;
 	end

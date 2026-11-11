@@ -20,11 +20,11 @@ module m2_boot #(
 	input  logic        clk,
 	input  logic        rst,
 
-	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM,
+	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM, 4 the YMZ280B's samples,
 	// 3 the M48T58's 8 KB then a byte for the board (bit 0: RAM 2 x 8 MB, not 2 x 4 MB); a game without an M48T58 has no index 3
 	input  logic        ld_wr,
-	input  logic [1:0]  ld_sel,
-	input  logic [24:0] ld_addr,
+	input  logic [2:0]  ld_sel,
+	input  logic [25:0] ld_addr,
 	input  logic [7:0]  ld_data,
 	output logic        ld_wait,
 	input  logic [6:0]  ee_ua,          // the EEPROM's upload: its byte at ee_ua, a clock later
@@ -63,6 +63,9 @@ module m2_boot #(
 	input  logic [7:0]  in_dsw,
 	input  logic [15:0] in_p4,
 	input  logic [15:0] in_p6,
+	input  logic [15:0] in_p5,          // Evil Night's gun switches and aim (rtl/m2_guns.sv)
+	input  logic [9:0]  gun_x [0:2],
+	input  logic [7:0]  gun_y [0:2],
 
 	// what each CPU is doing: the last instruction retired, how many, the last exception taken (and how many);
 	// the last register stub access
@@ -199,7 +202,8 @@ module m2_boot #(
 
 	// ---- DDR3 ----------------------------------------------------------------------------------------------------------
 	logic        ld_pend;
-	logic [24:0] ld_a;
+	logic [25:0] ld_a;
+	logic        ld_ymz;
 	logic        ld_cd;
 	logic [7:0]  ld_d;
 	logic        dma_rd, dma_we;
@@ -225,6 +229,9 @@ module m2_boot #(
 	logic        g_rd, g_we;
 	logic [7:0]  g_burst, g_be;
 	logic [63:0] g_wd;
+	logic        ymz_m_rd, ymz_m_busy, ymz_m_ready;
+	logic [21:3] ymz_rom_a;
+	wire  [31:3] ymz_m_a = {6'h15, 4'd0, ymz_rom_a};
 	logic        dma_busy, dma_ready;
 	m2_bus bus
 	(
@@ -233,6 +240,7 @@ module m2_boot #(
 		.dma_rd, .dma_we, .dma_a, .dma_wd, .dma_be, .dma_busy, .dma_ready,
 		.ata_rd(ata_m_rd), .ata_a(ata_m_a), .ata_busy(ata_m_busy), .ata_ready(ata_m_ready),
 		.dsp_rd(dsp_m_rd), .dsp_a(dsp_m_a), .dsp_busy(dsp_m_busy), .dsp_ready(dsp_m_ready),
+		.ymz_rd(ymz_m_rd), .ymz_a(ymz_m_a), .ymz_busy(ymz_m_busy), .ymz_ready(ymz_m_ready),
 		.vdu_rd(vdu_m_rd), .vdu_four(vdu_m_four), .vdu_a(vdu_m_a), .vdu_busy(vdu_m_busy), .vdu_ready(vdu_m_ready),
 		.te_rd(te_m_rd), .te_we(te_m_we), .te_a(te_m_a), .te_wd(te_m_wd), .te_be(te_m_be), .te_busy(te_m_busy), .te_ready(te_m_ready),
 		.ddr_busy, .ddr_dout_ready,
@@ -243,9 +251,9 @@ module m2_boot #(
 	map_t        m_g;
 	// verilator lint_on UNUSEDSIGNAL
 	// (the CD image's address is the drive's own: no CPU sees it)
-	assign m_g = g_a[31:26] == 6'h14 ? map_t'({1'b1, 1'b1, 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
+	assign m_g = g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
 	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
-	wire [27:3] ld_ddr = ld_cd ? {3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
+	wire [27:3] ld_ddr = ld_ymz ? {6'b011000, ld_a[21:3]} : ld_cd ? {ld_a[25] ? 3'b010 : 3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
 	assign ddr_addr = {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
 	assign ddr_rd = g_rd;
 	assign ddr_we = ld_pend || g_we;
@@ -277,7 +285,7 @@ module m2_boot #(
 	// ---- the download -------------------------------------------------------------------------------------------------
 	assign ld_wait = ld_pend;
 	always_ff @(posedge clk)
-		if (ld_wr && !ld_sel[1]) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; ld_cd <= ld_sel[0]; end
+		if (ld_wr && !ld_sel[1]) begin ld_pend <= 1'b1; ld_a <= ld_addr; ld_d <= ld_data; ld_cd <= ld_sel[0]; ld_ymz <= ld_sel[2]; end
 		else if (!ddr_busy) ld_pend <= 1'b0;
 
 	// ---- the registers: one CPU's access at a time: the choice, the access, the answer, a clock each ----------------------
@@ -333,6 +341,7 @@ module m2_boot #(
 	wire         u_te = u_pa[31:16] == 16'h0004;
 	wire         u_dsp = u_pa[31:16] == 16'h0006;
 	wire         u_tk = u_pa[31:14] == 18'h0db00;       // 0x36c00000-0x36c03fff
+	wire         u_ymz = u_pa[31:4] == 28'h3e80000;     // 0x3e800000-0x3e80000f: the YMZ280B, on Evil Night's sub board
 	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd;
 	logic        dsp_int;
 	logic [15:0] kio_rd, atapi_rd;
@@ -342,7 +351,7 @@ module m2_boot #(
 	// verilator lint_off PINCONNECTEMPTY
 	// the board, from the download (kept through a reset)
 	logic        ram8 = 1'b0;
-	always_ff @(posedge clk) if (ld_wr && ld_sel == 2'd3 && ld_addr == 25'h2000) ram8 <= ld_data[0];
+	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) ram8 <= ld_data[0];
 	m2_bda bda
 	(
 		.clk, .rst, .vpos,
@@ -426,12 +435,40 @@ module m2_boot #(
 	// verilator lint_off UNUSEDSIGNAL
 	logic signed [24:0] cdv_l, cdv_r;
 	// verilator lint_on UNUSEDSIGNAL
+	logic [15:0] mix0_l, mix0_r;
+	function automatic logic [15:0] mix_ymz(input logic [15:0] a, input logic signed [15:0] b);
+		logic signed [16:0] s;
+		s = 17'($signed(a)) + 17'(b);
+		return s[16] == s[15] ? s[15:0] : s[16] ? 16'h8000 : 16'h7fff;
+	endfunction
+	// the YMZ280B (Evil Night's sub board): its samples are in DDR3, its registers at 0x3e800000, the select at +0 and the data at +2, a byte in bits 15:8 of a 16-bit access,
+	// as the game makes them (MAME's unit mask allows the byte lanes of any size)
+	logic [7:0]  ymz_ext, ymz_st;
+	logic signed [15:0] ymz_l, ymz_r;
+	wire         ymz_wr = u_req && u_we && u_ymz;
+	wire         ymz_rd = u_req && !u_we && u_ymz;
+	m2_ymz280b ymz
+	(
+		.clk, .rst, .tick(dac_n == 11'd755 || dac_tick),
+		.sel_we(ymz_wr && (u_size == 4'd4 || !u_pa[1])), .sel_d(u_size == 4'd4 ? u_wdata[31:24] : u_size == 4'd2 ? u_wdata[15:8] : u_wdata[7:0]),
+		.dat_we(ymz_wr && (u_size == 4'd4 || u_pa[1])), .dat_d(u_size == 4'd1 ? u_wdata[7:0] : u_wdata[15:8]),
+		.ext_rd(ymz_rd && !u_pa[1]), .st_rd(ymz_rd && (u_pa[1] || u_size == 4'd4)), .ext_q(ymz_ext), .st_q(ymz_st),
+		.m_rd(ymz_m_rd), .m_a(ymz_rom_a), .m_busy(ymz_m_busy), .m_ready(ymz_m_ready), .m_dout(ddr_dout),
+		.out_l(ymz_l), .out_r(ymz_r), .rnd_done(), .rnd_l(), .rnd_r()
+	);
 	always_ff @(posedge clk)
 	begin
 		cdv_l <= $signed(cda_l) * $signed({1'b0, cd_vol_l});
 		cdv_r <= $signed(cda_r) * $signed({1'b0, cd_vol_r});
-		audio_l <= mix(dac_l, cdv_l[23:9]);
-		audio_r <= mix(dac_r, cdv_r[23:9]);
+		mix0_l <= mix(dac_l, cdv_l[23:9]);
+		mix0_r <= mix(dac_r, cdv_r[23:9]);
+		// on the 44.1 kHz tick only: the YMZ280B's value changes when its round ends, which is later or sooner as DDR3 answers, and
+		// MiSTer's audio filter, running far faster than 44.1 kHz, hears that wander as static under every sound
+		if (dac_tick)
+		begin
+			audio_l <= mix_ymz(mix0_l, ymz_l);
+			audio_r <= mix_ymz(mix0_r, ymz_r);
+		end
 	end
 	m2_atapi cd
 	(
@@ -445,7 +482,7 @@ module m2_boot #(
 	// the M48T58: 8 KB, a byte in bits 15:8 of each 16-bit address. Read from the address coming up, as the DSP's are. Its clock doesn't run: its
 	// registers read as the memory they're in
 	logic [7:0]  tk_q;
-	wire         tk_ld = ld_wr && ld_sel == 2'd3 && !ld_addr[13];
+	wire         tk_ld = ld_wr && ld_sel == 3'd3 && !ld_addr[13];
 	wire         tk_we = u_req && u_we && u_tk;
 	ppc_ram #(.W(8), .AW(13)) tk
 	(
@@ -456,8 +493,8 @@ module m2_boot #(
 	(
 		.clk, .rst,
 		.a(u_pa[23:1]), .we(u_req && u_we && u_kio), .wd(u_wdata[15:0]), .rd(kio_rd),
-		.ata_int(cd_int), .in_p1, .in_dsw, .in_p4, .in_p6,
-		.ee_wr(ld_wr && ld_sel == 2'd2), .ee_a(ld_addr[6:0]), .ee_d(ld_data), .ee_ua, .ee_ud, .ee_chg
+		.ata_int(cd_int), .in_p1, .in_dsw, .in_p4, .in_p6, .in_p5, .gun_x, .gun_y,
+		.ee_wr(ld_wr && ld_sel == 3'd2), .ee_a(ld_addr[6:0]), .ee_d(ld_data), .ee_ua, .ee_ud, .ee_chg
 	);
 
 	// the stubs' compares a clock early, on the address the choice takes (s_hit: the entry with u_pa's word), with the write
@@ -465,7 +502,7 @@ module m2_boot #(
 	// the words was a long path. An address is in one entry at most
 	logic [NS-1:0] s_hit;
 	logic [3:0]  s_k;
-	wire         s_wr = u_req && u_we && !(u_cde || u_bda || u_kio || u_ata || u_dsp);
+	wire         s_wr = u_req && u_we && !(u_cde || u_bda || u_kio || u_ata || u_dsp || u_ymz);
 	wire  [31:2] s_na = c_u_pa[n_s][31:2];
 	always_comb
 	begin
@@ -525,8 +562,9 @@ module m2_boot #(
 			if (u_kio) w = {2{kio_rd}};
 			if (u_ata) w = {2{atapi_rd}};
 			if (u_tk) w = {2{tk_q, 8'h00}};
+			if (u_ymz) w = {ymz_ext, 8'h00, ymz_st, 8'h00};
 			if (!u_we && fixed_rd(u_pa[31:2], u_s, fv)) w = fv;
-			if (u_we && (u_cde || u_bda || u_kio || u_ata || u_dsp || u_tk)) a_w <= 32'h0;
+			if (u_we && (u_cde || u_bda || u_kio || u_ata || u_dsp || u_tk || u_ymz)) a_w <= 32'h0;
 			else if (u_we)
 			begin
 				sa[k] <= {u_pa[31:2], 2'b00};

@@ -1,5 +1,5 @@
 // m2_kio: Konami's I/O on the BioBus, what MAME 0.289 makes of it (konamim2.cpp): the inputs (0x37e00000, IO1), the 003461's serial
-// data register (0x37c0001e), the gun ports (0x37a00020, nothing there) and the 93C46 EEPROM (0x37400000). All 16-bit accesses.
+// data register (0x37c0001e), the gun ports (0x37a00020, Evil Night's) and the 93C46 EEPROM (0x37400000). All 16-bit accesses.
 //
 // The EEPROM's contents come with the download (ee_*), the first address's two bytes first, the first of them bits 15:8; Main reads them back
 // the same way (ee_u*) to save them.
@@ -18,6 +18,9 @@ module m2_kio (
 	input  logic [7:0]  in_dsw,         // IO1 2: the DIP switches
 	input  logic [15:0] in_p4,          // IO1 4: players, active low
 	input  logic [15:0] in_p6,          // IO1 6: the service switch, active low
+	input  logic [15:0] in_p5,          // the gun switches (0x37a00030)
+	input  logic [9:0]  gun_x [0:2],    // the guns, as MAME's: 0 if off the screen (rtl/m2_guns.sv)
+	input  logic [7:0]  gun_y [0:2],
 
 	input  logic        ee_wr,
 	input  logic [6:0]  ee_a,
@@ -137,7 +140,12 @@ module m2_kio (
 			endcase
 		else if (a[23:16] == 8'hc0 && a[15:4] == 12'h001 && a[3:1] == 3'd7) rd = sio;
 		else if (a[23:16] == 8'ha0 && a[15:4] == 12'h002)
-			rd = a[3:1] == 3'd3 ? 16'hffff : 16'h0;
-		else if (a[23:16] == 8'ha0 && a[15:4] == 12'h003 && a[3:1] == 3'd0) rd = 16'hffff;
+			case (a[3:1])   // (each byte-swapped)
+				3'd0, 3'd1, 3'd2: rd = {gun_x[a[2:1]][7:0], 6'd0, gun_x[a[2:1]][9:8]};
+				3'd3: rd = 16'hffff;
+				3'd4, 3'd5, 3'd6: rd = {gun_y[a[2:1]], 8'h00};
+				default: rd = 16'h0;
+			endcase
+		else if (a[23:16] == 8'ha0 && a[15:4] == 12'h003 && a[3:1] == 3'd0) rd = in_p5;
 	end
 endmodule

@@ -48,8 +48,8 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-# seed 2: release 20261110's build (seeds 7, 4 and 1 also meet timing)
-set_global_assignment -name SEED 2
+# seed 4: release 20261112's build (seeds 5 and 2 miss HDMI's timing)
+set_global_assignment -name SEED 4
 
 
 

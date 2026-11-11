@@ -11,6 +11,7 @@ have() { if [ -f "$2" ]; then return 0; fi; echo "SKIP  $1: no $2"; return 1; }
 out=$(sh $S/lint.sh 2>&1);                                               check "lint" "$(echo "$out"; echo "lint done, $(echo "$out" | grep -c '^%') messages")" "lint done, 0 messages"
 check "dspp"    "$(bash $S/dspp/run.sh 300 3000 2>&1)"                     "^PASS"
 check "cdda"    "$(bash $S/dspp/run_cdda.sh 2>&1)"                         "^PASS"
+check "ymz"     "$(bash $S/ymz/run.sh 1 300000 2>&1)"                   "^PASS"
 check "ppcfpu"  "$(bash $S/ppcfpu/run.sh 2000000 2>&1)"                    "^PASS"
 check "ppcfpu fpp" "$(FPP=1 bash $S/ppcfpu/run.sh 2000000 2>&1)"             "^PASS"
 check "ppccore" "$(bash $S/ppccore/run.sh 5000 2>&1)"                      "^PASS"

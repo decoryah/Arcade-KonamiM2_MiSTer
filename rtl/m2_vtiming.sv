@@ -15,7 +15,9 @@ module m2_vtiming (
 	output logic       vsync
 );
 	localparam int HTOT = 857, HVIS0 = 172, HVIS1 = 172 + 640, HS0 = 2, HS1 = 65;
-	localparam int VTOT = 262, VVIS0 = 20, VVIS1 = 20 + 240, VS0 = 261, VS1 = 2;   // the sync just after the picture, so a CRT shows it 18 lines below the sync's end
+	// 240p's lines as CEA-861 has them (format 8): 4 after the picture, 3 of sync, 15 before the next. The sync used to start a line after the
+	// picture, and the board's HDMI (the RetroTINK 4K's DV1 too) lost the picture's last lines
+	localparam int VTOT = 262, VVIS0 = 20, VVIS1 = 20 + 240, VS0 = 2, VS1 = 5;
 
 	logic  [2:0] div;
 	logic  [9:0] h;
@@ -45,7 +47,7 @@ module m2_vtiming (
 			hblank <= (h < 10'(HVIS0)) || (h >= 10'(HVIS1));
 			vblank <= (v < 9'(VVIS0)) || (v >= 9'(VVIS1));
 			hsync <= (h >= 10'(HS0)) && (h < 10'(HS1));
-			vsync <= (v >= 9'(VS0)) || (v < 9'(VS1));
+			vsync <= (v >= 9'(VS0)) && (v < 9'(VS1));
 			hpos <= h - 10'(HVIS0);
 			vpos <= v - 9'(VVIS0);
 		end

@@ -48,6 +48,8 @@ int main(int argc, char **argv)
 	FILE *ffull = nullptr, *faudio = nullptr;
 	int snap = 0;                          // -snap n: every n frames the picture, frameNNNN.ppm
 	int coin = -1, hist_from = -1;
+	std::vector<uint8_t> ymz;
+	bool evil = false;
 	bool board = false;
 	std::map<uint32_t, uint32_t> hist[2];
 	FILE *fata = nullptr;                  // -ata file: each access to the CD drive, as work/lua/cd_ata.lua logs MAME's
@@ -67,6 +69,8 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-board")) board = true;                             // memory about as the board's
 		else if (!strcmp(argv[i], "-hist") && i + 1 < argc) hist_from = atoi(argv[++i]); // from this frame, every 120 frames, the PCs most retired
 		else if (!strcmp(argv[i], "-ee") && i + 1 < argc) ee = slurp(argv[++i]);
+		else if (!strcmp(argv[i], "-ymz") && i + 1 < argc) ymz = slurp(argv[++i]);                  // the YMZ280B's samples (Evil Night)
+		else if (!strcmp(argv[i], "-evil")) evil = true;                                  // the coin, start and trigger where Evil Night has them
 		else if (!strcmp(argv[i], "-tk") && i + 1 < argc) { tk = slurp(argv[++i]); tk.push_back(1); }  // the M48T58, then the board's byte: RAM 2 x 8 MB
 		else if (!strcmp(argv[i], "-ata") && i + 1 < argc) fata = fopen(argv[++i], "w");
 		else if (!strcmp(argv[i], "-full") && i + 1 < argc) ffull = fopen(argv[++i], "rb");     // the disc's raw image, as the SD card has it
@@ -80,10 +84,11 @@ int main(int argc, char **argv)
 	}
 	std::mt19937 rng(seed);
 
-	// DDR3 from 0x30000000: 96 MB, 8-byte words; the CD image from 0x32000000, loaded directly (it would take 24 M clocks)
-	const uint32_t BASE = 0x30000000u >> 3, WORDS = 12u << 20, CDW = 0x02000000u >> 3;
+	// DDR3 from 0x30000000: 104 MB, 8-byte words; the CD image from 0x32000000, loaded directly (it would take 24 M clocks)
+	const uint32_t BASE = 0x30000000u >> 3, WORDS = 13u << 20, CDW = 0x02000000u >> 3;
 	std::vector<uint64_t> ddr(WORDS, 0);
 	for (size_t i = 0; i < cd.size(); i++) ddr[CDW + i / 8] |= uint64_t(cd[i]) << 8 * (i % 8);
+	for (size_t i = 0; i < ymz.size(); i++) ddr[0x6000000 / 8 + i / 8] |= uint64_t(ymz[i]) << 8 * (i % 8);
 	struct rd { uint64_t d; int wait; };
 	std::deque<rd> rq;
 
@@ -92,7 +97,8 @@ int main(int argc, char **argv)
 	Vm2_boot t;
 	t.clk = 0; t.rst = 1; t.ld_wr = 0; t.ld_sel = 0; t.ddr_busy = 0; t.ddr_dout_ready = 0;
 	t.cd_mounted = ffull != nullptr; t.sd_ack = 0; t.sd_wr = 0;
-	t.in_p1 = 0xff; t.in_dsw = 0xff; t.in_p4 = 0xffff; t.in_p6 = 0xffff;
+	t.in_p1 = 0xff; t.in_dsw = 0xff; t.in_p4 = 0xffff; t.in_p6 = 0xffff; t.in_p5 = 0xffff;
+	for (int i = 0; i < 3; i++) { t.gun_x[i] = 320; t.gun_y[i] = 120; }
 	t.eval();
 
 	uint64_t cyc = 0;
@@ -130,9 +136,18 @@ int main(int argc, char **argv)
 					{
 						int d = r_frame - coin;
 						t.in_p1 = 0xff & ~((d >= 0 && d < 8) ? 1 : 0) & ~((d >= 120 && d % 240 < 8) ? 16 : 0);
+						if (evil)
+						{
+							t.in_p1 = 0xff & ~((d >= 0 && d < 8) ? 1 : 0);
+							t.in_p4 = 0xffff & ~((d >= 120 && d % 240 < 8) ? 0x80 : 0);
+							t.in_p5 = 0xffff & ~((d >= 300 && d % 40 < 6) ? 0x100 : 0);
+						}
+						else
+						{
 						int b = 0;
 						for (int q = 0; q < 4; q++) if (d >= 240 && (d + 40 * q) % 120 < 8) b |= 16 << q;
 						t.in_p4 = 0xffff & ~b;
+						}
 					}
 					if (hist_from >= 0 && r_frame >= hist_from && (r_frame - hist_from) % 120 == 119)
 						for (int j = 0; j < 2; j++)

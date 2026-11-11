@@ -17,7 +17,8 @@ from array import array
 L = 26 * 588   # a hole, in stereo samples
 XF = 256       # crossfade, in samples
 SIZE = 545835696
-FIXED_CRC32 = 0x80832654   # of the result
+AUDIO = 11928 * 2352       # where the music starts: after the data track, which a CHD may keep raw or as 2048-byte sectors (tools/m2disc.py pads those)
+FIXED_CRC32 = 0x98c5a5be   # of the result's music
 # hole's first sector, the first sample of the passage that fills it
 TABLE = [
     (12630, 14145872),
@@ -87,8 +88,8 @@ def main(src, dst):
     with open(tmp, 'wb') as f:
         f.write(data)
     os.replace(tmp, dst)
-    c = zlib.crc32(data)
-    print(f'{dst}: {len(TABLE)} holes filled, CRC32 {c:08x}' + (' (as expected)' if c == FIXED_CRC32 else ' (NOT as expected)'))
+    c = zlib.crc32(memoryview(data)[AUDIO:])
+    print(f'{dst}: {len(TABLE)} holes filled, the music\'s CRC32 {c:08x}' + (' (as expected)' if c == FIXED_CRC32 else ' (NOT as expected)'))
 
 
 if __name__ == '__main__':

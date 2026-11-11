@@ -18,12 +18,12 @@
 
       address= is the fast load: Main_MiSTer copies the ROM straight to its place in the DDR3; an older one streams it.
 
-      polystar_cd.zip isn't in a MAME set: make it from the set's 623jaa02.chd with tools/cdimage.py, the file in it named
-      polystar_cd.bin (24 MB), and put it beside polystar.zip.
+      polystar_cd.zip isn't in a MAME set: make it from the set's 623jaa02.chd with tools/m2disc.py (or tools/cdimage.py) or the browser converter
+      (https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/), the file in it named polystar_cd.bin (24 MB), and put it beside polystar.zip.
     -->
 
-    <!-- the sound's CD audio streams from the disc's whole raw image (2352 bytes a sector, 546 MB), not in a MAME set: chdman extractcd of 623jaa02.chd,
-         its .bin named polystar_full.bin, in games/polystar. Without it the game runs, without its music. Main releases up to 20261010 do not mount it from here: choose it once under "CD audio image" in the OSD and the core remembers it. -->
+    <!-- the sound's CD audio streams from the disc's whole raw image (2352 bytes a sector, 546 MB), not in a MAME set: tools/m2disc.py or the browser converter makes it from
+         623jaa02.chd (chdman extractcd, the music repaired), polystar_full.bin, in games/polystar. Without it the game runs, without its music. Main releases up to 20261010 do not mount it from here: choose it once under "CD audio image" in the OSD and the core remembers it. -->
     <file delay="1" type="s" index="0" path="polystar_full.bin"/>
 
     <rom index="0" zip="polystar.zip" md5="b1c472fff283fb868caf957ae389b9a7" address="0x30000000">
