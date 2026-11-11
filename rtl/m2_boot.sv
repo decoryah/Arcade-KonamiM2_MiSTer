@@ -17,9 +17,8 @@
 // PPC_CACHE_KB (a build option, default 32): each cache's size, instruction and data sides each (rtl/ppc_cache.sv's KB). 4 is
 // the 602's own (4 KB a side, the data side two-way, 32-byte lines; its instruction side is two-way too, here direct-mapped):
 // the board's speed and slowdowns, and much less block RAM; 32 runs faster than the board.
-`ifndef PPC_CACHE_KB
-`define PPC_CACHE_KB 32
-`endif
+// (not a `define here: Quartus carries a macro into the files it reads next, so KonamiM2.sv would see it defined, and its OSD
+// setting would go: CACHE_KB below)
 `default_nettype none
 module m2_boot #(
 	parameter int TICK = 8              // clocks a DEC / TB tick (the bus clock / 4)
@@ -56,6 +55,9 @@ module m2_boot #(
 	output logic        vdu_on,
 	output logic [15:0] audio_l,
 	output logic [15:0] audio_r,
+
+	// the CPUs' caches' size, each side (rtl/ppc_cache.sv's size: 0 PPC_CACHE_KB, 1 half, 2 a quarter, 3 an eighth), taken at reset
+	input  logic [1:0]  cache_size,
 
 	// the CD's audio: a raw image of the disc on the SD card
 	input  logic        cd_mounted,
@@ -95,6 +97,11 @@ module m2_boot #(
 	output logic [31:0] p2_ipc0_o,
 	output logic [31:0] p2_ipc_o
 );
+`ifdef PPC_CACHE_KB
+	localparam int CACHE_KB = `PPC_CACHE_KB;
+`else
+	localparam int CACHE_KB = 32;
+`endif
 	localparam int N = 2;
 
 	// ---- the map ------------------------------------------------------------------------------------------------------
@@ -172,9 +179,9 @@ module m2_boot #(
 			.fp_req(fp_req[g]), .fp_res
 		);
 		// verilator lint_on PINCONNECTEMPTY
-		ppc_cache #(.KB(`PPC_CACHE_KB)) cache
+		ppc_cache #(.KB(CACHE_KB)) cache
 		(
-			.clk, .rst(rs[g]), .sn_v(sn_v[g]), .sn_a,
+			.clk, .rst(rs[g]), .size(cache_size), .sn_v(sn_v[g]), .sn_a,
 			.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data, .i_mem(m_if.mem),
 			.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
 			.d_mem(m_d.mem), .d_cacheable(m_d.mem), .d_writable(!m_d.rom),
