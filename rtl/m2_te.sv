@@ -1559,7 +1559,7 @@ module m2_te (
 						mm_cmp <= 1'b1;
 						mm_pip <= 1'b0;
 						mm_n <= 28'd1;
-						ms_left <= 29'h00ffffff;
+						ms_left <= 29'h00ffffff; ms_more <= 1'b1;
 						cx_acc <= 64'd0; cx_n <= 7'd0; cx_out <= 64'd0; cx_on <= 7'd0; cx_grp <= 1'b0; cx_pe <= 1'b0;
 						cx_left <= 30'(signed'({2'b00, tm_count[27:0]}));
 						st <= T_MM;
@@ -1754,7 +1754,7 @@ module m2_te (
 						if (last && on == 7'd0 && !cx_pe)
 						begin
 							mm_n <= 28'd0;
-							ms_left <= 29'd0;
+							ms_left <= 29'd0; ms_more <= 1'b0;
 						end
 					end
 				end
