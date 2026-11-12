@@ -202,9 +202,13 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.sd_buff_wr(sd_buff_wr)
 );
 
-// the board's byte (the MRA, index 3, after the M48T58's 8 KB): bit 0 RAM 2 x 8 MB (m2_boot), bit 1 the guns and their inputs, bit 2 Total Vice's two players, who reload by shooting off the screen
+// the board's byte (the MRA, index 3, after the M48T58's 8 KB): bit 0 RAM 2 x 8 MB (m2_boot), bit 1 the guns and their inputs, bit 2 Total Vice's two players, who reload by shooting off the screen, bit 3 the CD's data sectors streamed from the mounted image (rtl/m2_boot.sv, CD_STREAM: Battle Tryst's build)
 reg   [7:0] board = 8'h00;
+`ifdef NO_GUN_BOARD
+wire        gun_game = 1'b0;   // (no guns in this build: the inputs as a stick's, and the OSD without the gun settings, whatever the MRA says)
+`else
 wire        gun_game = board[1];
+`endif
 always @(posedge clk_sys) if (ioctl_wr && ioctl_download && ioctl_index == 16'd3 && ioctl_addr == 27'h2000) board <= ioctl_dout;
 
 // the DIP switches (the MRA's <switches>, ioctl index 254): byte 0 is IO1 2, MAME's P2: bit 0 the sound, 1 mono, bit 1 the screen, 0 flipped;

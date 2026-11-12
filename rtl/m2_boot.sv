@@ -419,10 +419,10 @@ module m2_boot #(
 	logic        ram8 = 1'b0;
 	// verilator lint_off UNUSEDSIGNAL
 	// verilator lint_off PROCASSINIT
-	logic        cd_stream = 1'b0;      // (bit 1: the CD's data sectors from the mounted image, not memory; only with CD_STREAM)
+	logic        cd_stream = 1'b0;      // (bit 3: the CD's data sectors from the mounted image, not memory; only with CD_STREAM)
 	// verilator lint_on PROCASSINIT
 	// verilator lint_on UNUSEDSIGNAL
-	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[1]; end
+	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[3]; end
 	m2_bda bda
 	(
 		.clk, .rst, .vpos,

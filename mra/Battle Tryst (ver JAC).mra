@@ -10,7 +10,7 @@
     <!--
       Battle Tryst's own build (KonamiM2.qsf's Battle Tryst lines), as KonamiM2Tryst_<date>.rbf in _Arcade/cores: the Z buffer in the SDRAM board's memory, compressed texture loads, the
       MPEG unit's control, and the CD's data sectors streamed from the mounted image. As Heat of Eleven's MRA, with RAM 2 x 8 MB and an
-      M48T58: index 3 is its 8 KB, then a byte for the board: bit 0 the larger RAM, bit 1 the CD's data sectors streamed from the mounted
+      M48T58: index 3 is its 8 KB, then a byte for the board: bit 0 the larger RAM, bit 3 the CD's data sectors streamed from the mounted
       image (the data track is 367 MB). Index 1 is only the drive's answers that aren't sectors (2048 bytes). The MPEG intro's pictures
       aren't decoded: it shows black.
 
@@ -37,6 +37,6 @@
 
     <rom index="3" zip="btltryst.zip" md5="none">
         <part name="m48t58"/>
-        <part>03</part>
+        <part>09</part>
     </rom>
 </misterromdescription>
