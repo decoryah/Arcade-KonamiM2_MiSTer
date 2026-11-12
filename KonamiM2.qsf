@@ -87,9 +87,7 @@ set_global_assignment -name SEED 4
 #set_global_assignment -name VERILOG_MACRO "TE_NO_FB32=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_ALPHACTL=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_WCLIPIN=1"
-#set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_A=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
-#set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_Z=1"
 #set_global_assignment -name SEED 5
 
 # disable bilinear filtering when downscaling
