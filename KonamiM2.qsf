@@ -74,7 +74,7 @@ set_global_assignment -name SEED 4
 #set_global_assignment -name VERILOG_MACRO "PPC_CACHE_KB=4"
 # Battle Tryst's build: its 800 x 300 Z buffer in the SDRAM board's memory, and what the game doesn't use left out to make room for its compressed
 # texture loads, the MPEG unit's control and the CD streaming (see rtl/m2_te.sv and rtl/ppc_pipe.sv). Its RBF goes in _Arcade/cores as
-# KonamiM2Tryst_<date>.rbf, the name its MRA asks for. It needs the SDRAM board. (Seed 8; its timing rests on the seed, most misses short on
+# KonamiM2Tryst_<date>.rbf, the name its MRA asks for. It needs the SDRAM board. (Seed 5; its timing rests on the seed, most misses short on
 # the SDRAM's read data, from the pins' registers into the Z line)
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
@@ -90,7 +90,7 @@ set_global_assignment -name SEED 4
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_A=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_Z=1"
-#set_global_assignment -name SEED 8
+#set_global_assignment -name SEED 5
 
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
