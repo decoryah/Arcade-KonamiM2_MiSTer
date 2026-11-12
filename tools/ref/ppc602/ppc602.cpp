@@ -794,7 +794,8 @@ void ppc602::op3b(uint32_t op)
 		case 0x14: v = rnds(x86_sub(a, b)); break;                                                        // FSUBS
 		case 0x19: v = rnds(x86_mul(a, c)); break;                                                        // FMULS
 		case 0x12: v = ::rnds(x86_div(a, b)); break;                                                      // FDIVS
-		case 0x16: raise(EX_PROGRAM, 0x80000);                                                          // FSQRTS: illegal on the 602
+		case 0x16: if (exact_sqrt) { v = ::rnds(std::sqrt(b)); break; }                             // FSQRTS (exact_sqrt)
+		           raise(EX_PROGRAM, 0x80000);                                                          // FSQRTS: illegal on the 602
 		case 0x18: { volatile float s = float(b); volatile float q = 1.0f / s; v = double(q); break; } // FRES
 		case 0x1d: { double p = x86_mul(a, c); v = rnds(x86_add(p, b)); break; }                             // FMADDS
 		case 0x1c: { double p = x86_mul(a, c); v = rnds(x86_sub(p, b)); break; }                             // FMSUBS
@@ -820,8 +821,11 @@ void ppc602::op3f(uint32_t op)
 			case 0x14: setfd(RD, x86_sub(a, b)); break;                                                   // FSUB
 			case 0x19: setfd(RD, x86_mul(a, c)); break;                                                   // FMUL
 			case 0x12: setfd(RD, x86_div(a, b)); break;                                                   // FDIV
-			case 0x16: raise(EX_PROGRAM, 0x80000);                                                      // FSQRT: illegal on the 602
-			case 0x1a: setfd(RD, rsqrte602(b)); break;                                                  // FRSQRTE: the 602's table
+			case 0x16: if (exact_sqrt) { setfd(RD, std::sqrt(b)); break; }                          // FSQRT (exact_sqrt)
+			           raise(EX_PROGRAM, 0x80000);                                                      // FSQRT: illegal on the 602
+			case 0x1a:                                                                                  // FRSQRTE: the 602's table
+				if (exact_sqrt) { volatile double s = std::sqrt(b); setfd(RD, 1.0 / s); break; }        // (exact_sqrt: 1 / sqrt)
+				setfd(RD, rsqrte602(b)); break;
 			case 0x17: f[RD] = a >= 0.0 ? f[RC_] : f[RB]; return;                                      // FSEL
 			case 0x1d: p = x86_mul(a, c); setfd(RD, x86_add(p, b)); break;                                   // FMADD
 			case 0x1c: p = x86_mul(a, c); setfd(RD, x86_sub(p, b)); break;                                   // FMSUB

@@ -89,6 +89,10 @@ public:
 	// the unit's, fused, a NaN its own) and the FP-unavailable exception (fpu_exc: a float instruction with MSR[FP] clear)
 	bool sp = false;
 	bool fpu_exc = false;
+	// as the old core (rtl/ppc_core.sv with rtl/ppc_fpu.sv, not in the build) and MAME 0.289 (whose captures sim/ppcreplay
+	// replays) have them: fsqrt(s) and an exact frsqrte (1 / sqrt), not the 602's (a program exception; its table). For the
+	// double forms (not with sp, the pipeline's)
+	bool exact_sqrt = false;
 	uint32_t fint = 0;
 	void sp_canon();            // sp: each FPR as lfd (and the RTL's debug write) takes it
 
