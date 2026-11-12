@@ -7,8 +7,8 @@
     <rbf>KonamiM2Heat</rbf>
 
     <!--
-      Heat of Eleven's own build (KonamiM2.qsf's Heat of Eleven lines, its 38 blocks of Z), as KonamiM2Heat_<date>.rbf in
-      _Arcade/cores: not KonamiM2_..., which the other MRAs' "KonamiM2" would also find.
+      Heat of Eleven's own build (KonamiM2.qsf's Heat of Eleven lines, its Z buffer in the SDRAM board's memory), as
+      KonamiM2Heat_<date>.rbf in _Arcade/cores: not KonamiM2_..., which the other MRAs' "KonamiM2" would also find.
 
       As Tobe! Polystars' MRA, with the 636a01 boot ROM, RAM 2 x 8 MB and an M48T58 (dallas.5e): index 3 is its 8 KB, then
       a byte for the board, whose bit 0 asks for the larger RAM. The core shows the game's low resolution.

@@ -59,12 +59,15 @@ set_global_assignment -name SEED 4
 #do not enable DEBUG_NOHDMI in release!
 #set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
-# Heat of Eleven's build: its Low Res draws 640 x 240, so 38 blocks of Z, with the small memories out of block RAM to pay for them, and a seed that routes it (4; 2 meets timing but a TV showed no picture over HDMI, 11 misses the HDMI clock).
+# Heat of Eleven's build: its Low Res draws 640 x 240, a Z buffer larger than the default build's, so its Z buffer is in the SDRAM board's
+# memory, as Battle Tryst's (in block RAM it needs 38 blocks of Z, and with release 20261110's 32 KB caches that doesn't fit: 678 M10K of
+# 553). The small memories out of block RAM (SMALL_MEMS), no gun board (the YMZ280B and the guns are the gun games'), and a seed that routes
+# it (2). The CPUs' caches are the OSD's choice, 32 KB a side or less ("4 KB as the 602").
 # Its RBF goes in _Arcade/cores as KonamiM2Heat_<date>.rbf, the name its MRA asks for (a KonamiM2_... name would also be found by the other MRAs' "KonamiM2")
-#set_global_assignment -name VERILOG_MACRO "Z_BLOCKS=38"
+#set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "SMALL_MEMS=1"
 #set_global_assignment -name VERILOG_MACRO "NO_GUN_BOARD=1"
-#set_global_assignment -name SEED 4
+#set_global_assignment -name SEED 2
 
 # The CPUs' caches, KB a side (rtl/m2_boot.sv): 4 is the 602's own (the real board's speed and slowdowns, and much less block RAM);
 # without it, 32
