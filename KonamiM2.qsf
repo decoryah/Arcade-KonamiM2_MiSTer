@@ -63,6 +63,7 @@ set_global_assignment -name SEED 4
 # Its RBF goes in _Arcade/cores as KonamiM2Heat_<date>.rbf, the name its MRA asks for (a KonamiM2_... name would also be found by the other MRAs' "KonamiM2")
 #set_global_assignment -name VERILOG_MACRO "Z_BLOCKS=38"
 #set_global_assignment -name VERILOG_MACRO "SMALL_MEMS=1"
+#set_global_assignment -name VERILOG_MACRO "NO_GUN_BOARD=1"
 #set_global_assignment -name SEED 4
 
 # The CPUs' caches, KB a side (rtl/m2_boot.sv): 4 is the 602's own (the real board's speed and slowdowns, and much less block RAM);
@@ -75,6 +76,7 @@ set_global_assignment -name SEED 4
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
 #set_global_assignment -name VERILOG_MACRO "MPEG_CTL=1"
+#set_global_assignment -name VERILOG_MACRO "NO_GUN_BOARD=1"
 #set_global_assignment -name VERILOG_MACRO "TE_COMPRESSED=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"

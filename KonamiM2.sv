@@ -316,6 +316,7 @@ wire  [2:0] gun_show = !gun_game ? 3'b000 : status[45:43] == 3'd1 ? 3'b001 : sta
                        status[45:43] == 3'd4 ? 3'b011 : status[45:43] == 3'd5 ? 3'b111 : 3'b000;
 wire  [9:0] gun_x_o [0:2];
 wire  [7:0] gun_y_o [0:2];
+`ifndef NO_GUN_BOARD
 m2_guns u_guns
 (
 	.clk(clk_sys), .rst(core_rst | ~gun_game), .vblank(vblank),
@@ -323,6 +324,13 @@ m2_guns u_guns
 	.gun_x(gun_x_o), .gun_y(gun_y_o), .p5(gun_p5),
 	.show(gun_show), .hpos(hpos), .vpos(vpos), .rgb_in(rgb_game), .rgb_out(rgb)
 );
+`else
+// (NO_GUN_BOARD: no guns, in a build that isn't for the gun games: Heat of Eleven's, Battle Tryst's)
+assign gun_x_o = '{10'd0, 10'd0, 10'd0};
+assign gun_y_o = '{8'd0, 8'd0, 8'd0};
+assign gun_p5 = 16'hffff;
+assign rgb = rgb_game;
+`endif
 generate
 	genvar g;
 	for (g = 0; g < 3; g = g + 1)

@@ -76,7 +76,7 @@ module m2_bus (
 	output logic [2:0]  q_own [0:11],   // the reads out, whose
 	output logic [3:0]  q_n
 );
-	// master 7: the MPEG unit in a build with MPEG_CTL (Battle Tryst), else the YMZ280B (the gun games' sub board): never both
+	// master 7: the MPEG unit in a build with MPEG_CTL (Battle Tryst), else the YMZ280B (the gun games' sub board; with NO_GUN_BOARD no one): never both
 	localparam logic [2:0] M_DMA = 3'd2, M_ATA = 3'd3, M_VDU = 3'd4, M_TE = 3'd5, M_DSP = 3'd6, M_7 = 3'd7;
 `ifdef MPEG_CTL
 	wire         m7_rd = mpg_rd;

@@ -536,6 +536,14 @@ module m2_boot #(
 	// as the game makes them (MAME's unit mask allows the byte lanes of any size)
 	logic [7:0]  ymz_ext, ymz_st;
 	logic signed [15:0] ymz_l, ymz_r;
+	// the gun games' sub board's YMZ280B: not in a build with NO_GUN_BOARD (Heat of Eleven's, Battle Tryst's), and never with MPEG_CTL,
+	// as the MPEG unit and the YMZ280B are both master 7 of the bus (rtl/m2_bus.sv)
+`ifdef MPEG_CTL
+`ifndef NO_GUN_BOARD
+	m2_error_MPEG_CTL_needs_NO_GUN_BOARD mpeg_ctl_needs_no_gun_board();   // (a build with MPEG_CTL must also set NO_GUN_BOARD)
+`endif
+`endif
+`ifndef NO_GUN_BOARD
 	wire         ymz_wr = u_req && u_we && u_ymz;
 	wire         ymz_rd = u_req && !u_we && u_ymz;
 	m2_ymz280b ymz
@@ -547,6 +555,12 @@ module m2_boot #(
 		.m_rd(ymz_m_rd), .m_a(ymz_rom_a), .m_busy(ymz_m_busy), .m_ready(ymz_m_ready), .m_dout(ddr_dout),
 		.out_l(ymz_l), .out_r(ymz_r), .rnd_done(), .rnd_l(), .rnd_r()
 	);
+`else
+	// (NO_GUN_BOARD: no YMZ280B; its registers read 0, it adds nothing to the sound, and master 7 of the bus is the MPEG unit's or no one's)
+	assign ymz_ext = 8'h00; assign ymz_st = 8'h00;
+	assign ymz_l = 16'sd0; assign ymz_r = 16'sd0;
+	assign ymz_m_rd = 1'b0; assign ymz_rom_a = '0;
+`endif
 	always_ff @(posedge clk)
 	begin
 		cdv_l <= $signed(cda_l) * $signed({1'b0, cd_vol_l});
