@@ -2316,7 +2316,7 @@ module te_fetch (
 	logic [7:0]  d2_r, d2_g, d2_b, d3_r, d3_g, d3_b;
 	logic [7:0]  d2_at, d3_at;
 	logic        d2_st, d3_st;
-	wire  [23:0] a3_sum = 24'(vo) + 24'(a3_u);
+	wire  [20:0] a3_sum = 21'(vo) + 21'(a3_u);
 	wire  [26:0] a4_ad = 27'({lod0, 3'b000}) + 27'(a4_off) * 27'(tdepth);
 
 	logic [31:0] d1_tx, d1_sh;
@@ -2389,7 +2389,7 @@ module te_fetch (
 		begin
 			a2_u <= u < umax ? u : umax;
 			a3_u <= a2_u;
-			a4_off <= 21'(a3_sum);
+			a4_off <= a3_sum;
 			t_ra <= a4_ad[16:5];
 			t_ra0 <= 11'(a4_ad[16:6]) + 11'(a4_ad[5]);
 			t_sel <= t_ra[0];
