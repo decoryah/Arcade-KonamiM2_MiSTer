@@ -1032,7 +1032,7 @@ module m2_te (
 		yo = 14'($signed(db_soff[11:0])); xo = 14'($signed(db_soff[27:16]));
 		ov_dn <= 34'(yc - 14'sd1) * 34'(db_dstride[10:0]) + 34'(xc);
 		ov_sn0 <= 34'(yo) * 34'(db_sstride[10:0]) + 34'(xo);
-		ov_sn1 <= 34'(yo + yc - 14'sd1) * 34'(db_sstride[10:0]) + 34'(xo) + 34'(xc);
+		ov_sn1 <= (34'(yo) + 34'(yc) - 34'sd1) * 34'(db_sstride[10:0]) + 34'(xo) + 34'(xc);
 		dlo = 34'(db_dbase);
 		dhi = 34'(db_dbase) + (db_dctl[0] ? ov_dn <<< 2 : ov_dn <<< 1);
 		slo = 34'(db_sbase) + (db_sctl[0] ? ov_sn0 <<< 2 : ov_sn0 <<< 1);

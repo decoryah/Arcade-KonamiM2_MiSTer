@@ -270,18 +270,6 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	end
 
 	// the barrel
-	logic [4:0]  shift_n;
-	always_comb
-		case (barrel[3] ? 3'(4'd0 - barrel) : barrel[2:0])
-			3'd0: shift_n = 5'd0;
-			3'd1: shift_n = 5'd1;
-			3'd2: shift_n = 5'd2;
-			3'd3: shift_n = 5'd3;
-			3'd4: shift_n = 5'd4;
-			3'd5: shift_n = 5'd5;
-			3'd6: shift_n = 5'd8;
-			default: shift_n = 5'd16;
-		endcase
 	function automatic logic [19:0] bshift(input logic [19:0] r, input logic [3:0] b, input logic v, input logic n);
 		logic [4:0] sn;
 		case (b[3] ? 3'(4'd0 - b) : b[2:0])
@@ -308,7 +296,9 @@ module m2_dspp #(parameter logic FROZEN = 1'b0) (   // FROZEN: the counter and t
 	logic signed [31:0] mul_q;
 	// verilator lint_on UNUSEDSIGNAL
 	always_ff @(posedge clk) mul_q <= $signed(mul_a) * $signed(rv);
-	wire signed [31:0] mul_now = $signed(mul_a) * $signed(rv);    // (A2 takes it in its own clock)
+	// verilator lint_off UNUSEDSIGNAL
+	wire signed [31:0] mul_now = $signed(mul_a) * $signed(rv);    // (A2 takes it in its own clock: bits 30 to 11)
+	// verilator lint_on UNUSEDSIGNAL
 
 	wire         hw = we && h_data;     // the host's write to the data space: it goes first, the program waits a clock
 	wire [9:0]   w_a = hw ? a[9:0] : wa;
