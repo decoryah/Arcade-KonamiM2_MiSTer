@@ -35,8 +35,10 @@ module m2_bus (
 	output logic        dsp_busy,
 	output logic        dsp_ready,
 
-	input  logic        mpg_rd,         // (4 words)
+	// verilator lint_off UNUSEDSIGNAL
+	input  logic        mpg_rd,         // (4 words; not used in a build without MPEG_CTL)
 	input  logic [31:3] mpg_a,
+	// verilator lint_on UNUSEDSIGNAL
 	output logic        mpg_busy,
 	output logic        mpg_ready,
 
@@ -46,8 +48,10 @@ module m2_bus (
 	output logic        vdu_busy,
 	output logic        vdu_ready,
 
-	input  logic        ymz_rd,         // (one)
+	// verilator lint_off UNUSEDSIGNAL
+	input  logic        ymz_rd,         // (one; not used in a build with NO_GUN_BOARD)
 	input  logic [31:3] ymz_a,
+	// verilator lint_on UNUSEDSIGNAL
 	output logic        ymz_busy,
 	output logic        ymz_ready,
 

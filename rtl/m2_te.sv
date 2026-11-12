@@ -942,12 +942,12 @@ module m2_te (
 			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
 			if (wk[8] && wk[7] && wy[8] == wy[7])
 			begin
-				logic [14:0] au, av, st;    // (15 bits: the step's magnitude, -16384's too)
+				logic [14:0] au, av, tstep;    // (15 bits: the step's magnitude, -16384's too)
 				au = t_du[14] ? 15'(-t_du) : t_du;
 				av = t_dv[14] ? 15'(-t_dv) : t_dv;
-				st = au > av ? au : av;
-				t_min <= st > 15'd16;
-				t_lod <= st[14:7] != 8'd0 ? (lodmax > 2'd2 ? 2'd3 : lodmax) : st[6] ? (lodmax > 2'd1 ? 2'd2 : lodmax) : st[5] && lodmax != 2'd0 ? 2'd1 : 2'd0;
+				tstep = au > av ? au : av;
+				t_min <= tstep > 15'd16;
+				t_lod <= tstep[14:7] != 8'd0 ? (lodmax > 2'd2 ? 2'd3 : lodmax) : tstep[6] ? (lodmax > 2'd1 ? 2'd2 : lodmax) : tstep[5] && lodmax != 2'd0 ? 2'd1 : 2'd0;
 			end
 			wk <= {wk[8:1], v0_go};
 			wy <= {wy[8:1], y[0]};
@@ -1627,7 +1627,7 @@ module m2_te (
 						logic [5:0]  cb;
 						logic        emit, last;
 						logic [5:0]  r, rmax;
-						logic [31:0] rep, x2, colour2, val2;
+						logic [31:0] rep, xb2, colour2, val2;
 						logic        two, run_rep, run_last, ctl;
 						acc = cx_acc; n = cx_n; oacc = cx_out; on = cx_on;
 						emit = 1'b0; last = 1'b0; val = cx_val; r = 6'd1; val2 = 32'h0; ctl = 1'b0;
@@ -1647,7 +1647,7 @@ module m2_te (
 						// (a string of texels with only a colour each: two a clock when the bits are here, the second from the bits after the first's)
 						two = cx_grp && cx_str && !cx_tr && cx_fs == 2'd0 && cx_ab == 4'd0 && !cx_ssb && cx_cbits != 6'd0 && cx_cbits <= 6'd16
 							&& cx_dbits <= 6'd16 && cx_cnt >= 7'd2 && n >= (k << 1);
-						x2 = 32'(acc >> (n - (k << 1))) & 32'((33'd1 << k) - 33'd1);
+						xb2 = 32'(acc >> (n - (k << 1))) & 32'((33'd1 << k) - 33'd1);
 						if (!cx_grp)
 						begin
 							if (cx_left <= 30'sd0) last = 1'b1;
@@ -1689,7 +1689,7 @@ module m2_te (
 									if (two)
 									begin
 										n = n - k;
-										colour2 = cx_lit ? x2 : x2 + 32'(cx_cnst[7:0]);
+										colour2 = cx_lit ? xb2 : xb2 + 32'(cx_cnst[7:0]);
 										val2 = (colour2 & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
 											| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
 										cx_val <= val2;
@@ -1727,7 +1727,7 @@ module m2_te (
 						// word's the top 32 when there are 32 (and what's left at the end, padded with zeros, as MAME's)
 						cx_pe <= emit;
 						cx_pv <= (val << (6'd32 - cx_dbits)) | (two && emit ? val2 << (7'd32 - (7'(cx_dbits) << 1)) : 32'h0);
-						cx_pr <= r;
+						cx_pr <= 3'(r);         // (a run's at most four)
 						cx_pp <= two && emit;
 						if (cx_pe)
 						begin

@@ -53,7 +53,9 @@ module m2_atapi #(
 	output logic        sd_rd,
 	input  logic        sd_ack,
 	input  logic        sd_wr,
-	input  logic [7:0]  sd_d,
+	// verilator lint_off UNUSEDSIGNAL
+	input  logic [7:0]  sd_d,           // (not used in a build without CD_STREAM)
+	// verilator lint_on UNUSEDSIGNAL
 
 	// the audio
 	output logic        play,
@@ -124,7 +126,9 @@ module m2_atapi #(
 	logic          s_rv;
 	logic [55:0]   s_w;
 	logic [7:0]    cq;
-	wire           c_we = g_st == G_DATA && sd_wr && !g_n[12] && !g_drop;
+	// verilator lint_off UNUSEDSIGNAL
+	wire           c_we = g_st == G_DATA && sd_wr && !g_n[12] && !g_drop;   // (the ring's: CD_STREAM)
+	// verilator lint_on UNUSEDSIGNAL
 `ifdef CD_STREAM
 	ppc_ram #(.W(8), .AW(CW)) cache (.clk, .we(c_we), .wa(g_wa), .wd(sd_d), .ra(s_r), .rd(cq));
 `else

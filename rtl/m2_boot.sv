@@ -248,7 +248,10 @@ module m2_boot #(
 	logic [31:3] ata_m_a;
 	logic        dsp_m_rd, dsp_m_busy, dsp_m_ready;
 	logic [31:3] dsp_m_a;
-	logic        mpg_m_rd, mpg_m_busy, mpg_m_ready;
+	logic        mpg_m_rd;
+	// verilator lint_off UNUSEDSIGNAL
+	logic        mpg_m_busy, mpg_m_ready;   // (not used in a build without MPEG_CTL)
+	// verilator lint_on UNUSEDSIGNAL
 	logic [31:3] mpg_m_a;
 	logic        te_m_rd, te_m_we, te_m_busy, te_m_ready, te_busy;
 	logic [23:0] v_rgb;
@@ -260,7 +263,10 @@ module m2_boot #(
 	logic        g_rd, g_we;
 	logic [7:0]  g_burst, g_be;
 	logic [63:0] g_wd;
-	logic        ymz_m_rd, ymz_m_busy, ymz_m_ready;
+	logic        ymz_m_rd;
+	// verilator lint_off UNUSEDSIGNAL
+	logic        ymz_m_busy, ymz_m_ready;   // (not used in a build with NO_GUN_BOARD)
+	// verilator lint_on UNUSEDSIGNAL
 	logic [21:3] ymz_rom_a;
 	wire  [31:3] ymz_m_a = {6'h15, 4'd0, ymz_rom_a};
 	logic        dma_busy, dma_ready;
@@ -411,7 +417,11 @@ module m2_boot #(
 	// verilator lint_off PINCONNECTEMPTY
 	// the board, from the download (kept through a reset)
 	logic        ram8 = 1'b0;
-	logic        cd_stream = 1'b0;      // (bit 1: the CD's data sectors from the mounted image, not memory)
+	// verilator lint_off UNUSEDSIGNAL
+	// verilator lint_off PROCASSINIT
+	logic        cd_stream = 1'b0;      // (bit 1: the CD's data sectors from the mounted image, not memory; only with CD_STREAM)
+	// verilator lint_on PROCASSINIT
+	// verilator lint_on UNUSEDSIGNAL
 	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[1]; end
 	m2_bda bda
 	(
