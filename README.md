@@ -183,6 +183,12 @@ skipped.
 
 Quartus Prime Lite 17.0: open `KonamiM2.qpf` and compile; the RBF is `output_files/KonamiM2.rbf`.
 
+Or from the command line, with `quartus_sh` on the PATH: `python3 tools/build.py [default|heat|tryst]` compiles the default
+build, Heat of Eleven's or Battle Tryst's (the qsf's lines for it, its seed) in a copy under `build/`, and puts the RBF in
+`releases/` as `KonamiM2_<date>.rbf`, `KonamiM2Heat_<date>.rbf` or `KonamiM2Tryst_<date>.rbf` (the names the MRAs ask for),
+with its fitter and timing summaries, if it meets timing on every clock. `tools/package.py` puts the games' builds of the
+release's date in its zip, with their MRAs.
+
 ## Capturing from MAME
 
 `tools/lua/m2_capture.lua` records what Polystars asks of the triangle engine and the rest of the BDA: lists, triangles and
