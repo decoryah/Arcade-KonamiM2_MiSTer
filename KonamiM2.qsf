@@ -48,8 +48,8 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-# seed 4: release 20261112's build (seeds 5 and 2 miss HDMI's timing)
-set_global_assignment -name SEED 4
+# seed 11: this tree's default build (release 20261112's seed 4 doesn't route it; seed 2 meets timing but a MiSTerPi's TV said "Invalid Format" at 720p)
+set_global_assignment -name SEED 11
 
 
 
