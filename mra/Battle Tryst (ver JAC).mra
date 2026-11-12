@@ -15,10 +15,9 @@
       aren't decoded: it shows black.
 
       btltryst_cd.zip and btltryst_full.bin aren't in a MAME set; from the set's 636jac02.chd:
-        chdman extractcd -i btltryst/636jac02.chd -o x.cue -ob x.bin
-        python3 tools/fullimage.py x.cue btltryst_full.bin            (422,546,208 bytes, with btltryst_full.cue: in games/btltryst)
-        python3 tools/cdimage.py chdman btltryst/636jac02.chd btltryst_cd.bin, with its header option (2048 bytes)
-        zip btltryst_cd.zip btltryst_cd.bin                            (beside btltryst.zip)
+        python3 tools/m2disc.py btltryst/636jac02.chd
+      puts btltryst_cd.zip (2048 bytes in it) beside btltryst.zip, and btltryst_full.bin (422,546,208 bytes, with
+      btltryst_full.cue) in games/btltryst.
       Main releases up to 20261010 don't mount btltryst_full.bin from here: choose it once under "CD audio image" in the OSD.
     -->
 

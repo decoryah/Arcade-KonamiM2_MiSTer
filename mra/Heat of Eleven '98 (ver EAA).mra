@@ -13,8 +13,9 @@
       As Tobe! Polystars' MRA, with the 636a01 boot ROM, RAM 2 x 8 MB and an M48T58 (dallas.5e): index 3 is its 8 KB, then
       a byte for the board, whose bit 0 asks for the larger RAM. The core shows the game's low resolution.
 
-      heatof11_cd.zip isn't in a MAME set: make it from the set's 703eaa02.chd with tools/cdimage.py, the file in it named
-      heatof11_cd.bin (25 MB), and put it beside heatof11.zip. The music streams from heatof11_full.bin in games/heatof11.
+      heatof11_cd.zip and heatof11_full.bin aren't in a MAME set: make them from the set's 703eaa02.chd with
+      python3 tools/m2disc.py heatof11/703eaa02.chd, and put heatof11_cd.zip (25 MB in it) beside heatof11.zip and
+      heatof11_full.bin (315 MB, the music streams from it) in games/heatof11.
     -->
 
     <file delay="1" type="s" index="0" path="heatof11_full.bin"/>

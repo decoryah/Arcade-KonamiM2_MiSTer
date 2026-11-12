@@ -77,7 +77,8 @@ Built with Quartus 17.0: 37,938 of 41,910 ALMs (91 %), timing met on every clock
      says so if a CHD is none of the three or another version of the game: Total Vice's AAB, JAD and UAC discs have the same tracks,
      and the core runs only EBA's. Total Vice's CHD keeps its data track as 2048-byte sectors, and the core finds the music by 2352-byte
      ones, so the tool pads that track in `totlvice_full.bin`; it does the same for an older Polystars CHD kept that way. Polystars'
-     music it also repairs (below).
+     music it also repairs (below). It makes Heat of Eleven's and Battle Tryst's files too (`heatof11/703eaa02.chd`,
+     `btltryst/636jac02.chd`), for their own builds: their MRAs say where they go.
    - **Any of the three, in a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
      (for Polystars, keep *Repair gaps in Polystars music* ticked) and download the three files it makes. The conversion runs on your
      computer, and the CHD isn't uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory.
