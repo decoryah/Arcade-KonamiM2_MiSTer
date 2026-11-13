@@ -202,7 +202,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.sd_buff_wr(sd_buff_wr)
 );
 
-// the board's byte (the MRA, index 3, after the M48T58's 8 KB): bit 0 RAM 2 x 8 MB (m2_boot), bit 1 the guns and their inputs, bit 2 Total Vice's two players, who reload by shooting off the screen, bit 3 the CD's data sectors streamed from the mounted image (rtl/m2_boot.sv, CD_STREAM: Battle Tryst's build)
+// the board's byte (the MRA, index 3, after the M48T58's 8 KB): bit 0 RAM 2 x 8 MB (m2_boot), bit 1 the guns and their inputs, bit 2 Total Vice's two players, who reload by shooting off the screen, bit 3 the CD's data sectors streamed from the mounted image (rtl/m2_boot.sv, CD_STREAM: Battle Tryst's build), bit 4 the arcade monitor's raster, 512 x 384, and High Res (rtl/m2_vtiming.sv: Hell Night)
 reg   [7:0] board = 8'h00;
 `ifdef NO_GUN_BOARD
 wire        gun_game = 1'b0;   // (no guns in this build: the inputs as a stick's, and the OSD without the gun settings, whatever the MRA says)
@@ -264,7 +264,7 @@ end
 wire        p2_start = joystick_1[7] | (status[3] & joystick_0[6]);
 
 wire  [9:0] gun_x [0:2];
-wire  [7:0] gun_y [0:2];
+wire  [8:0] gun_y [0:2];
 wire [15:0] gun_p5;
 wire  [9:0] hpos;
 wire  [8:0] vpos;
@@ -301,11 +301,12 @@ m2_boot #(.TICK(8)) u_boot
 
 ///////////////////////   VIDEO   ///////////////////////
 
-// The raster: 857 x 262 at 59.39 Hz, 640 x 240 shown (near MAME's set_ntsc(); rtl/m2_vtiming.sv)
+// The raster: 857 x 262 at 59.39 Hz, 640 x 240 shown (near MAME's set_ntsc(); rtl/m2_vtiming.sv); with the board byte's bit 4 (Hell
+// Night's), the arcade monitor's, 684 x 416 at 58.6 Hz, 512 x 384 shown (MAME's set_arcres())
 wire        ce_pix, hblank, vblank, hsync, vsync;
 m2_vtiming u_vtiming
 (
-	.clk(clk_sys), .rst(~pll_locked),
+	.clk(clk_sys), .rst(~pll_locked), .arc(board[4]),
 	.ce_pix(ce_pix), .hpos(hpos), .vpos(vpos), .hblank(hblank), .vblank(vblank), .hsync(hsync), .vsync(vsync)
 );
 
@@ -319,19 +320,19 @@ wire  [1:0] gun_mode [0:2] = '{status[36:35], status[38:37], status[40:39]};
 wire  [2:0] gun_show = !gun_game ? 3'b000 : status[45:43] == 3'd1 ? 3'b001 : status[45:43] == 3'd2 ? 3'b010 : status[45:43] == 3'd3 ? 3'b100 :
                        status[45:43] == 3'd4 ? 3'b011 : status[45:43] == 3'd5 ? 3'b111 : 3'b000;
 wire  [9:0] gun_x_o [0:2];
-wire  [7:0] gun_y_o [0:2];
+wire  [8:0] gun_y_o [0:2];
 `ifndef NO_GUN_BOARD
 m2_guns u_guns
 (
 	.clk(clk_sys), .rst(core_rst | ~gun_game), .vblank(vblank),
-	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[42:41]), .off_fire(board[2]),
+	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[42:41]), .off_fire(board[2]), .arc(board[4]),
 	.gun_x(gun_x_o), .gun_y(gun_y_o), .p5(gun_p5),
 	.show(gun_show), .hpos(hpos), .vpos(vpos), .rgb_in(rgb_game), .rgb_out(rgb)
 );
 `else
 // (NO_GUN_BOARD: no guns, in a build that isn't for the gun games: Heat of Eleven's, Battle Tryst's)
 assign gun_x_o = '{10'd0, 10'd0, 10'd0};
-assign gun_y_o = '{8'd0, 8'd0, 8'd0};
+assign gun_y_o = '{9'd0, 9'd0, 9'd0};
 assign gun_p5 = 16'hffff;
 assign rgb = rgb_game;
 `endif
@@ -340,7 +341,7 @@ generate
 	for (g = 0; g < 3; g = g + 1)
 	begin : gun_out
 		assign gun_x[g] = gun_game ? gun_x_o[g] : 10'd0;
-		assign gun_y[g] = gun_game ? gun_y_o[g] : 8'd0;
+		assign gun_y[g] = gun_game ? gun_y_o[g] : 9'd0;
 	end
 endgenerate
 
