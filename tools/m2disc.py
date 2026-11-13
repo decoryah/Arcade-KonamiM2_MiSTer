@@ -9,8 +9,8 @@ chdman is MAME's tool (chdman.exe on Windows), from the PATH unless given. Into 
   <set>_full.bin    the whole disc, 2352 bytes a sector, for the music: games/<set>/
   <set>_full.cue    its cue sheet (the core doesn't need it)
 
-The discs: polystar/623jaa02.chd (Tobe! Polystars), evilngt/810uba02.chd (Evil Night), totlvice/639eba01.chd (Total Vice),
-heatof11/703eaa02.chd (Heat of Eleven '98) and btltryst/636jac02.chd (Battle Tryst). A CHD that keeps its data track as 2048-byte
+The discs: polystar/623jaa02.chd (Tobe! Polystars), evilngt/810uba02.chd (Evil Night), hellngt/810eaa02.chd (Hell Night),
+totlvice/639eba01.chd (Total Vice), heatof11/703eaa02.chd (Heat of Eleven '98) and btltryst/636jac02.chd (Battle Tryst). A CHD that keeps its data track as 2048-byte
 sectors (Total Vice's, older Polystars ones) has it padded to 2352, as the core finds a sector of the music at its LBA x 2352 in the
 image, less the 2 s (150 sectors) between the data track and the music, which the image hasn't. Polystars' music is also repaired
 (tools/cdfix.py).
@@ -19,7 +19,9 @@ Battle Tryst streams its data sectors from <set>_full.bin as it plays (its data 
 2048 bytes before the sectors (tools/cdimage.py --header), and its _full.bin has each data sector's 2048 bytes at 16 in, as a raw
 sector's. Some CHDs of Heat of Eleven and Battle Tryst going round aren't MAME's: one keeps the 2 s before the music in the
 track (it's left out), others haven't any (it's put back, as on the disc, in the table of contents too); their data sectors are
-the same, which is what's checked for those two games.
+the same, which is what's checked for those two games. Evil Night's and Hell Night's discs have the same layout: their data
+tells them apart (Hell Night's is checked on its data sectors, as the CHD we have of it isn't MAME's: it keeps each audio track's
+2 s before it).
 """
 import hashlib
 import os
@@ -32,11 +34,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cdfix     # noqa: E402
 import cdimage   # noqa: E402
 
-# (tracks, the data track's sectors): the set. Total Vice's other versions (AAB, JAD, UAC) have the same layout, so the data image's
-# SHA-256 tells the disc the MRA wants from them
+# (tracks, the data track's sectors): the set, or the sets with that layout. Total Vice's other versions (AAB, JAD, UAC) have the
+# same layout, so the data image's SHA-256 tells the disc the MRA wants from them; Evil Night and Hell Night share theirs too
 DISCS = {
     (25, 11928): 'polystar',
-    (27, 28310): 'evilngt',
+    (27, 28310): ('evilngt', 'hellngt'),
     (21, 20632): 'totlvice',
     (27, 12438): 'heatof11',
     (2, 179352): 'btltryst',
@@ -50,6 +52,7 @@ DATA_SHA256 = {
 SECTORS_SHA256 = {
     'heatof11': ('703eaa02.chd', 'cda3705c98b069628acc66c8948c88e7ecc8981d06597c1088066f562b689ade'),
     'btltryst': ('636jac02.chd', '8560f7e467b9a98cc558fbba8a973f72ae00b5f8db205be0b9cab8b7a6a887ac'),
+    'hellngt': ('810eaa02.chd', '22c3557bb7a5d468399e75fca377b70e47b61ead465ce56d1b3f424d286b9e3e'),
 }
 STREAMED = {'btltryst'}   # its data sectors from _full.bin: _cd.zip only the 2048 bytes before them
 GAP = 150                 # the 2 s between the data track and the music: the core's audio is LBA - 150 in the image
@@ -111,10 +114,12 @@ def main(chd, chdman='chdman'):
     tr = cdimage.toc(chdman, chd)
     key = (len(tr), tr[0][2])
     if key not in DISCS:
-        sys.exit(f'{chd}: {key[0]} tracks, a data track of {key[1]} sectors: not 623jaa02, 810uba02, 639eba01, 703eaa02 or 636jac02')
-    name = DISCS[key]
+        sys.exit(f'{chd}: {key[0]} tracks, a data track of {key[1]} sectors: not 623jaa02, 810uba02, 810eaa02, 639eba01, 703eaa02'
+                 ' or 636jac02')
+    names = DISCS[key]
+    names = (names,) if isinstance(names, str) else names
     cooked = tr[0][1] == 'MODE1'
-    print(f'{chd}: {name}, data track {tr[0][1]}' + (' (2048-byte sectors, padded to 2352)' if cooked else ''))
+    print(f'{chd}: {" or ".join(names)}, data track {tr[0][1]}' + (' (2048-byte sectors, padded to 2352)' if cooked else ''))
     # a CHD without the 2 s before the first audio track (some of Heat of Eleven's and Battle Tryst's): put back, as the disc has
     # it, where its table of contents and the image place the music (the core can't play a track that starts before it)
     n2, typ2, frames2, pregap2, stored2 = tr[1]
@@ -128,18 +133,25 @@ def main(chd, chdman='chdman'):
     with tempfile.TemporaryDirectory(dir='.') as d:
         cue, b = cdimage.extract(chdman, chd, d)
 
-        cd = os.path.join(d, name + '_cd.bin')
+        cd = os.path.join(d, 'disc_cd.bin')
         cdimage.write(tr, b, cd)
+        whole, sectors = hashlib.sha256(), hashlib.sha256()   # the data image's, and its data sectors' (from 2048 on)
         with open(cd, 'rb') as f:
-            if name in SECTORS_SHA256:
-                f.seek(2048)
-                want, sha = SECTORS_SHA256[name]
-            else:
-                want, sha = DATA_SHA256[name]
-            h = hashlib.sha256(f.read()).hexdigest()
-        if h != sha:
+            s = f.read(2048)
+            whole.update(s)
+            for s in iter(lambda: f.read(1 << 20), b''):
+                whole.update(s)
+                sectors.update(s)
+        whole, sectors = whole.hexdigest(), sectors.hexdigest()
+
+        def wanted(n):
+            return SECTORS_SHA256[n] + (sectors,) if n in SECTORS_SHA256 else DATA_SHA256[n] + (whole,)
+        name = next((n for n in names if wanted(n)[1] == wanted(n)[2]), None)
+        if name is None:
+            want = ' or '.join(wanted(n)[0] for n in names)
             sys.exit(f'{chd}: has the layout of {want}, but not its data: another version of the disc (Total Vice: AAB, JAD or UAC?).'
-                     f' The core runs only {want}.')
+                     f' The core runs only {want}. (Data image SHA-256 {whole}, its sectors\' {sectors}.)')
+        print(f'  {name}')
         if name in STREAMED:
             with open(cd, 'r+b') as f:
                 f.truncate(2048)
