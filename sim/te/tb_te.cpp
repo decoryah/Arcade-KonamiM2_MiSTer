@@ -134,8 +134,23 @@ static void clock1()
 				memset(used, 0, sizeof used);
 			}
 		}
+		{
+			// (with TE_LOADS: each change of the texture's format, and the state it came in)
+			static uint32_t last_exp = 0xffffffff;
+			if (getenv("TE_LOADS") && t->rootp->m2_te__DOT__tm_exp != last_exp)
+			{
+				last_exp = t->rootp->m2_te__DOT__tm_exp;
+				printf("  exp %08x at clock %llu in %s\n", unsigned(last_exp), (unsigned long long)clocks, st_name[s]);
+			}
+		}
+		if (getenv("TE_LOADS") && !strcmp(st_name[s], "T_LOAD") && strcmp(st_name[was], "T_LOAD"))
+			printf("  load command at clock %llu: ldcntl %08x cntl %08x src %08x count %08x lod0 %08x exp %08x\n", (unsigned long long)clocks,
+				unsigned(t->rootp->m2_te__DOT__tm_ldcntl), unsigned(t->rootp->m2_te__DOT__tm_cntl), unsigned(t->rootp->m2_te__DOT__tm_src),
+				unsigned(t->rootp->m2_te__DOT__tm_count), unsigned(t->rootp->m2_te__DOT__tm_lod0), unsigned(t->rootp->m2_te__DOT__tm_exp));
 		if (getenv("TE_LOADS") && !strcmp(st_name[s], "T_MM") && strcmp(st_name[was], "T_MM"))
-			printf("  load src %08x dst %04x count %x pip %d\n", unsigned(t->rootp->m2_te__DOT__mm_src), unsigned(t->rootp->m2_te__DOT__mm_dst), unsigned(t->rootp->m2_te__DOT__mm_n), int(t->rootp->m2_te__DOT__mm_pip));
+			printf("  load at clock %llu src %08x dst %04x count %x pip %d compressed %d (texels %x) exp %08x\n", (unsigned long long)clocks, unsigned(t->rootp->m2_te__DOT__mm_src),
+				unsigned(t->rootp->m2_te__DOT__mm_dst), unsigned(t->rootp->m2_te__DOT__mm_n), int(t->rootp->m2_te__DOT__mm_pip), int(t->rootp->m2_te__DOT__mm_cmp),
+				unsigned(t->rootp->m2_te__DOT__tm_count), unsigned(t->rootp->m2_te__DOT__tm_exp));
 		{
 			static FILE *fev = getenv("TE_EV") ? fopen(getenv("TE_EV"), "w") : nullptr;
 			if (fev && s != was) fprintf(fev, "%d %llu\n", s, (unsigned long long)clocks);
