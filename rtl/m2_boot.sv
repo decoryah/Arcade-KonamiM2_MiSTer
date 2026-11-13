@@ -13,6 +13,12 @@
 //
 // Each CPU reaches memory through its caches (rtl/ppc_cache.sv), which see every write the others make, so memory is coherent,
 // as MAME's is. The download writes DDR3 directly, under reset.
+//
+// PPC_CACHE_KB (a build option, default 32): each cache's size, instruction and data sides each (rtl/ppc_cache.sv's KB). 4 is
+// the 602's own (4 KB a side, the data side two-way, 32-byte lines; its instruction side is two-way too, here direct-mapped):
+// the board's speed and slowdowns, and much less block RAM; 32 runs faster than the board.
+// (not a `define here: Quartus carries a macro into the files it reads next, so KonamiM2.sv would see it defined, and its OSD
+// setting would go: CACHE_KB below)
 `default_nettype none
 module m2_boot #(
 	parameter int TICK = 8              // clocks a DEC / TB tick (the bus clock / 4)
@@ -49,6 +55,9 @@ module m2_boot #(
 	output logic        vdu_on,
 	output logic [15:0] audio_l,
 	output logic [15:0] audio_r,
+
+	// the CPUs' caches' size, each side (rtl/ppc_cache.sv's size: 0 PPC_CACHE_KB, 1 half, 2 a quarter, 3 an eighth), taken at reset
+	input  logic [1:0]  cache_size,
 
 	// the CD's audio: a raw image of the disc on the SD card
 	input  logic        cd_mounted,
@@ -88,6 +97,11 @@ module m2_boot #(
 	output logic [31:0] p2_ipc0_o,
 	output logic [31:0] p2_ipc_o
 );
+`ifdef PPC_CACHE_KB
+	localparam int CACHE_KB = `PPC_CACHE_KB;
+`else
+	localparam int CACHE_KB = 32;
+`endif
 	localparam int N = 2;
 
 	// ---- the map ------------------------------------------------------------------------------------------------------
@@ -165,9 +179,9 @@ module m2_boot #(
 			.fp_req(fp_req[g]), .fp_res
 		);
 		// verilator lint_on PINCONNECTEMPTY
-		ppc_cache cache
+		ppc_cache #(.KB(CACHE_KB)) cache
 		(
-			.clk, .rst(rs[g]), .sn_v(sn_v[g]), .sn_a,
+			.clk, .rst(rs[g]), .size(cache_size), .sn_v(sn_v[g]), .sn_a,
 			.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data, .i_mem(m_if.mem),
 			.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
 			.d_mem(m_d.mem), .d_cacheable(m_d.mem), .d_writable(!m_d.rom),
@@ -252,13 +266,36 @@ module m2_boot #(
 	// verilator lint_on UNUSEDSIGNAL
 	// (the CD image's address is the drive's own: no CPU sees it)
 	assign m_g = g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
-	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
 	wire [27:3] ld_ddr = ld_ymz ? {6'b011000, ld_a[21:3]} : ld_cd ? {ld_a[25] ? 3'b010 : 3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
+	// verilator lint_off UNUSEDSIGNAL
+	logic        vdu_frame, vdu_flip;   // (for M2_FPS)
+	// verilator lint_on UNUSEDSIGNAL
+`ifdef M2_FPS
+	// a debug build's frame rate (rtl/m2_fps.sv): its writes go in the clocks nothing else uses DDR3
+	logic        fps_wr;
+	logic [28:0] fps_a;
+	logic [63:0] fps_d;
+	wire         fps_go = fps_wr && !ld_pend && !g_rd && !g_we && !ddr_busy;
+	m2_fps fps
+	(
+		.clk, .rst, .frame(vdu_frame), .flip(vdu_flip),
+		.ret1({c_ret[0] && c_ret2[0], c_ret[0] && !c_ret2[0]}), .ret2({c_ret[1] && c_ret2[1], c_ret[1] && !c_ret2[1]}),
+		.wr(fps_wr), .wr_ok(fps_go), .wr_a(fps_a), .wr_d(fps_d)
+	);
+	assign ddr_burstcnt = ld_pend || fps_go ? 8'd1 : g_burst;
+	assign ddr_addr = fps_go ? fps_a : {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
+	assign ddr_rd = g_rd;
+	assign ddr_we = ld_pend || g_we || fps_go;
+	assign ddr_din = fps_go ? fps_d : ld_pend ? {8{ld_d}} : g_wd;
+	assign ddr_be = fps_go ? 8'hff : ld_pend ? 8'h01 << ld_a[2:0] : g_be;
+`else
+	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
 	assign ddr_addr = {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
 	assign ddr_rd = g_rd;
 	assign ddr_we = ld_pend || g_we;
 	assign ddr_din = ld_pend ? {8{ld_d}} : g_wd;
 	assign ddr_be = ld_pend ? 8'h01 << ld_a[2:0] : g_be;
+`endif
 
 	// ---- the CPUs' resets (rst, or the CDE's: the CPU that asks): held until DDR3 has answered all its caches asked (so nothing
 	// it answers reaches a request made after) -----------------------------------------------------------------------------
@@ -375,7 +412,7 @@ module m2_boot #(
 	(
 		.clk, .rst,
 		.a(u_pa[5:2]), .we(u_req && u_we && u_pa[31:8] == 24'h000300), .wd(u_wdata[31:0]),
-		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on),
+		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on), .frame(vdu_frame), .flip(vdu_flip),
 		.m_rd(vdu_m_rd), .m_four(vdu_m_four), .m_a(vdu_m_a), .m_busy(vdu_m_busy), .m_ready(vdu_m_ready), .m_dout(ddr_dout)
 	);
 	// verilator lint_off PINCONNECTEMPTY

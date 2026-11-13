@@ -49,6 +49,9 @@ static const char *st_name[] = { "I_STOP", "I_FLUSH", "I_FETCH", "I_REGS", "I_RE
 static const int P_RUN_N = int(sizeof st_name / sizeof *st_name) - 1;
 static uint64_t stalled;
 static uint64_t p_bil, p_pt, p_u0, p_v0, p_both, p_pt_go, p_go, p_hold, p_ser, p_drain, p_zr, p_zw, p_cr, p_cw, p_stall;
+static uint64_t f_list, f_pix, e_wpix, e_wdrain;
+static std::map<unsigned, uint64_t> regw_n;          // (TE_PROF: the list's register writes, by byte offset)
+static std::map<unsigned, uint64_t> regh_n, regh_w;  // (TE_PROF: register instructions by offset << 8 | count: how many, the clocks they waited for the pixels)  // I_FETCH waiting for the list's word, for the pixels; E_START for the walk, for the drain
 #endif
 
 static void clock1()
@@ -90,6 +93,38 @@ static void clock1()
 	t->clk = 1; t->eval();
 #ifdef TE_PROF
 	st_n[t->rootp->m2_te__DOT__st & 127]++;
+	if (t->rootp->m2_te__DOT__w_on) st_n[P_RUN_N]++;   // (the walk, beside the setup's states)
+#ifdef TE_PROF
+	{
+		auto *q = t->rootp;
+		if (!strcmp(st_name[q->m2_te__DOT__st & 127], "I_FETCH"))
+		{
+			if (!q->m2_te__DOT__f_ok) f_list++;
+			else if (!(q->m2_te__DOT__f_w >> 28 == 2 && (q->m2_te__DOT__f_w >> 24 & 15) == 0))
+			{
+				unsigned h = (unsigned(q->m2_te__DOT__f_w) & 0xffff) << 8 | (unsigned(q->m2_te__DOT__f_w) >> 16 & 0xff);
+				static uint64_t last_irp = ~0ull;
+				if (q->m2_te__DOT__f_w >> 28 == 1)
+				{
+					if (q->m2_te__DOT__gc_irp != last_irp) regh_n[h]++;
+					last_irp = q->m2_te__DOT__gc_irp;
+					if (q->m2_te__DOT__w_on || q->m2_te__DOT__p_any) regh_w[h]++;
+				}
+				f_pix++;
+			}
+		}
+		if (!strcmp(st_name[q->m2_te__DOT__st & 127], "I_REGW"))
+		{
+			regw_n[unsigned(q->m2_te__DOT__ls_a) << 2]++;
+			if ((unsigned(q->m2_te__DOT__ls_a) << 2) == 0x14) regw_n[0x100000 | (unsigned(q->m2_te__DOT__dc_new) & 0x3f)]++;  // (the list control's: what it asks)
+		}
+		if (!strcmp(st_name[q->m2_te__DOT__st & 127], "E_START"))
+		{
+			if (q->m2_te__DOT__w_on) e_wpix++;
+			else if (q->m2_te__DOT__p_any) e_wdrain++;
+		}
+	}
+#endif
 	{
 		static uint32_t watch = getenv("TE_WATCH") ? uint32_t(strtoul(getenv("TE_WATCH"), nullptr, 16)) : 0;
 		auto *q = t->rootp;
@@ -134,8 +169,23 @@ static void clock1()
 				memset(used, 0, sizeof used);
 			}
 		}
+		{
+			// (with TE_LOADS: each change of the texture's format, and the state it came in)
+			static uint32_t last_exp = 0xffffffff;
+			if (getenv("TE_LOADS") && t->rootp->m2_te__DOT__tm_exp != last_exp)
+			{
+				last_exp = t->rootp->m2_te__DOT__tm_exp;
+				printf("  exp %08x at clock %llu in %s\n", unsigned(last_exp), (unsigned long long)clocks, st_name[s]);
+			}
+		}
+		if (getenv("TE_LOADS") && !strcmp(st_name[s], "T_LOAD") && strcmp(st_name[was], "T_LOAD"))
+			printf("  load command at clock %llu: ldcntl %08x cntl %08x src %08x count %08x lod0 %08x exp %08x\n", (unsigned long long)clocks,
+				unsigned(t->rootp->m2_te__DOT__tm_ldcntl), unsigned(t->rootp->m2_te__DOT__tm_cntl), unsigned(t->rootp->m2_te__DOT__tm_src),
+				unsigned(t->rootp->m2_te__DOT__tm_count), unsigned(t->rootp->m2_te__DOT__tm_lod0), unsigned(t->rootp->m2_te__DOT__tm_exp));
 		if (getenv("TE_LOADS") && !strcmp(st_name[s], "T_MM") && strcmp(st_name[was], "T_MM"))
-			printf("  load src %08x dst %04x count %x pip %d\n", unsigned(t->rootp->m2_te__DOT__mm_src), unsigned(t->rootp->m2_te__DOT__mm_dst), unsigned(t->rootp->m2_te__DOT__mm_n), int(t->rootp->m2_te__DOT__mm_pip));
+			printf("  load at clock %llu src %08x dst %04x count %x pip %d compressed %d (texels %x) exp %08x\n", (unsigned long long)clocks, unsigned(t->rootp->m2_te__DOT__mm_src),
+				unsigned(t->rootp->m2_te__DOT__mm_dst), unsigned(t->rootp->m2_te__DOT__mm_n), int(t->rootp->m2_te__DOT__mm_pip), int(t->rootp->m2_te__DOT__mm_cmp),
+				unsigned(t->rootp->m2_te__DOT__tm_count), unsigned(t->rootp->m2_te__DOT__tm_exp));
 		{
 			static FILE *fev = getenv("TE_EV") ? fopen(getenv("TE_EV"), "w") : nullptr;
 			if (fev && s != was) fprintf(fev, "%d %llu\n", s, (unsigned long long)clocks);
@@ -170,7 +220,7 @@ static void clock1()
 		}
 		was = s;
 	}
-	if ((t->rootp->m2_te__DOT__st & 127) == P_RUN_N)
+	if (t->rootp->m2_te__DOT__w_on)
 	{
 		auto *q = t->rootp;
 		bool px_left = q->m2_te__DOT__px != q->m2_te__DOT__pxe;
@@ -322,6 +372,17 @@ int main(int argc, char **argv)
 		printf("  textured: %llu point, %llu bilinear (of those %llu no U fraction, %llu no V, %llu neither)\n", (unsigned long long)p_pt, (unsigned long long)p_bil, (unsigned long long)p_u0, (unsigned long long)p_v0, (unsigned long long)p_both);
 		p_pt = p_bil = p_u0 = p_v0 = p_both = 0;
 		p_go = p_hold = p_ser = p_drain = p_zr = p_zw = p_cr = p_cw = p_stall = 0;
+		printf("  waits: I_FETCH for the list %llu, for the pixels %llu; E_START for the walk %llu, for the drain %llu\n", (unsigned long long)f_list, (unsigned long long)f_pix,
+			(unsigned long long)e_wpix, (unsigned long long)e_wdrain);
+		f_list = f_pix = e_wpix = e_wdrain = 0;
+		printf("  register writes:");
+		for (auto &kv : regw_n) printf(" %05x:%llu", kv.first, (unsigned long long)kv.second);
+		printf("\n");
+		regw_n.clear();
+		printf("  register instructions (offset:count n waited):");
+		for (auto &kv : regh_n) printf(" %04x:%u %llu %llu", kv.first >> 8, kv.first & 255, (unsigned long long)kv.second, (unsigned long long)regh_w[kv.first]);
+		printf("\n");
+		regh_n.clear(); regh_w.clear();
 #endif
 		while (!rq.empty()) clock1();
 

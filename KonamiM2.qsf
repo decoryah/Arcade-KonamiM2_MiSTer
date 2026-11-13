@@ -65,6 +65,10 @@ set_global_assignment -name SEED 4
 #set_global_assignment -name VERILOG_MACRO "SMALL_MEMS=1"
 #set_global_assignment -name SEED 11
 
+# The CPUs' caches, KB a side (rtl/m2_boot.sv): 4 is the 602's own (the real board's speed and slowdowns, and much less block RAM);
+# without it, 32
+#set_global_assignment -name VERILOG_MACRO "PPC_CACHE_KB=4"
+
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
 

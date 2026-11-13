@@ -19,6 +19,8 @@ module m2_vdu (
 	input  logic [8:0]  vpos,           // from 0 where a frame starts being shown: MAME's line - 20
 	output logic [23:0] rgb,
 	output logic        on,             // something to show: the list's been set
+	output logic        frame,          // a frame's list starts (a clock), and flip with it if what the last frame showed differs
+	output logic        flip,           // from the one before (its blocks' buffer addresses: a game flips by changing its list in memory)
 
 	// memory
 	output logic        m_rd,
@@ -90,6 +92,8 @@ module m2_vdu (
 	logic [10:0] c_hs, c_hw;
 	logic        c_hd, c_fmt;
 
+	logic [31:0] sig, sig_last;         // the frame's shown buffers (its blocks' addresses, rotated in), and the last frame's
+
 	logic [8:0]  vpos_q;
 	wire         l_start = vpos != vpos_q;
 	wire  [8:0]  shown = vpos + 9'(V_SHOWN);       // the line shown now, 0-261
@@ -104,6 +108,7 @@ module m2_vdu (
 	always_ff @(posedge clk)
 	begin
 		vpos_q <= vpos;
+		frame <= 1'b0; flip <= 1'b0;
 		if (rst)
 		begin
 			st <= S_WAIT; go <= 1'b0; bank <= 1'b0; c_show <= 1'b0; n_show <= 1'b0; have <= 1'b0; live <= 1'b0; v <= 9'd0;
@@ -129,6 +134,7 @@ module m2_vdu (
 					begin
 						v <= 9'd0; addr <= fv0a; have <= 1'b0; rep <= 1'b0;
 						live <= on;
+						frame <= 1'b1; flip <= sig != sig_last; sig_last <= sig; sig <= 32'h0;
 						if (on) begin w_i <= 2'd0; in_hdr <= 1'b1; st <= S_WORD; end
 						else st <= S_WAIT;
 					end
@@ -144,7 +150,7 @@ module m2_vdu (
 						begin
 							case (w_i)
 								2'd0: ctl <= w;
-								2'd1: lower <= w;
+								2'd1: begin lower <= w; if (ctl[21]) sig <= {sig[26:0], sig[31:27]} ^ w; end
 								2'd2: ;
 								default: next <= w;
 							endcase
