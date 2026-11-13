@@ -13,6 +13,12 @@
 //
 // Each CPU reaches memory through its caches (rtl/ppc_cache.sv), which see every write the others make, so memory is coherent,
 // as MAME's is. The download writes DDR3 directly, under reset.
+//
+// PPC_CACHE_KB (a build option, default 32): each cache's size, instruction and data sides each (rtl/ppc_cache.sv's KB). 4 is
+// the 602's own (4 KB a side, the data side two-way, 32-byte lines; its instruction side is two-way too, here direct-mapped):
+// the board's speed and slowdowns, and much less block RAM; 32 runs faster than the board.
+// (not a `define here: Quartus carries a macro into the files it reads next, so KonamiM2.sv would see it defined, and its OSD
+// setting would go: CACHE_KB below)
 `default_nettype none
 module m2_boot #(
 	parameter int TICK = 8              // clocks a DEC / TB tick (the bus clock / 4)
@@ -42,6 +48,21 @@ module m2_boot #(
 	output logic [7:0]  ddr_be,
 	output logic        ddr_we,
 
+`ifdef Z_SDRAM
+	// the Triangle Engine's Z buffer in the SDRAM (rtl/m2_zmem.sv): its clock (twice clk, in phase) and pins
+	input  logic        clk_mem,
+	input  logic        sd_late,
+	output logic [12:0] sd_a,
+	output logic [1:0]  sd_ba,
+	output logic [1:0]  sd_dqm,
+	output logic        sd_nras,
+	output logic        sd_ncas,
+	output logic        sd_nwe,
+	output logic [15:0] sd_dq_o,
+	output logic        sd_dq_oe,
+	input  logic [15:0] sd_dq_i,
+`endif
+
 	// video: the raster (rtl/m2_vtiming.sv), and the VDU's picture
 	input  logic [9:0]  hpos,
 	input  logic [8:0]  vpos,
@@ -49,6 +70,9 @@ module m2_boot #(
 	output logic        vdu_on,
 	output logic [15:0] audio_l,
 	output logic [15:0] audio_r,
+
+	// the CPUs' caches' size, each side (rtl/ppc_cache.sv's size: 0 PPC_CACHE_KB, 1 half, 2 a quarter, 3 an eighth), taken at reset
+	input  logic [1:0]  cache_size,
 
 	// the CD's audio: a raw image of the disc on the SD card
 	input  logic        cd_mounted,
@@ -88,6 +112,11 @@ module m2_boot #(
 	output logic [31:0] p2_ipc0_o,
 	output logic [31:0] p2_ipc_o
 );
+`ifdef PPC_CACHE_KB
+	localparam int CACHE_KB = `PPC_CACHE_KB;
+`else
+	localparam int CACHE_KB = 32;
+`endif
 	localparam int N = 2;
 
 	// ---- the map ------------------------------------------------------------------------------------------------------
@@ -165,9 +194,9 @@ module m2_boot #(
 			.fp_req(fp_req[g]), .fp_res
 		);
 		// verilator lint_on PINCONNECTEMPTY
-		ppc_cache cache
+		ppc_cache #(.KB(CACHE_KB)) cache
 		(
-			.clk, .rst(rs[g]), .sn_v(sn_v[g]), .sn_a,
+			.clk, .rst(rs[g]), .size(cache_size), .sn_v(sn_v[g]), .sn_a,
 			.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data, .i_mem(m_if.mem),
 			.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
 			.d_mem(m_d.mem), .d_cacheable(m_d.mem), .d_writable(!m_d.rom),
@@ -219,6 +248,11 @@ module m2_boot #(
 	logic [31:3] ata_m_a;
 	logic        dsp_m_rd, dsp_m_busy, dsp_m_ready;
 	logic [31:3] dsp_m_a;
+	logic        mpg_m_rd;
+	// verilator lint_off UNUSEDSIGNAL
+	logic        mpg_m_busy, mpg_m_ready;   // (not used in a build without MPEG_CTL)
+	// verilator lint_on UNUSEDSIGNAL
+	logic [31:3] mpg_m_a;
 	logic        te_m_rd, te_m_we, te_m_busy, te_m_ready, te_busy;
 	logic [23:0] v_rgb;
 	logic [31:3] te_m_a;
@@ -229,7 +263,10 @@ module m2_boot #(
 	logic        g_rd, g_we;
 	logic [7:0]  g_burst, g_be;
 	logic [63:0] g_wd;
-	logic        ymz_m_rd, ymz_m_busy, ymz_m_ready;
+	logic        ymz_m_rd;
+	// verilator lint_off UNUSEDSIGNAL
+	logic        ymz_m_busy, ymz_m_ready;   // (not used in a build with NO_GUN_BOARD)
+	// verilator lint_on UNUSEDSIGNAL
 	logic [21:3] ymz_rom_a;
 	wire  [31:3] ymz_m_a = {6'h15, 4'd0, ymz_rom_a};
 	logic        dma_busy, dma_ready;
@@ -241,6 +278,7 @@ module m2_boot #(
 		.ata_rd(ata_m_rd), .ata_a(ata_m_a), .ata_busy(ata_m_busy), .ata_ready(ata_m_ready),
 		.dsp_rd(dsp_m_rd), .dsp_a(dsp_m_a), .dsp_busy(dsp_m_busy), .dsp_ready(dsp_m_ready),
 		.ymz_rd(ymz_m_rd), .ymz_a(ymz_m_a), .ymz_busy(ymz_m_busy), .ymz_ready(ymz_m_ready),
+		.mpg_rd(mpg_m_rd), .mpg_a(mpg_m_a), .mpg_busy(mpg_m_busy), .mpg_ready(mpg_m_ready),
 		.vdu_rd(vdu_m_rd), .vdu_four(vdu_m_four), .vdu_a(vdu_m_a), .vdu_busy(vdu_m_busy), .vdu_ready(vdu_m_ready),
 		.te_rd(te_m_rd), .te_we(te_m_we), .te_a(te_m_a), .te_wd(te_m_wd), .te_be(te_m_be), .te_busy(te_m_busy), .te_ready(te_m_ready),
 		.ddr_busy, .ddr_dout_ready,
@@ -252,13 +290,36 @@ module m2_boot #(
 	// verilator lint_on UNUSEDSIGNAL
 	// (the CD image's address is the drive's own: no CPU sees it)
 	assign m_g = g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
-	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
 	wire [27:3] ld_ddr = ld_ymz ? {6'b011000, ld_a[21:3]} : ld_cd ? {ld_a[25] ? 3'b010 : 3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
+	// verilator lint_off UNUSEDSIGNAL
+	logic        vdu_frame, vdu_flip;   // (for M2_FPS)
+	// verilator lint_on UNUSEDSIGNAL
+`ifdef M2_FPS
+	// a debug build's frame rate (rtl/m2_fps.sv): its writes go in the clocks nothing else uses DDR3
+	logic        fps_wr;
+	logic [28:0] fps_a;
+	logic [63:0] fps_d;
+	wire         fps_go = fps_wr && !ld_pend && !g_rd && !g_we && !ddr_busy;
+	m2_fps fps
+	(
+		.clk, .rst, .frame(vdu_frame), .flip(vdu_flip),
+		.ret1({c_ret[0] && c_ret2[0], c_ret[0] && !c_ret2[0]}), .ret2({c_ret[1] && c_ret2[1], c_ret[1] && !c_ret2[1]}),
+		.wr(fps_wr), .wr_ok(fps_go), .wr_a(fps_a), .wr_d(fps_d)
+	);
+	assign ddr_burstcnt = ld_pend || fps_go ? 8'd1 : g_burst;
+	assign ddr_addr = fps_go ? fps_a : {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
+	assign ddr_rd = g_rd;
+	assign ddr_we = ld_pend || g_we || fps_go;
+	assign ddr_din = fps_go ? fps_d : ld_pend ? {8{ld_d}} : g_wd;
+	assign ddr_be = fps_go ? 8'hff : ld_pend ? 8'h01 << ld_a[2:0] : g_be;
+`else
+	assign ddr_burstcnt = ld_pend ? 8'd1 : g_burst;
 	assign ddr_addr = {4'b0011, ld_pend ? ld_ddr : m_g.a[27:3]};
 	assign ddr_rd = g_rd;
 	assign ddr_we = ld_pend || g_we;
 	assign ddr_din = ld_pend ? {8{ld_d}} : g_wd;
 	assign ddr_be = ld_pend ? 8'h01 << ld_a[2:0] : g_be;
+`endif
 
 	// ---- the CPUs' resets (rst, or the CDE's: the CPU that asks): held until DDR3 has answered all its caches asked (so nothing
 	// it answers reaches a request made after) -----------------------------------------------------------------------------
@@ -340,10 +401,15 @@ module m2_boot #(
 	wire         u_ata = u_pa[31:24] == 8'h3f;
 	wire         u_te = u_pa[31:16] == 16'h0004;
 	wire         u_dsp = u_pa[31:16] == 16'h0006;
+`ifdef MPEG_CTL
+	wire         u_mpg = u_pa[31:16] == 16'h0008;
+`else
+	wire         u_mpg = 1'b0;          // (no MPEG unit in this build: its registers are stubs, as before it had one)
+`endif
 	wire         u_tk = u_pa[31:14] == 18'h0db00;       // 0x36c00000-0x36c03fff
 	wire         u_ymz = u_pa[31:4] == 28'h3e80000;     // 0x3e800000-0x3e80000f: the YMZ280B, on Evil Night's sub board
-	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd;
-	logic        dsp_int;
+	logic [31:0] cde_rd, bda_rd, te_rd, dsp_rd, mpg_rd;
+	logic        dsp_int, mpg_int;
 	logic [15:0] kio_rd, atapi_rd;
 	logic        cde_int;
 	logic        cd_rd, cd_valid, cd_int;
@@ -351,13 +417,18 @@ module m2_boot #(
 	// verilator lint_off PINCONNECTEMPTY
 	// the board, from the download (kept through a reset)
 	logic        ram8 = 1'b0;
-	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) ram8 <= ld_data[0];
+	// verilator lint_off UNUSEDSIGNAL
+	// verilator lint_off PROCASSINIT
+	logic        cd_stream = 1'b0;      // (bit 3: the CD's data sectors from the mounted image, not memory; only with CD_STREAM)
+	// verilator lint_on PROCASSINIT
+	// verilator lint_on UNUSEDSIGNAL
+	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[3]; end
 	m2_bda bda
 	(
 		.clk, .rst, .vpos,
 		.mcfg0(ram8 ? 32'h0000b400 : 32'h00004800),     // (5: 8 MB, 2: 4 MB, as MAME's ramsize_to_mcfg_field)
 		.a(u_pa[19:2]), .we(u_req && u_we && u_bda), .wd(u_wdata[31:0]), .rd(bda_rd),
-		.lines({te_int, 1'b0, dsp_int, 21'h0, cde_int, 3'b000}),
+		.lines({te_int, mpg_int, dsp_int, 21'h0, cde_int, 3'b000}),
 		.ppc1_int, .ppc2_int, .line()
 	);
 	// verilator lint_on PINCONNECTEMPTY
@@ -375,7 +446,7 @@ module m2_boot #(
 	(
 		.clk, .rst,
 		.a(u_pa[5:2]), .we(u_req && u_we && u_pa[31:8] == 24'h000300), .wd(u_wdata[31:0]),
-		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on),
+		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on), .frame(vdu_frame), .flip(vdu_flip),
 		.m_rd(vdu_m_rd), .m_four(vdu_m_four), .m_a(vdu_m_a), .m_busy(vdu_m_busy), .m_ready(vdu_m_ready), .m_dout(ddr_dout)
 	);
 	// verilator lint_off PINCONNECTEMPTY
@@ -385,6 +456,9 @@ module m2_boot #(
 		.a(u_pa[15:2]), .we(u_req && u_we && u_te), .wd(u_wdata[31:0]), .rd(te_rd),
 		.intr(te_int),
 		.m_rd(te_m_rd), .m_we(te_m_we), .m_a(te_m_a), .m_wd(te_m_wd), .m_be(te_m_be), .m_busy(te_m_busy), .m_ready(te_m_ready), .m_dout(ddr_dout),
+`ifdef Z_SDRAM
+		.clk_mem, .sd_late, .sd_ready(), .z_idle(), .sd_a, .sd_ba, .sd_dqm, .sd_nras, .sd_ncas, .sd_nwe, .sd_dq_o, .sd_dq_oe, .sd_dq_i,
+`endif
 		.busy(te_busy)
 	);
 	// verilator lint_on PINCONNECTEMPTY
@@ -399,6 +473,20 @@ module m2_boot #(
 	);
 `else
 	assign rgb = v_rgb;
+`endif
+	// the MPEG unit: its control, no pictures (rtl/m2_mpeg.sv); only in a build with MPEG_CTL (Battle Tryst's)
+`ifdef MPEG_CTL
+	m2_mpeg mpeg
+	(
+		.clk, .rst,
+		.a(u_pa[9:2]), .we(u_req && u_we && u_mpg), .wd(u_wdata[31:0]), .rd(mpg_rd), .intr(mpg_int),
+		.m_rd(mpg_m_rd), .m_a(mpg_m_a), .m_busy(mpg_m_busy), .m_ready(mpg_m_ready), .m_dout(ddr_dout)
+	);
+`else
+	assign mpg_rd = 32'h0;
+	assign mpg_int = 1'b0;
+	assign mpg_m_rd = 1'b0;
+	assign mpg_m_a = '0;
 `endif
 	// 44.1 kHz, from 66.67 MHz
 	logic [10:0] dac_n;
@@ -418,12 +506,25 @@ module m2_boot #(
 	// verilator lint_off UNUSEDSIGNAL
 	logic [15:0] cda_l, cda_r;
 	// verilator lint_on UNUSEDSIGNAL
+	// the mounted image's SD port: the audio's and the drive's (a data sector, when it streams them) in turn, each until its read's done
+	logic [31:0] cda_sd_lba, ata_sd_lba;
+	logic        cda_sd_rd, ata_sd_rd, sd_ack1;
+	logic [1:0]  sd_own;                // nobody, the audio, the drive
+	always_ff @(posedge clk)
+	begin
+		sd_ack1 <= sd_ack;
+		if (rst) sd_own <= 2'd0;
+		else if (sd_own == 2'd0) sd_own <= ata_sd_rd ? 2'd2 : cda_sd_rd ? 2'd1 : 2'd0;
+		else if (sd_ack1 && !sd_ack) sd_own <= 2'd0;
+	end
+	assign sd_lba = sd_own == 2'd2 ? ata_sd_lba : cda_sd_lba;
+	assign sd_rd = (sd_own == 2'd1 && cda_sd_rd) || (sd_own == 2'd2 && ata_sd_rd);
 	// (the image hasn't the 2 s between the data track and the first of the audio; the data track's own sectors are never played)
 	m2_cdda #(.LBA0(24'd150)) cdda
 	(
 		.clk, .rst, .tick(dac_tick),
 		.play(cd_play), .lba(cd_lba), .len(cd_len), .stop(cd_stop), .paused(cd_paused), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
-		.mounted(cd_mounted), .sd_lba, .sd_rd, .sd_ack, .sd_wr, .sd_d,
+		.mounted(cd_mounted), .sd_lba(cda_sd_lba), .sd_rd(cda_sd_rd), .sd_ack(sd_ack && sd_own == 2'd1), .sd_wr(sd_wr && sd_own == 2'd1), .sd_d,
 		.l(cda_l), .r(cda_r)
 	);
 	// the mix, as MAME's: the DSP at full, the CD at half and at the game's volume
@@ -445,6 +546,14 @@ module m2_boot #(
 	// as the game makes them (MAME's unit mask allows the byte lanes of any size)
 	logic [7:0]  ymz_ext, ymz_st;
 	logic signed [15:0] ymz_l, ymz_r;
+	// the gun games' sub board's YMZ280B: not in a build with NO_GUN_BOARD (Heat of Eleven's, Battle Tryst's), and never with MPEG_CTL,
+	// as the MPEG unit and the YMZ280B are both master 7 of the bus (rtl/m2_bus.sv)
+`ifdef MPEG_CTL
+`ifndef NO_GUN_BOARD
+	m2_error_MPEG_CTL_needs_NO_GUN_BOARD mpeg_ctl_needs_no_gun_board();   // (a build with MPEG_CTL must also set NO_GUN_BOARD)
+`endif
+`endif
+`ifndef NO_GUN_BOARD
 	wire         ymz_wr = u_req && u_we && u_ymz;
 	wire         ymz_rd = u_req && !u_we && u_ymz;
 	m2_ymz280b ymz
@@ -456,6 +565,12 @@ module m2_boot #(
 		.m_rd(ymz_m_rd), .m_a(ymz_rom_a), .m_busy(ymz_m_busy), .m_ready(ymz_m_ready), .m_dout(ddr_dout),
 		.out_l(ymz_l), .out_r(ymz_r), .rnd_done(), .rnd_l(), .rnd_r()
 	);
+`else
+	// (NO_GUN_BOARD: no YMZ280B; its registers read 0, it adds nothing to the sound, and master 7 of the bus is the MPEG unit's or no one's)
+	assign ymz_ext = 8'h00; assign ymz_st = 8'h00;
+	assign ymz_l = 16'sd0; assign ymz_r = 16'sd0;
+	assign ymz_m_rd = 1'b0; assign ymz_rom_a = '0;
+`endif
 	always_ff @(posedge clk)
 	begin
 		cdv_l <= $signed(cda_l) * $signed({1'b0, cd_vol_l});
@@ -470,12 +585,19 @@ module m2_boot #(
 			audio_r <= mix_ymz(mix0_r, ymz_r);
 		end
 	end
+	// (the CD's data sectors streamed from the mounted image: only in a build with CD_STREAM, for its read-ahead ring's 32 KB of block RAM)
+`ifdef CD_STREAM
+	wire         ata_stream = cd_stream && cd_mounted;
+`else
+	wire         ata_stream = 1'b0;
+`endif
 	m2_atapi cd
 	(
 		.clk, .rst,
 		.a(u_pa[4:1]), .re(u_req && !u_we && u_ata), .we(u_req && u_we && u_ata), .wd(u_wdata[15:0]), .rd(atapi_rd), .intrq(cd_int),
 		.ata_rd(cd_rd), .ata_valid(cd_valid), .ata_d(cd_d),
 		.m_rd(ata_m_rd), .m_a(ata_m_a), .m_busy(ata_m_busy), .m_ready(ata_m_ready), .m_dout(ddr_dout),
+		.stream(ata_stream), .sd_lba(ata_sd_lba), .sd_rd(ata_sd_rd), .sd_ack(sd_ack && sd_own == 2'd2), .sd_wr(sd_wr && sd_own == 2'd2), .sd_d,
 		.play(cd_play), .play_stop(cd_stop), .play_lba(cd_lba), .play_len(cd_len), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
 		.paused(cd_paused), .vol_l(cd_vol_l), .vol_r(cd_vol_r)
 	);
@@ -558,6 +680,7 @@ module m2_boot #(
 			if (u_cde) w = cde_rd;
 			if (u_te) w = te_rd;
 			else if (u_dsp) w = dsp_rd;
+			else if (u_mpg) w = mpg_rd;
 			else if (u_bda) w = bda_rd;
 			if (u_kio) w = {2{kio_rd}};
 			if (u_ata) w = {2{atapi_rd}};
