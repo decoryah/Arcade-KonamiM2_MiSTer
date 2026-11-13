@@ -1,0 +1,50 @@
+<misterromdescription>
+    <name>Hell Night (ver EAA)</name>
+    <setname>hellngt</setname>
+    <mameversion>0289</mameversion>
+    <year>1998</year>
+    <manufacturer>Konami</manufacturer>
+    <rbf>KonamiM2HellNight</rbf>
+    <buttons names="Trigger,Reload,-,Start,Coin" default="B,A,Start,Select" />
+    <!-- the board's DIP switches, as MAME's P2 (the rest unused) -->
+    <switches default="FF" base="16">
+        <dip bits="1" name="Flip Screen" ids="On,Off" values="0,1"/>
+    </switches>
+
+    <!--
+      As Evil Night's MRA (Hell Night is its European version, MAME's clone hellngt): the 636a01 boot ROM and the YMZ280B's samples are
+      Evil Night's (evilngt.zip), the EEPROM and the M48T58 Hell Night's own (hellngt.zip). Index 3 is the M48T58's 8 KB, then a byte for the
+      board: bit 0 the larger RAM, bit 1 the guns and this game's inputs, bit 4 the arcade monitor (512 x 384, High Res: Hell Night doesn't
+      draw in Low Res, the TV's 640 x 240). Index 4 is the YMZ280B's samples. Its build (KonamiM2HellNight) has its Z buffer, 384 KB at
+      High Res, in the SDRAM board's memory.
+
+      hellngt_cd.zip and hellngt_full.bin aren't in a MAME set: tools/m2disc.py makes both from the set's hellngt/810eaa02.chd.
+      hellngt_cd.zip (hellngt_cd.bin, 58 MB, in it) goes beside hellngt.zip; the music streams from hellngt_full.bin (515 MB) in
+      games/hellngt. Without it the game runs without its music.
+    -->
+
+    <file delay="1" type="s" index="0" path="hellngt_full.bin"/>
+
+    <rom index="0" zip="evilngt.zip|hellngt.zip" md5="none" address="0x30000000">
+        <part name="636a01.8q" crc="7b1dc738"/>
+    </rom>
+    <rom index="1" zip="hellngt_cd.zip" md5="none" address="0x32000000">
+        <part name="hellngt_cd.bin"/>
+    </rom>
+    <rom index="2" zip="hellngt.zip" md5="none">
+        <part name="93c46.7k" crc="7a531078"/>
+        <!-- the service menu's SOUND VOLUME (word 0x1c) at 20 of 30, not the factory 12; 0x10 rises by the change and 0x12 is its complement -->
+        <patch offset="0x10">03 D6 FC 29</patch>
+        <patch offset="0x1c">00 14</patch>
+    </rom>
+    <!-- the EEPROM, with the guns' calibration and the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
+    <nvram index="2" size="128"/>
+
+    <rom index="3" zip="hellngt.zip" md5="none">
+        <part name="m48t58y.9n" crc="ff8e78a1"/>
+        <part>13</part>
+    </rom>
+    <rom index="4" zip="evilngt.zip|hellngt.zip" md5="none" address="0x36000000">
+        <part name="810a03.16h" crc="05112d3a"/>
+    </rom>
+</misterromdescription>

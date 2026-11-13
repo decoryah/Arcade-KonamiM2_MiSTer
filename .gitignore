@@ -17,6 +17,8 @@ incremental_db/
 *.srf
 build_id.v
 compile.log
+# tools/build.py's build folders
+/build/
 qdb/
 PLLJ_PLLSPE_INFO.txt
 cr_ie_info.json

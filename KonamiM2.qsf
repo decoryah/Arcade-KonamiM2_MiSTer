@@ -48,8 +48,8 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-# seed 4: release 20261112's build (seeds 5 and 2 miss HDMI's timing)
-set_global_assignment -name SEED 4
+# seed 11: this tree's default build (release 20261112's seed 4 doesn't route it; seed 2 meets timing but a MiSTerPi's TV said "Invalid Format" at 720p)
+set_global_assignment -name SEED 11
 
 
 
@@ -59,11 +59,52 @@ set_global_assignment -name SEED 4
 #do not enable DEBUG_NOHDMI in release!
 #set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
 
-# Heat of Eleven's build: its Low Res draws 640 x 240, so 38 blocks of Z, with the small memories out of block RAM to pay for them, and a seed that routes it (7 doesn't).
+# Heat of Eleven's build: its Low Res draws 640 x 240, a Z buffer larger than the default build's, so its Z buffer is in the SDRAM board's
+# memory, as Battle Tryst's (in block RAM it needs 38 blocks of Z, and with release 20261110's 32 KB caches that doesn't fit: 678 M10K of
+# 553). The small memories out of block RAM (SMALL_MEMS), no gun board (the YMZ280B and the guns are the gun games'), and a seed that routes
+# it (2). The CPUs' caches are the OSD's choice, 32 KB a side or less ("4 KB as the 602").
 # Its RBF goes in _Arcade/cores as KonamiM2Heat_<date>.rbf, the name its MRA asks for (a KonamiM2_... name would also be found by the other MRAs' "KonamiM2")
-#set_global_assignment -name VERILOG_MACRO "Z_BLOCKS=38"
+#set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "SMALL_MEMS=1"
-#set_global_assignment -name SEED 11
+#set_global_assignment -name VERILOG_MACRO "NO_GUN_BOARD=1"
+#set_global_assignment -name SEED 2
+
+# The CPUs' caches, KB a side (rtl/m2_boot.sv): 4 is the 602's own (the real board's speed and slowdowns, and much less block RAM);
+# without it, 32
+#set_global_assignment -name VERILOG_MACRO "PPC_CACHE_KB=4"
+# Battle Tryst's build: its 800 x 300 Z buffer in the SDRAM board's memory, and what the game doesn't use left out to make room for its compressed
+# texture loads, the MPEG unit's control and the CD streaming (see rtl/m2_te.sv and rtl/ppc_pipe.sv). Its RBF goes in _Arcade/cores as
+# KonamiM2Tryst_<date>.rbf, the name its MRA asks for. It needs the SDRAM board. (Seed 5; its timing rests on the seed, most misses short on
+# the SDRAM's read data, from the pins' registers into the Z line)
+#set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
+#set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
+#set_global_assignment -name VERILOG_MACRO "MPEG_CTL=1"
+#set_global_assignment -name VERILOG_MACRO "NO_GUN_BOARD=1"
+#set_global_assignment -name VERILOG_MACRO "TE_COMPRESSED=1"
+#set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
+#set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"
+#set_global_assignment -name VERILOG_MACRO "PPC_NO_TRAP=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_FB32=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_ALPHACTL=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_WCLIPIN=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
+#set_global_assignment -name SEED 5
+
+# Hell Night's build: the default build (the YMZ280B and the guns) with the Z buffer in the SDRAM board's memory, as High Res draws
+# 512 x 384 and its Z buffer (384 KB) is larger than block RAM holds. Its MRA's board byte sets bit 4, the arcade monitor's raster and
+# High Res (rtl/m2_vtiming.sv). Its RBF goes in _Arcade/cores as KonamiM2HellNight_<date>.rbf, the name its MRA asks for. A 16 KB Z
+# cache (Z_CACHE_IB=9; 4 KB without it), and to make room for it what Hell Night doesn't use left out, as in Battle Tryst's build but
+# for the discards (a census of its attract and its gameplay in the M2 emulator). Seed 5 (2 meets timing too, by less; 11 misses)
+#set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
+#set_global_assignment -name VERILOG_MACRO "Z_CACHE_IB=9"
+#set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
+#set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"
+#set_global_assignment -name VERILOG_MACRO "PPC_NO_TRAP=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_FB32=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_ALPHACTL=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_WCLIPIN=1"
+#set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
+#set_global_assignment -name SEED 5
 
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
