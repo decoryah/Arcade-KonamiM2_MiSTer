@@ -19,8 +19,11 @@
       High Res, in the SDRAM board's memory.
 
       hellngt_cd.zip and hellngt_full.bin aren't in a MAME set: tools/m2disc.py makes both from the set's hellngt/810eaa02.chd.
-      hellngt_cd.zip (hellngt_cd.bin, 58 MB, in it) goes beside hellngt.zip; the music streams from hellngt_full.bin (515 MB) in
-      games/hellngt. Without it the game runs without its music.
+      hellngt_cd.zip (hellngt_cd.bin, 58 MB, in it) goes in games/mame, beside the set's zips; the music streams from hellngt_full.bin
+      (515 MB) in games/hellngt. Without it the game runs without its music.
+
+      The EEPROM and the M48T58 are Hell Night's own: from hellngt.zip in a split or non-merged set, and in a merged set from
+      evilngt.zip's hellngt/ folder. MiSTer looks in each zip by CRC first, so it takes those, not Evil Night's of the same names.
     -->
 
     <file delay="1" type="s" index="0" path="hellngt_full.bin"/>
@@ -31,7 +34,7 @@
     <rom index="1" zip="hellngt_cd.zip" md5="none" address="0x32000000">
         <part name="hellngt_cd.bin"/>
     </rom>
-    <rom index="2" zip="hellngt.zip" md5="none">
+    <rom index="2" zip="hellngt.zip|evilngt.zip" md5="none">
         <part name="93c46.7k" crc="7a531078"/>
         <!-- the service menu's SOUND VOLUME (word 0x1c) at 20 of 30, not the factory 12; 0x10 rises by the change and 0x12 is its complement -->
         <patch offset="0x10">03 D6 FC 29</patch>
@@ -40,7 +43,7 @@
     <!-- the EEPROM, with the guns' calibration and the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
     <nvram index="2" size="128"/>
 
-    <rom index="3" zip="hellngt.zip" md5="none">
+    <rom index="3" zip="hellngt.zip|evilngt.zip" md5="none">
         <part name="m48t58y.9n" crc="ff8e78a1"/>
         <part>13</part>
     </rom>
