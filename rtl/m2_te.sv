@@ -532,7 +532,7 @@ module m2_te (
 	logic        scan_lr;
 	logic        w_on;                  // a triangle's being walked
 	logic signed [13:0] wk_x2, wk_y2, wk_y3, wk_xst1, wk_xstl, wk_xys1, wk_xysl, wk_dy1, wk_dyl;
-	logic        wk_lr, wk_flat;
+	logic        wk_lr, wk_flat, wk_still;
 	logic [1:0]  wk_wr;
 `ifdef Z_SDRAM
 	assign       z_fwd = wk_lr;
@@ -751,7 +751,8 @@ module m2_te (
 
 	// Pixels the frame buffer clip or a window clipping what's outside it would throw away aren't walked: in a row outside them, or past their
 	// far side, the span ends (past the far side after one such pixel, so the last kept one still has its neighbor for the minify step);
-	// before their near side a flat triangle's walk jumps to it, as nothing changes along its span. Either takes a clock with no pixel.
+	// before their near side the walk jumps to it where nothing changes along the span: every value the same over the triangle (wk_still),
+	// not only its colour (wk_flat), or a textured one's U and V and its W would skip their steps. Either takes a clock with no pixel.
 	wire         k_wout = db_user[7];
 	wire signed [13:0] k_fbw = $signed({3'b000, db_fbclip[26:16]});
 	wire signed [13:0] k_wlo = $signed({3'b000, db_xwin[26:16]}), k_whi = $signed({3'b000, db_xwin[10:0]});
@@ -765,12 +766,12 @@ module m2_te (
 	logic        k_prev;                // the last pixel walked in this span was outside them
 	wire         v0_try = w_on && px != pxe && pu && !(serial && p_any);
 	wire         k_end = v0_try && (k_yout || (k_prev && k_after));
-	wire         k_jump = v0_try && wk_flat && k_before && !k_end;
+	wire         k_jump = v0_try && wk_still && k_before && !k_end;
 	wire         v0_go = v0_try && !k_end && !k_jump;
 	wire         v0_ok = v0_go && !(fbclipdis || winclipdis || zclipdis);
 	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
 	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
-	logic        tri_flat, v1_four;
+	logic        tri_flat, tri_still, v1_four;   // the colour the same over the triangle; every value (colour, U, V, W)
 	// (a window that clips what's outside it, as Battle Tryst's clear has, takes four only where all four are inside it)
 	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:8] == 3'd0 && db_user[6:5] == 2'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
 	wire         win4 = !db_user[7] || ($signed({px[13:2], 2'b00}) >= $signed({3'b000, db_xwin[26:16]}) && $signed(px[13:2]) < $signed({3'b000, db_xwin[10:2]}));
@@ -1978,7 +1979,7 @@ module m2_te (
 						rf_we <= 1'b1; rf_wa <= rf_ad(3'd0, 5'd16 + 5'(fc_i - 3'd1)); rf_wd <= itof(30'(fc_c));
 					end
 					fc_i <= fc_i + 3'd1;
-					if (fc_i == 3'd7) begin at_i <= 3'd0; at_mask <= 7'd0; tri_flat <= 1'b1; st <= S_ATTR; end
+					if (fc_i == 3'd7) begin at_i <= 3'd0; at_mask <= 7'd0; tri_flat <= 1'b1; tri_still <= 1'b1; st <= S_ATTR; end
 				end
 				S_ATTR:
 					if (at_i == 3'd7)
@@ -1994,6 +1995,7 @@ module m2_te (
 					else if (at_i[2])
 					begin
 						at_mask[at_i] <= 1'b1;
+						tri_still <= 1'b0;          // (U, V and W always step: never flat)
 						at_i <= at_i + 3'd1;
 					end
 					else
@@ -2016,7 +2018,7 @@ module m2_te (
 					else
 					begin
 						at_mask[at_i] <= 1'b1;
-						tri_flat <= 1'b0;
+						tri_flat <= 1'b0; tri_still <= 1'b0;
 						at_i <= at_i + 3'd1;
 						st <= S_ATTR;
 					end
@@ -2062,7 +2064,7 @@ module m2_te (
 					for (int i = 0; i < 7; i++) begin e_v[i] <= e_s[i]; ddx[i] <= dx_s[i]; slope[i] <= sl_s[i]; end
 					wk_x2 <= x2; wk_y2 <= y2; wk_y3 <= y3;
 					wk_xst1 <= xstep1; wk_xstl <= xstepl; wk_xys1 <= xys1; wk_xysl <= xysl; wk_dy1 <= dy1; wk_dyl <= dyl;
-					wk_lr <= scan_lr; wk_wr <= wrange; wk_flat <= tri_flat;
+					wk_lr <= scan_lr; wk_wr <= wrange; wk_flat <= tri_flat; wk_still <= tri_still;
 					w_on <= 1'b1;
 					y <= y1;
 					cf_short <= 14'sd0; cf_long <= 14'sd0;
