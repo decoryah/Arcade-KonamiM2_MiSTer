@@ -2,6 +2,9 @@
 // physical address, one to one). The data accesses at addresses with bit 14 set aren't cached, to try that way as well.
 // The float units are shared, with sim/ppccore/fp_noise.sv as the other CPU; sn_v is the other masters' writes, as the bench likes.
 `default_nettype none
+`ifndef CACHE_SIZE
+`define CACHE_SIZE 2'd0
+`endif
 module ppc_cached (
 	input  logic        clk,
 	input  logic        rst,
@@ -72,7 +75,7 @@ module ppc_cached (
 		.clk, .rst,
 		.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data,
 		.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
-		.int_ext, .dec_tick, .tb_tick,
+		.int_ext, .dec_tick, .dec_int_off(1'b0), .tb_tick,
 		.retire, .retire2, .ipc0_o, .iop0_o, .ipc_o, .iop_o, .exc_o, .timer_read_o, .pc_o, .gpr_o, .fpr_o,
 		.cr_o, .lr_o, .ctr_o, .xer_o, .msr_o, .srr0_o, .srr1_o, .fpscr_o, .gpr_pend_o, .fpr_pend_o,
 		.perf_o(), .perf_pc_o(),
@@ -81,7 +84,7 @@ module ppc_cached (
 
 	ppc_cache cache
 	(
-		.clk, .rst, .sn_v, .sn_a,
+		.clk, .rst, .size(`CACHE_SIZE), .sn_v, .sn_a,
 		.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data, .i_mem(1'b1),
 		.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
 		.d_mem(1'b1), .d_cacheable(!d_pa[14]), .d_writable(1'b1),

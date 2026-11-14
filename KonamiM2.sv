@@ -50,7 +50,8 @@ assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign BUTTONS   = 0;
 
-// the SDRAM idle; DDR3: the bring-up's ROM and RAM (below)
+// DDR3: the bring-up's ROM and RAM (below). The SDRAM: the Triangle Engine's Z buffer with Z_SDRAM (rtl/m2_zmem.sv, below), else idle
+`ifndef Z_SDRAM
 assign SDRAM_DQ   = 'Z;
 assign SDRAM_A    = 13'd0;
 assign SDRAM_BA   = 2'd0;
@@ -58,6 +59,7 @@ assign {SDRAM_DQML, SDRAM_DQMH} = 2'b11;
 assign {SDRAM_nCS, SDRAM_nWE, SDRAM_nRAS, SDRAM_nCAS} = 4'b1111;
 assign SDRAM_CKE  = 1'b0;
 assign SDRAM_CLK  = 1'b0;
+`endif
 
 assign DDRAM_CLK      = clk_cpu;
 
@@ -95,6 +97,14 @@ localparam CONF_STR = {
 	"H1O[45:43],Crosshair,Off,Player 1,Player 2,Player 3,P1+P2,All;",
 	"H1-;",
 	"O[3],Service mode,Off,On;",
+	"P1,Advanced;",
+`ifndef PPC_CACHE_KB
+	"P1O[6:5],CPU caches (at reset),32 KB,16 KB,8 KB,4 KB as the 602;",  // (each side: rtl/ppc_cache.sv's size; a build that sets PPC_CACHE_KB has its own)
+`endif
+`ifdef Z_SDRAM
+	"P1O[4],SDRAM read timing,Normal,Late;",  // (the Z buffer's: its read data a clock later, for a module that answers slowly)
+`endif
+	"P1O[7],CPU 2 DEC interrupt,Off,On;",  // (off: the M2 OS's slave-decrementer race can't start; see the README)
 	"DIP;",
 	"R0,Reset;",
 	"J1,Button 1,Button 2,Button 3,Start,Coin;",
@@ -118,6 +128,15 @@ pll pll
 	.outclk_2(clk_sdram),
 	.locked(pll_locked)
 );
+
+`ifdef Z_SDRAM
+wire [15:0] sd_dq_o;
+wire        sd_dq_oe;
+assign SDRAM_DQ  = sd_dq_oe ? sd_dq_o : 16'bZ;
+assign SDRAM_nCS = 1'b0;
+assign SDRAM_CKE = 1'b1;
+assign SDRAM_CLK = clk_sdram;           // (as the Gaelco 3D core: the PLL's shifted output straight to the pin)
+`endif
 
 ///////////////////////////////////////////////////
 
@@ -185,9 +204,13 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.sd_buff_wr(sd_buff_wr)
 );
 
-// the board's byte (the MRA, index 3, after the M48T58's 8 KB): bit 0 RAM 2 x 8 MB (m2_boot), bit 1 the guns and their inputs, bit 2 Total Vice's two players, who reload by shooting off the screen
+// the board's byte (the MRA, index 3, after the M48T58's 8 KB): bit 0 RAM 2 x 8 MB (m2_boot), bit 1 the guns and their inputs, bit 2 Total Vice's two players, who reload by shooting off the screen, bit 3 the CD's data sectors streamed from the mounted image (rtl/m2_boot.sv, CD_STREAM: Battle Tryst's build), bit 4 the arcade monitor's raster, 512 x 384, and High Res (rtl/m2_vtiming.sv: Hell Night)
 reg   [7:0] board = 8'h00;
+`ifdef NO_GUN_BOARD
+wire        gun_game = 1'b0;   // (no guns in this build: the inputs as a stick's, and the OSD without the gun settings, whatever the MRA says)
+`else
 wire        gun_game = board[1];
+`endif
 always @(posedge clk_sys) if (ioctl_wr && ioctl_download && ioctl_index == 16'd3 && ioctl_addr == 27'h2000) board <= ioctl_dout;
 
 // the DIP switches (the MRA's <switches>, ioctl index 254): byte 0 is IO1 2, MAME's P2: bit 0 the sound, 1 mono, bit 1 the screen, 0 flipped;
@@ -243,7 +266,7 @@ end
 wire        p2_start = joystick_1[7] | (status[3] & joystick_0[6]);
 
 wire  [9:0] gun_x [0:2];
-wire  [7:0] gun_y [0:2];
+wire  [8:0] gun_y [0:2];
 wire [15:0] gun_p5;
 wire  [9:0] hpos;
 wire  [8:0] vpos;
@@ -255,7 +278,7 @@ m2_boot #(.TICK(8)) u_boot
 	.ld_wr(ld_wr_c), .ld_sel(ld_sel), .ld_addr(ld_a[25:0]), .ld_data(ld_d), .ld_wait(ld_wait_c),
 	.ee_ua(ioctl_addr[6:0]), .ee_ud(ee_ud), .ee_chg(ee_chg),
 	.in_p1({6'b111111, ~joystick_1[8], ~joystick_0[8]}),  // (the service coin not on a button: Coin does as much)
-	.in_dsw(dsw),
+	.in_dsw(dsw), .dec2_off(~status[7]),
 	.hpos(hpos), .vpos(vpos), .rgb(vdu_rgb), .vdu_on(vdu_on), .audio_l(audio_l), .audio_r(audio_r),
 	.cd_mounted(cd_mounted), .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_ack(sd_ack), .sd_wr(sd_buff_wr), .sd_d(sd_buff_dout),
 	.in_p4(gun_game ? {~p2_start, 7'h7f, ~joystick_0[7], 3'b111, ~joystick_2[8], ~joystick_2[7], 2'b11}
@@ -263,19 +286,29 @@ m2_boot #(.TICK(8)) u_boot
 	                   joystick_0[7:4], joystick_0[2], joystick_0[3], joystick_0[0], joystick_0[1]}),
 	.in_p5(gun_game ? gun_p5 : 16'hffff), .gun_x(gun_x), .gun_y(gun_y),
 	.in_p6({13'h1fff, ~status[3], 2'b11}),
+`ifndef PPC_CACHE_KB
+	.cache_size(status[6:5]),
+`else
+	.cache_size(2'd0),
+`endif
 	.ddr_busy(DDRAM_BUSY), .ddr_burstcnt(DDRAM_BURSTCNT), .ddr_addr(DDRAM_ADDR), .ddr_dout(DDRAM_DOUT),
 	.ddr_dout_ready(DDRAM_DOUT_READY), .ddr_rd(DDRAM_RD), .ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_we(DDRAM_WE),
+`ifdef Z_SDRAM
+	.clk_mem(clk_mem), .sd_late(status[4]), .sd_a(SDRAM_A), .sd_ba(SDRAM_BA), .sd_dqm({SDRAM_DQMH, SDRAM_DQML}),
+	.sd_nras(SDRAM_nRAS), .sd_ncas(SDRAM_nCAS), .sd_nwe(SDRAM_nWE), .sd_dq_o(sd_dq_o), .sd_dq_oe(sd_dq_oe), .sd_dq_i(SDRAM_DQ),
+`endif
 	.st_pc(), .st_count(), .st_exc(), .st_nexc(), .st_dev_a(), .st_dev_d(), .st_dev_w(), .st_ndev(),
 	.retire(), .retire2(), .ipc0_o(), .ipc_o(), .p2_retire(), .p2_retire2(), .p2_ipc0_o(), .p2_ipc_o()
 );
 
 ///////////////////////   VIDEO   ///////////////////////
 
-// The raster: 857 x 262 at 59.39 Hz, 640 x 240 shown (near MAME's set_ntsc(); rtl/m2_vtiming.sv)
+// The raster: 857 x 262 at 59.39 Hz, 640 x 240 shown (near MAME's set_ntsc(); rtl/m2_vtiming.sv); with the board byte's bit 4 (Hell
+// Night's), the arcade monitor's, 684 x 416 at 58.6 Hz, 512 x 384 shown (MAME's set_arcres())
 wire        ce_pix, hblank, vblank, hsync, vsync;
 m2_vtiming u_vtiming
 (
-	.clk(clk_sys), .rst(~pll_locked),
+	.clk(clk_sys), .rst(~pll_locked), .arc(board[4]),
 	.ce_pix(ce_pix), .hpos(hpos), .vpos(vpos), .hblank(hblank), .vblank(vblank), .hsync(hsync), .vsync(vsync)
 );
 
@@ -289,20 +322,28 @@ wire  [1:0] gun_mode [0:2] = '{status[36:35], status[38:37], status[40:39]};
 wire  [2:0] gun_show = !gun_game ? 3'b000 : status[45:43] == 3'd1 ? 3'b001 : status[45:43] == 3'd2 ? 3'b010 : status[45:43] == 3'd3 ? 3'b100 :
                        status[45:43] == 3'd4 ? 3'b011 : status[45:43] == 3'd5 ? 3'b111 : 3'b000;
 wire  [9:0] gun_x_o [0:2];
-wire  [7:0] gun_y_o [0:2];
+wire  [8:0] gun_y_o [0:2];
+`ifndef NO_GUN_BOARD
 m2_guns u_guns
 (
 	.clk(clk_sys), .rst(core_rst | ~gun_game), .vblank(vblank),
-	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[42:41]), .off_fire(board[2]),
+	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[42:41]), .off_fire(board[2]), .arc(board[4]),
 	.gun_x(gun_x_o), .gun_y(gun_y_o), .p5(gun_p5),
 	.show(gun_show), .hpos(hpos), .vpos(vpos), .rgb_in(rgb_game), .rgb_out(rgb)
 );
+`else
+// (NO_GUN_BOARD: no guns, in a build that isn't for the gun games: Heat of Eleven's, Battle Tryst's)
+assign gun_x_o = '{10'd0, 10'd0, 10'd0};
+assign gun_y_o = '{9'd0, 9'd0, 9'd0};
+assign gun_p5 = 16'hffff;
+assign rgb = rgb_game;
+`endif
 generate
 	genvar g;
 	for (g = 0; g < 3; g = g + 1)
 	begin : gun_out
 		assign gun_x[g] = gun_game ? gun_x_o[g] : 10'd0;
-		assign gun_y[g] = gun_game ? gun_y_o[g] : 8'd0;
+		assign gun_y[g] = gun_game ? gun_y_o[g] : 9'd0;
 	end
 endgenerate
 

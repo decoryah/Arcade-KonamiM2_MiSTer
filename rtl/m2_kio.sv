@@ -20,7 +20,7 @@ module m2_kio (
 	input  logic [15:0] in_p6,          // IO1 6: the service switch, active low
 	input  logic [15:0] in_p5,          // the gun switches (0x37a00030)
 	input  logic [9:0]  gun_x [0:2],    // the guns, as MAME's: 0 if off the screen (rtl/m2_guns.sv)
-	input  logic [7:0]  gun_y [0:2],
+	input  logic [8:0]  gun_y [0:2],    // (0..383 on the arcade monitor: Hell Night)
 
 	input  logic        ee_wr,
 	input  logic [6:0]  ee_a,
@@ -143,7 +143,7 @@ module m2_kio (
 			case (a[3:1])   // (each byte-swapped)
 				3'd0, 3'd1, 3'd2: rd = {gun_x[a[2:1]][7:0], 6'd0, gun_x[a[2:1]][9:8]};
 				3'd3: rd = 16'hffff;
-				3'd4, 3'd5, 3'd6: rd = {gun_y[a[2:1]], 8'h00};
+				3'd4, 3'd5, 3'd6: rd = {gun_y[a[2:1]][7:0], 7'd0, gun_y[a[2:1]][8]};
 				default: rd = 16'h0;
 			endcase
 		else if (a[23:16] == 8'ha0 && a[15:4] == 12'h003 && a[3:1] == 3'd0) rd = in_p5;

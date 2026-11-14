@@ -2,12 +2,14 @@
 // FV0A, a block of lines at a time, each block a header (DMA control, the frame buffer's address, the next block), control words and
 // lines of the buffer. Each line is read into a line buffer while the line before it is shown.
 //
-// Places are MAME's: a line's x from 0 at the start of a 768 pixel line, shown from 126; lines from 0, shown from 20, to 259.
+// Places are MAME's: a line's x from 0 at the start of a 768 pixel line, shown from 126; lines from 0, shown from 20, to 259. With arc
+// (the arcade monitor's raster, set_arcres(): rtl/m2_vtiming.sv), x shown from 104 and lines from 26 to 409, as MAME's visible area.
 // The VDU's other features (interpolation, dither, the second field) MAME doesn't draw, and nor does this.
 `default_nettype none
 module m2_vdu (
 	input  logic        clk,
 	input  logic        rst,
+	input  logic        arc,            // the arcade monitor's raster (512 x 384), not the TV's
 
 	// the registers: writes (reads are 0, as MAME's; VLOC and VINT are rtl/m2_bda.sv's)
 	input  logic [5:2]  a,
@@ -19,6 +21,8 @@ module m2_vdu (
 	input  logic [8:0]  vpos,           // from 0 where a frame starts being shown: MAME's line - 20
 	output logic [23:0] rgb,
 	output logic        on,             // something to show: the list's been set
+	output logic        frame,          // a frame's list starts (a clock), and flip with it if what the last frame showed differs
+	output logic        flip,           // from the one before (its blocks' buffer addresses: a game flips by changing its list in memory)
 
 	// memory
 	output logic        m_rd,
@@ -28,8 +32,11 @@ module m2_vdu (
 	input  logic        m_ready,
 	input  logic [63:0] m_dout
 );
-	localparam int VTOTAL = 260, V_SHOWN = 20;
-	localparam logic [9:0] X_SHOWN = 10'd126;
+	// MAME's m_vtotal (the list's lines), m_vstart (the first shown), m_hstart, and the raster's last line
+	wire  [8:0]  VTOTAL = arc ? 9'd410 : 9'd260;
+	wire  [8:0]  V_SHOWN = arc ? 9'd26 : 9'd20;
+	wire  [9:0]  X_SHOWN = arc ? 10'd104 : 10'd126;
+	wire  [8:0]  V_LAST = arc ? 9'd415 : 9'd261;
 
 	logic [31:0] fv0a;
 	logic [1:0]  vrst;
@@ -90,10 +97,12 @@ module m2_vdu (
 	logic [10:0] c_hs, c_hw;
 	logic        c_hd, c_fmt;
 
+	logic [31:0] sig, sig_last;         // the frame's shown buffers (its blocks' addresses, rotated in), and the last frame's
+
 	logic [8:0]  vpos_q;
 	wire         l_start = vpos != vpos_q;
-	wire  [8:0]  shown = vpos + 9'(V_SHOWN);       // the line shown now, 0-261
-	wire  [8:0]  shown_nx = shown == 9'd261 ? 9'd0 : shown + 9'd1;
+	wire  [8:0]  shown = vpos + V_SHOWN;           // the line shown now, 0-261 (0-415)
+	wire  [8:0]  shown_nx = shown >= V_LAST ? 9'd0 : shown + 9'd1;
 
 	assign m_rd = st == S_WORD || st == S_FETCH;
 	assign m_four = st == S_FETCH;
@@ -104,6 +113,7 @@ module m2_vdu (
 	always_ff @(posedge clk)
 	begin
 		vpos_q <= vpos;
+		frame <= 1'b0; flip <= 1'b0;
 		if (rst)
 		begin
 			st <= S_WAIT; go <= 1'b0; bank <= 1'b0; c_show <= 1'b0; n_show <= 1'b0; have <= 1'b0; live <= 1'b0; v <= 9'd0;
@@ -129,10 +139,11 @@ module m2_vdu (
 					begin
 						v <= 9'd0; addr <= fv0a; have <= 1'b0; rep <= 1'b0;
 						live <= on;
+						frame <= 1'b1; flip <= sig != sig_last; sig_last <= sig; sig <= 32'h0;
 						if (on) begin w_i <= 2'd0; in_hdr <= 1'b1; st <= S_WORD; end
 						else st <= S_WAIT;
 					end
-					else if (!on || !live || ln >= 9'(VTOTAL)) st <= S_WAIT;
+					else if (!on || !live || ln >= VTOTAL) st <= S_WAIT;
 					else if (have) st <= S_LINE;
 					else begin addr <= next; w_i <= 2'd0; in_hdr <= 1'b1; st <= S_WORD; end
 				S_WORD: if (!m_busy) st <= S_WORDW;
@@ -144,7 +155,7 @@ module m2_vdu (
 						begin
 							case (w_i)
 								2'd0: ctl <= w;
-								2'd1: lower <= w;
+								2'd1: begin lower <= w; if (ctl[21]) sig <= {sig[26:0], sig[31:27]} ^ w; end
 								2'd2: ;
 								default: next <= w;
 							endcase
@@ -180,14 +191,14 @@ module m2_vdu (
 				begin
 					// a block's lines: 0 for the rest
 					have <= 1'b1;
-					b_left <= ctl[8:0] != 9'd0 ? ctl[8:0] : 9'(VTOTAL) - v;
+					b_left <= ctl[8:0] != 9'd0 ? ctl[8:0] : VTOTAL - v;
 					rep <= 1'b0;
 					st <= S_LINE;
 				end
 				S_LINE:
 				begin
 					n_hs <= hs; n_hw <= hw; n_hd <= hd; n_fmt <= fmt32;
-					if (ln < 9'(V_SHOWN) || !ctl[21])
+					if (ln < V_SHOWN || !ctl[21])
 					begin
 						// nothing to read
 						st <= S_DONE;

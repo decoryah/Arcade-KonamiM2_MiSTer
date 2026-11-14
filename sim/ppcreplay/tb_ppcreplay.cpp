@@ -402,6 +402,9 @@ int main(int argc, char **argv)
 	if (!rd.f) { perror(tracefile); return 2; }
 
 	ppc602 cpu(mem);
+#ifndef PIPE
+	cpu.exact_sqrt = true;  // the captures are MAME 0.289's, as the old core (RTL=1): fsqrt and an exact frsqrte, not the 602's
+#endif
 	cpu.reset();
 	step cur, nxt;
 	if (!rd.next(cur)) { fprintf(stderr, "empty trace\n"); return 2; }

@@ -31,7 +31,7 @@ module fp_noise (
 			4'd12: op = F_RSQRTE;
 			default: op = F_MADDS;
 		endcase
-	wire slow = op == F_DIVS || op == F_RSQRTE;
+	wire slow = op == F_DIVS;   // (frsqrte: the pipeline's)
 
 	logic ok, go, f_mine;
 	logic [2:0] bw, fe, fw;

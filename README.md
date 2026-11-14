@@ -42,7 +42,7 @@ Built with Quartus 17.0: 37,938 of 41,910 ALMs (91 %), timing met on every clock
 | Tobe! Polystars (ver JAA, 1997) | `polystar` | plays, at full speed |
 | Evil Night (ver UBA, 1998) | `evilngt` | plays: light guns, up to three players |
 | Total Vice (ver EBA, 1997) | `totlvice` | plays: light guns, up to two players |
-| Hell Night (ver EAA, 1998) | `hellngt` | planned |
+| Hell Night (ver EAA, 1998) | `hellngt` | plays: light guns, up to three players, on the arcade monitor's 512 x 384; its own build (`KonamiM2HellNight`), with its Z buffer in the SDRAM board's memory |
 | Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not working in MAME 0.289, not planned |
 | Battle Tryst (ver JAC, 1998) | `btltryst` | not working in MAME 0.289, not planned |
 | Heat of Eleven '98 (ver EAA, 1998) | `heatof11` | not working in MAME 0.289, not planned |
@@ -51,7 +51,9 @@ Built with Quartus 17.0: 37,938 of 41,910 ALMs (91 %), timing met on every clock
 
 1. Unzip `KonamiM2_MiSTer_<date>.zip` (`tools/package.py` writes it to `dist/`) over the root of the SD card (`/media/fat/`): the core goes
    to `_Arcade/cores/`, the three MRAs to `_Arcade/`. By hand from the repository: `releases/KonamiM2_<date>.rbf` to `_Arcade/cores/`,
-   `mra/Tobe! Polystars (ver JAA).mra`, `mra/Evil Night (ver UBA).mra` and `mra/Total Vice (ver EBA).mra` to `_Arcade/`.
+   `mra/Tobe! Polystars (ver JAA).mra`, `mra/Evil Night (ver UBA).mra` and `mra/Total Vice (ver EBA).mra` to `_Arcade/`. Hell Night has
+   its own build, `KonamiM2HellNight_<date>.rbf` (`tools/build.py hellngt`), which the zip has, with its MRA, when the release does; it
+   needs the SDRAM board.
 2. Make each game's disc files from the CHD in your MAME 0.289 set. They aren't in a MAME set: `<set>_cd.zip` holds the disc's data
    track, which the core loads with the game, and `<set>_full.bin` the whole disc, from which it plays the music.
 
@@ -60,24 +62,27 @@ Built with Quartus 17.0: 37,938 of 41,910 ALMs (91 %), timing met on every clock
    | Tobe! Polystars | `polystar/623jaa02.chd` | `polystar_cd.zip` (24 MB in it), `polystar_full.bin` (546 MB), `polystar_full.cue` |
    | Evil Night | `evilngt/810uba02.chd` | `evilngt_cd.zip` (58 MB in it), `evilngt_full.bin` (515 MB), `evilngt_full.cue` |
    | Total Vice | `totlvice/639eba01.chd` | `totlvice_cd.zip` (42 MB in it), `totlvice_full.bin` (522 MB), `totlvice_full.cue` |
+   | Hell Night | `hellngt/810eaa02.chd` | `hellngt_cd.zip` (58 MB in it), `hellngt_full.bin` (515 MB), `hellngt_full.cue` |
 
    The `.cue` is the image's cue sheet; the core doesn't need it. Make them in either of these ways:
 
-   - **Any of the three, with this repository's `tools/m2disc.py`** (Python 3 and MAME's `chdman`, nothing else). From the folder you
+   - **Any of these, with this repository's `tools/m2disc.py`** (Python 3 and MAME's `chdman`, nothing else). From the folder you
      want the files in:
 
      ```
      python3 tools/m2disc.py polystar/623jaa02.chd
      python3 tools/m2disc.py evilngt/810uba02.chd
      python3 tools/m2disc.py totlvice/639eba01.chd
+     python3 tools/m2disc.py hellngt/810eaa02.chd
      ```
 
      `chdman` comes with MAME. If it isn't on the PATH, give it after the CHD; on Windows, for example,
      `py tools\m2disc.py totlvice\639eba01.chd C:\mame\chdman.exe`. The tool knows each disc by its tracks and checks its data, and
-     says so if a CHD is none of the three or another version of the game: Total Vice's AAB, JAD and UAC discs have the same tracks,
+     says so if a CHD is none of these or another version of the game: Total Vice's AAB, JAD and UAC discs have the same tracks,
      and the core runs only EBA's. Total Vice's CHD keeps its data track as 2048-byte sectors, and the core finds the music by 2352-byte
      ones, so the tool pads that track in `totlvice_full.bin`; it does the same for an older Polystars CHD kept that way. Polystars'
-     music it also repairs (below).
+     music it also repairs (below). It makes Heat of Eleven's and Battle Tryst's files too (`heatof11/703eaa02.chd`,
+     `btltryst/636jac02.chd`), for their own builds: their MRAs say where they go.
    - **Any of the three, in a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
      (for Polystars, keep *Repair gaps in Polystars music* ticked) and download the three files it makes. The conversion runs on your
      computer, and the CHD isn't uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory.
@@ -88,7 +93,7 @@ Built with Quartus 17.0: 37,938 of 41,910 ALMs (91 %), timing met on every clock
    place by `python3 tools/cdfix.py polystar_full.bin`, which checks the file first and leaves alone one that isn't this image or is
    already repaired. The repair holds only positions; all the audio comes from your image. Evil Night's and Total Vice's CHDs have no
    such gaps.
-3. Put the files on the SD card, for each game (`<set>` is `polystar`, `evilngt` or `totlvice`):
+3. Put the files on the SD card, for each game (`<set>` is `polystar`, `evilngt`, `totlvice` or `hellngt`):
 
    | File | Goes in |
    |---|---|
@@ -125,6 +130,9 @@ The service coin isn't on a button: Coin does the same.
 | Mouse (gun games) | Player 1, Player 2, Player 3, Off |
 | Crosshair (gun games) | Off, Player 1, Player 2, Player 3, P1+P2, All |
 | Service mode | Off, On: the game's service menu |
+| Advanced: CPU caches (at reset) | 32 KB, 16 KB, 8 KB, 4 KB as the 602 (each side; Hell Night's build is fixed at 32 KB) |
+| Advanced: SDRAM read timing (Battle Tryst, Heat of Eleven, Hell Night) | Normal, Late: the Z buffer's reads a clock later, for a module that answers slowly |
+| Advanced: CPU 2 DEC interrupt | Off (the default), On: whether CPU 2 takes its decrementer exception. On is the 602's own behavior, but with it the M2 OS's scheduler can run on CPU 2 and corrupt its task queue (a freeze after hours); DEC counts either way |
 | DIP Switches | Polystars and Total Vice: Sound Output (Stereo, Mono), Flip Screen (Off, On). Evil Night: Flip Screen |
 
 **The service menus:** Evil Night's opens an item with the trigger. Total Vice's opens one only with Player 2's Start; while Service mode is On, Player 1's Button 3 (*Select (Service)*, X on the pad) does the same, so one controller is enough.
@@ -139,7 +147,9 @@ delete it to have the MRA's settings again. Evil Night's blood is GAME OPTIONS' 
 
 - **Speed:** in Polystars, where the real board slows down, the core slows down less (above). Evil Night and Total Vice haven't been
   timed against a real board.
-- **Games:** Hell Night (ver EAA), Evil Night's other version, is planned: its picture and its guns' range differ from Evil Night's.
+- **Games:** Hell Night (ver EAA), Evil Night's European version, draws only in High Res, on the arcade monitor (512 x 384, about 24 kHz),
+  where on this core the other games draw in Low Res (640 x 240, the TV's): its MRA's board byte asks for that raster, and its guns' range is MAME's
+  hellngt's. Its Z buffer at 512 x 384 needs the SDRAM board.
   Total Vice's JAD, AAB and UAC sets, Battle Tryst and Heat of Eleven '98 are marked not working in MAME 0.289, so the core can't be
   checked against it for them.
 - **MPEG:** the 3DO M2's MPEG video decoder isn't in the core. No Konami M2 game is known to need it: MAME has only an empty stand-in
@@ -182,6 +192,12 @@ skipped.
 ## Building
 
 Quartus Prime Lite 17.0: open `KonamiM2.qpf` and compile; the RBF is `output_files/KonamiM2.rbf`.
+
+Or from the command line, with `quartus_sh` on the PATH: `python3 tools/build.py [default|heat|tryst]` compiles the default
+build, Heat of Eleven's or Battle Tryst's (the qsf's lines for it, its seed) in a copy under `build/`, and puts the RBF in
+`releases/` as `KonamiM2_<date>.rbf`, `KonamiM2Heat_<date>.rbf` or `KonamiM2Tryst_<date>.rbf` (the names the MRAs ask for),
+with its fitter and timing summaries, if it meets timing on every clock. `tools/package.py` puts the games' builds of the
+release's date in its zip, with their MRAs.
 
 ## Capturing from MAME
 
