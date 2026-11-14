@@ -75,7 +75,7 @@ module ppc_cached (
 		.clk, .rst,
 		.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data,
 		.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
-		.int_ext, .dec_tick, .tb_tick,
+		.int_ext, .dec_tick, .dec_int_off(1'b0), .tb_tick,
 		.retire, .retire2, .ipc0_o, .iop0_o, .ipc_o, .iop_o, .exc_o, .timer_read_o, .pc_o, .gpr_o, .fpr_o,
 		.cr_o, .lr_o, .ctr_o, .xer_o, .msr_o, .srr0_o, .srr1_o, .fpscr_o, .gpr_pend_o, .fpr_pend_o,
 		.perf_o(), .perf_pc_o(),

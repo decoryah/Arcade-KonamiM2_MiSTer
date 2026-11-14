@@ -25,6 +25,7 @@ module m2_boot #(
 ) (
 	input  logic        clk,
 	input  logic        rst,
+	input  logic        dec2_off,       // CPU 2 takes no decrementer exception (KonamiM2.sv's OSD; see the README)
 
 	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM, 4 the YMZ280B's samples,
 	// 3 the M48T58's 8 KB then a byte for the board (bit 0: RAM 2 x 8 MB, not 2 x 4 MB; bit 4: the arcade monitor, 512 x 384); a game
@@ -186,7 +187,7 @@ module m2_boot #(
 			.clk, .rst(rs[g]),
 			.if_req, .if_va, .if_rdy, .if_pa, .if_kill, .if_valid, .if_data,
 			.d_req, .d_va, .d_kill, .d_we, .d_pa, .d_size, .d_wdata, .d_rdy, .d_valid, .d_rdata,
-			.int_ext(g == 0 ? ppc1_int : ppc2_int), .dec_tick, .tb_tick(dec_tick),
+			.int_ext(g == 0 ? ppc1_int : ppc2_int), .dec_tick, .dec_int_off(g != 0 && dec2_off), .tb_tick(dec_tick),
 			.retire(c_ret[g]), .retire2(c_ret2[g]), .ipc0_o(c_ipc0[g]), .iop0_o(), .ipc_o(c_ipc[g]), .iop_o(), .exc_o(c_exc[g]),
 			.timer_read_o(), .pc_o(), .gpr_o(), .fpr_o(),
 			.cr_o(), .lr_o(), .ctr_o(), .xer_o(), .msr_o(), .srr0_o(), .srr1_o(), .fpscr_o(), .gpr_pend_o(), .fpr_pend_o(),

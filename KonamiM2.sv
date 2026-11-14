@@ -97,12 +97,14 @@ localparam CONF_STR = {
 	"H1O[45:43],Crosshair,Off,Player 1,Player 2,Player 3,P1+P2,All;",
 	"H1-;",
 	"O[3],Service mode,Off,On;",
+	"P1,Advanced;",
 `ifndef PPC_CACHE_KB
-	"O[6:5],CPU caches (at reset),32 KB,16 KB,8 KB,4 KB as the 602;",  // (each side: rtl/ppc_cache.sv's size; a build that sets PPC_CACHE_KB has its own)
+	"P1O[6:5],CPU caches (at reset),32 KB,16 KB,8 KB,4 KB as the 602;",  // (each side: rtl/ppc_cache.sv's size; a build that sets PPC_CACHE_KB has its own)
 `endif
 `ifdef Z_SDRAM
-	"O[4],SDRAM read timing,Normal,Late;",  // (the Z buffer's: its read data a clock later, for a module that answers slowly)
+	"P1O[4],SDRAM read timing,Normal,Late;",  // (the Z buffer's: its read data a clock later, for a module that answers slowly)
 `endif
+	"P1O[7],CPU 2 DEC interrupt,Off,On;",  // (off: the M2 OS's slave-decrementer race can't start; see the README)
 	"DIP;",
 	"R0,Reset;",
 	"J1,Button 1,Button 2,Button 3,Start,Coin;",
@@ -276,7 +278,7 @@ m2_boot #(.TICK(8)) u_boot
 	.ld_wr(ld_wr_c), .ld_sel(ld_sel), .ld_addr(ld_a[25:0]), .ld_data(ld_d), .ld_wait(ld_wait_c),
 	.ee_ua(ioctl_addr[6:0]), .ee_ud(ee_ud), .ee_chg(ee_chg),
 	.in_p1({6'b111111, ~joystick_1[8], ~joystick_0[8]}),  // (the service coin not on a button: Coin does as much)
-	.in_dsw(dsw),
+	.in_dsw(dsw), .dec2_off(~status[7]),
 	.hpos(hpos), .vpos(vpos), .rgb(vdu_rgb), .vdu_on(vdu_on), .audio_l(audio_l), .audio_r(audio_r),
 	.cd_mounted(cd_mounted), .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_ack(sd_ack), .sd_wr(sd_buff_wr), .sd_d(sd_buff_dout),
 	.in_p4(gun_game ? {~p2_start, 7'h7f, ~joystick_0[7], 3'b111, ~joystick_2[8], ~joystick_2[7], 2'b11}
