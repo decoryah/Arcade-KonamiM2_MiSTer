@@ -94,7 +94,8 @@ set_global_assignment -name SEED 11
 # 512 x 384 and its Z buffer (384 KB) is larger than block RAM holds. Its MRA's board byte sets bit 4, the arcade monitor's raster and
 # High Res (rtl/m2_vtiming.sv). Its RBF goes in _Arcade/cores as KonamiM2HellNight_<date>.rbf, the name its MRA asks for. A 16 KB Z
 # cache (Z_CACHE_IB=9; 4 KB without it), and to make room for it what Hell Night doesn't use left out, as in Battle Tryst's build but
-# for the discards (a census of its attract and its gameplay in the M2 emulator). Seed 5 (2 meets timing too, by less; 11 misses)
+# for the discards (a census of its attract and its gameplay in the M2 emulator). The CPUs' caches fixed at 32 KB (PPC_CACHE_KB: no
+# OSD size option there, which frees the room the CPU 2 decrementer option needs). Seed 2 (11 meets timing too, by less; 5 misses)
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "Z_CACHE_IB=9"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
@@ -104,7 +105,8 @@ set_global_assignment -name SEED 11
 #set_global_assignment -name VERILOG_MACRO "TE_NO_ALPHACTL=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_WCLIPIN=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
-#set_global_assignment -name SEED 5
+#set_global_assignment -name VERILOG_MACRO "PPC_CACHE_KB=32"
+#set_global_assignment -name SEED 2
 
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"

@@ -130,6 +130,9 @@ The service coin isn't on a button: Coin does the same.
 | Mouse (gun games) | Player 1, Player 2, Player 3, Off |
 | Crosshair (gun games) | Off, Player 1, Player 2, Player 3, P1+P2, All |
 | Service mode | Off, On: the game's service menu |
+| Advanced: CPU caches (at reset) | 32 KB, 16 KB, 8 KB, 4 KB as the 602 (each side; Hell Night's build is fixed at 32 KB) |
+| Advanced: SDRAM read timing (Battle Tryst, Heat of Eleven, Hell Night) | Normal, Late: the Z buffer's reads a clock later, for a module that answers slowly |
+| Advanced: CPU 2 DEC interrupt | Off (the default), On: whether CPU 2 takes its decrementer exception. On is the 602's own behavior, but with it the M2 OS's scheduler can run on CPU 2 and corrupt its task queue (a freeze after hours); DEC counts either way |
 | DIP Switches | Polystars and Total Vice: Sound Output (Stereo, Mono), Flip Screen (Off, On). Evil Night: Flip Screen |
 
 **The service menus:** Evil Night's opens an item with the trigger. Total Vice's opens one only with Player 2's Start; while Service mode is On, Player 1's Button 3 (*Select (Service)*, X on the pad) does the same, so one controller is enough.
