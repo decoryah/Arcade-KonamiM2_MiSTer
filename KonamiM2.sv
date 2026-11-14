@@ -95,6 +95,9 @@ localparam CONF_STR = {
 	"H1O[45:43],Crosshair,Off,Player 1,Player 2,Player 3,P1+P2,All;",
 	"H1-;",
 	"O[3],Service mode,Off,On;",
+`ifndef PPC_CACHE_KB
+	"O[6:5],CPU caches (at reset),32 KB,16 KB,8 KB,4 KB as the 602;",  // (each side: rtl/ppc_cache.sv's size; a build that sets PPC_CACHE_KB has its own)
+`endif
 	"DIP;",
 	"R0,Reset;",
 	"J1,Button 1,Button 2,Button 3,Start,Coin;",
@@ -263,6 +266,11 @@ m2_boot #(.TICK(8)) u_boot
 	                   joystick_0[7:4], joystick_0[2], joystick_0[3], joystick_0[0], joystick_0[1]}),
 	.in_p5(gun_game ? gun_p5 : 16'hffff), .gun_x(gun_x), .gun_y(gun_y),
 	.in_p6({13'h1fff, ~status[3], 2'b11}),
+`ifndef PPC_CACHE_KB
+	.cache_size(status[6:5]),
+`else
+	.cache_size(2'd0),
+`endif
 	.ddr_busy(DDRAM_BUSY), .ddr_burstcnt(DDRAM_BURSTCNT), .ddr_addr(DDRAM_ADDR), .ddr_dout(DDRAM_DOUT),
 	.ddr_dout_ready(DDRAM_DOUT_READY), .ddr_rd(DDRAM_RD), .ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_we(DDRAM_WE),
 	.st_pc(), .st_count(), .st_exc(), .st_nexc(), .st_dev_a(), .st_dev_d(), .st_dev_w(), .st_ndev(),

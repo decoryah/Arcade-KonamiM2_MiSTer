@@ -1,5 +1,8 @@
 // The bench's top for sim/coh: two rtl/ppc_cache.sv and the DMA's port on rtl/m2_bus.sv, the caches' core sides and DDR3 the bench's.
 `default_nettype none
+`ifndef CACHE_SIZE
+`define CACHE_SIZE 2'd0
+`endif
 module coh_top (
 	input  logic        clk,
 	input  logic        rst,
@@ -58,7 +61,7 @@ module coh_top (
 		// verilator lint_off PINCONNECTEMPTY
 		ppc_cache cache
 		(
-			.clk, .rst, .sn_v(sn_v[g]), .sn_a,
+			.clk, .rst, .size(`CACHE_SIZE), .sn_v(sn_v[g]), .sn_a,
 			.if_req(if_req[g]), .if_va(if_va[g]), .if_rdy(if_rdy[g]), .if_pa(if_pa[g]), .if_kill(if_kill[g]), .if_valid(if_valid[g]), .if_data(if_data[g]), .i_mem(1'b1),
 			.d_req(d_req[g]), .d_va(d_va[g]), .d_kill(d_kill[g]), .d_we(d_we[g]), .d_pa(d_pa[g]), .d_size(d_size[g]), .d_wdata(d_wdata[g]),
 			.d_rdy(d_rdy[g]), .d_valid(d_valid[g]), .d_rdata(d_rdata[g]),

@@ -30,6 +30,7 @@
 module ppc_cache #(parameter int KB = 32) (
 	input  logic        clk,
 	input  logic        rst,
+	input  logic [1:0]  size,           // 0: KB a side, 1: KB / 2, 2: KB / 4, 3: KB / 8 (taken at reset): a smaller cache's geometry
 	input  logic        sn_v,
 	input  logic [31:5] sn_a,
 
@@ -85,10 +86,22 @@ module ppc_cache #(parameter int KB = 32) (
 	localparam int FIFO = 4;
 	localparam int IB = $clog2(KB) + 9;       // the index's top address bit (12 at 8 KB)
 	localparam int LW = IB - 4;               // a line's index
-	localparam int TW = 32 - IB;              // a tag: valid, then the physical address above the index
+	localparam int IBM = IB - 3;              // ... at the smallest size (size 3)
+	localparam int TW = 32 - IBM;             // a tag: valid, then the physical address above the smallest size's index
 	localparam int DB = IB - 1;               // the data side's: two ways of KB / 2
 	localparam int DL = DB - 4;
-	localparam int DT = 32 - DB;
+	localparam int DBM = DB - 3;
+	localparam int DT = 32 - DBM;
+
+	// the size, taken at reset (the sweep that follows empties every line), and the index bits it keeps (each side's top three can go)
+	logic [1:0]  sz;
+	always_ff @(posedge clk) if (rst) sz <= size;
+	wire  [LW-1:0] imask = {sz < 2'd1, sz < 2'd2, sz < 2'd3, {(LW-3){1'b1}}};
+	wire  [DL-1:0] dmask = {sz < 2'd1, sz < 2'd2, sz < 2'd3, {(DL-3){1'b1}}};
+`define IX(a) ((a[IB:5]) & imask)
+`define IW(a) {(a[IB:5]) & imask, a[4:3]}
+`define DX(a) ((a[DB:5]) & dmask)
+`define DW(a) {(a[DB:5]) & dmask, a[4:3]}
 
 	function automatic logic [31:0] word_be(input logic [63:0] w, input logic hi);
 		logic [31:0] v;
@@ -114,8 +127,9 @@ module ppc_cache #(parameter int KB = 32) (
 	endfunction
 
 	// ---- the tags' sweep: all of them invalid after reset, or inv_all ------------------------------------------------------
+	// (as many lines as the size uses: the rest are never indexed then, and a smaller cache's sweep takes as long as its own)
 	logic [LW:0] sw_n;
-	wire        sw = !sw_n[LW];
+	wire        sw = sw_n < ((LW+1)'(1) << LW) >> sz;
 	logic       inv_all;
 	always_ff @(posedge clk)
 		if (rst || inv_all) sw_n <= '0;
@@ -264,7 +278,7 @@ module ppc_cache #(parameter int KB = 32) (
 	ist_t        i_st;
 	logic        i_out;                 // a fetch's address clock
 	logic [31:0] i_lva;                 // the fetch missed
-	logic [31:IB+1] i_lpa;
+	logic [31:IBM+1] i_lpa;
 	logic [1:0]  i_wn;                  // the line's next beat
 	logic        i_zero;                // the line isn't memory
 	logic        i_killed, i_cancel;    // the fetch dropped; a store to the line
@@ -287,7 +301,7 @@ module ppc_cache #(parameter int KB = 32) (
 	logic [LW-1:0] x_idx;
 	wire         i_scan = sw || x_inv || (s_inv && s_idx == i_idx) || (s_inv_q && s_idx_q == i_idx) ||
 		(h_st && (h_idx == i_idx || h_idx2 == i_idx));
-	wire         i_hit = it_q[TW-1] && it_q[TW-2:0] == if_pa[31:IB+1] && !i_scan;
+	wire         i_hit = it_q[TW-1] && it_q[TW-2:0] == if_pa[31:IBM+1] && !i_scan;
 	wire         i_miss = i_out && !i_hit;
 	assign if_valid = i_out && i_hit;
 	assign if_data = word_be(id_q, if_pa[2]);
@@ -296,26 +310,26 @@ module ppc_cache #(parameter int KB = 32) (
 	ppc_ram #(.W(64), .AW(IB-2)) i_data
 	(
 		.clk,
-		.we(line_beat && e_own == J_ILINE), .wa({i_lva[IB:5], i_wn}), .wd(i_zero ? 64'h0 : mem_dout),
-		.ra(i_rva[IB:3]), .rd(id_q)
+		.we(line_beat && e_own == J_ILINE), .wa({`IX(i_lva), i_wn}), .wd(i_zero ? 64'h0 : mem_dout),
+		.ra(`IW(i_rva)), .rd(id_q)
 	);
-	assign it_ra = i_rva[IB:5];
+	assign it_ra = `IX(i_rva);
 	ppc_ram #(.W(TW), .AW(LW)) i_tag (.clk, .we(it_we), .wa(it_wa), .wd(it_wd), .ra(it_ra), .rd(it_q));
 	logic [IB:3] d_rva;                 // the data side's read address (in D_HRD the held access's, which is d_pa)
-	ppc_ram #(.W(TW), .AW(LW)) i_tag2 (.clk, .we(it_we), .wa(it_wa), .wd(it_wd), .ra(d_rva[IB:5]), .rd(it2_q));
+	ppc_ram #(.W(TW), .AW(LW)) i_tag2 (.clk, .we(it_we), .wa(it_wa), .wd(it_wd), .ra(`IX(d_rva)), .rd(it2_q));
 	logic [TW-1:0] it3_q;
-	ppc_ram #(.W(TW), .AW(LW)) i_tag3 (.clk, .we(it_we), .wa(it_wa), .wd(it_wd), .ra(sn_a[IB:5]), .rd(it3_q));
-	assign sn_i = sn1_v && ((it3_q[TW-1] && it3_q[TW-2:0] == sn1_a[31:IB+1]) || (i_recent[0] && sn1_a == {i_lpa, i_lva[IB:5]}));
+	ppc_ram #(.W(TW), .AW(LW)) i_tag3 (.clk, .we(it_we), .wa(it_wa), .wd(it_wd), .ra(`IX(sn_a)), .rd(it3_q));
+	assign sn_i = sn1_v && ((it3_q[TW-1] && it3_q[TW-2:0] == sn1_a[31:IBM+1]) || (i_recent[0] && sn1_a == {i_lpa, i_lva[IBM:5]}));
 
 	always_comb
 	begin
 		it_we = 1'b0; it_wa = '0; it_wd = '0;
 		if (sw) begin it_we = 1'b1; it_wa = sw_n[LW-1:0]; end
 		else if (s_inv) begin it_we = 1'b1; it_wa = s_idx; end
-		else if (sn_i) begin it_we = 1'b1; it_wa = sn1_a[IB:5]; end
+		else if (sn_i) begin it_we = 1'b1; it_wa = `IX(sn1_a); end
 		else if (i_st == I_TAG)
 		begin
-			it_we = 1'b1; it_wa = i_lva[IB:5]; it_wd = {!i_cancel, i_lpa};
+			it_we = 1'b1; it_wa = `IX(i_lva); it_wd = {!i_cancel, i_lpa};
 		end
 	end
 
@@ -328,12 +342,12 @@ module ppc_cache #(parameter int KB = 32) (
 		else
 		begin
 			i_recent <= {i_recent[0], i_st == I_TAG && !sw && !s_inv && !sn_i};
-			if (if_req && if_rdy) i_idx <= if_va[IB:5];
-			else if (i_st == I_REPLAY) i_idx <= i_lva[IB:5];
+			if (if_req && if_rdy) i_idx <= `IX(if_va);
+			else if (i_st == I_REPLAY) i_idx <= `IX(i_lva);
 			if (if_kill) i_killed <= i_st != I_RUN;
-			if (store_a && d_pa[31:5] == {i_lpa, i_lva[IB:5]}) i_cancel <= 1'b1;
-			if (sn_v && sn_a == {i_lpa, i_lva[IB:5]}) i_cancel <= 1'b1;
-			if (inv_all || (x_inv && x_idx == i_lva[IB:5])) i_cancel <= 1'b1;
+			if (store_a && d_pa[31:5] == {i_lpa, i_lva[IBM:5]}) i_cancel <= 1'b1;
+			if (sn_v && sn_a == {i_lpa, i_lva[IBM:5]}) i_cancel <= 1'b1;
+			if (inv_all || (x_inv && x_idx == `IX(i_lva))) i_cancel <= 1'b1;
 			case (i_st)
 				I_RUN:
 				begin
@@ -341,7 +355,7 @@ module ppc_cache #(parameter int KB = 32) (
 					if (i_miss && !if_kill)
 					begin
 						i_lva <= if_pa;
-						i_lpa <= if_pa[31:IB+1];
+						i_lpa <= if_pa[31:IBM+1];
 						i_line_pend <= 1'b1;
 						i_line_a <= if_pa[31:5];
 						i_wn <= 2'd0;
@@ -373,12 +387,12 @@ module ppc_cache #(parameter int KB = 32) (
 				default: i_st <= I_RUN;
 			endcase
 		end
-	wire i_snoop = store_a && ((it2_q[TW-1] && it2_q[TW-2:0] == d_pa[31:IB+1]) ||
-		((i_st == I_TAG || i_recent != 2'd0) && d_pa[31:5] == {i_lpa, i_lva[IB:5]}));
+	wire i_snoop = store_a && ((it2_q[TW-1] && it2_q[TW-2:0] == d_pa[31:IBM+1]) ||
+		((i_st == I_TAG || i_recent != 2'd0) && d_pa[31:5] == {i_lpa, i_lva[IBM:5]}));
 	always_ff @(posedge clk)
 	begin
 		s_inv <= !rst && (i_snoop || x_inv);
-		s_idx <= x_inv ? x_idx : d_pa[IB:5];
+		s_idx <= x_inv ? x_idx : `IX(d_pa);
 		s_inv_q <= !rst && s_inv;
 		s_idx_q <= s_idx;
 	end
@@ -416,8 +430,8 @@ module ppc_cache #(parameter int KB = 32) (
 	logic        lru_q;                 // d_va's index: the way to replace
 	logic        p_way;                 // the way hit, or the way the line read goes to
 	wire  [1:0]  d_hw;
-	assign d_hw[0] = dt_q[0][DT-1] && dt_q[0][DT-2:0] == d_pa[31:DB+1];
-	assign d_hw[1] = dt_q[1][DT-1] && dt_q[1][DT-2:0] == d_pa[31:DB+1];
+	assign d_hw[0] = dt_q[0][DT-1] && dt_q[0][DT-2:0] == d_pa[31:DBM+1];
+	assign d_hw[1] = dt_q[1][DT-1] && dt_q[1][DT-2:0] == d_pa[31:DBM+1];
 	wire         d_hit = |d_hw;
 	// each way's word, with the store writes its read came before: the one in its read's clock (dw1), the one now (d_wr)
 	logic [63:0] dd_m [2];
@@ -427,8 +441,8 @@ module ppc_cache #(parameter int KB = 32) (
 			dd_m[w] = dd_q[w];
 			for (int b = 0; b < 8; b++)
 			begin
-				if (dw1_v && dw1_way == 1'(w) && dw1_wa == d_pa[DB:3] && dw1_be[b]) dd_m[w][8 * b +: 8] = dw1_wd[8 * b +: 8];
-				if (d_wr && p_way == 1'(w) && d_wa == d_pa[DB:3] && d_be[b]) dd_m[w][8 * b +: 8] = d_wd[8 * b +: 8];
+				if (dw1_v && dw1_way == 1'(w) && dw1_wa == `DW(d_pa) && dw1_be[b]) dd_m[w][8 * b +: 8] = dw1_wd[8 * b +: 8];
+				if (d_wr && p_way == 1'(w) && d_wa == `DW(d_pa) && d_be[b]) dd_m[w][8 * b +: 8] = d_wd[8 * b +: 8];
 			end
 		end
 	wire [63:0]  dd_hq = d_hw[1] ? dd_m[1] : dd_m[0];
@@ -440,7 +454,7 @@ module ppc_cache #(parameter int KB = 32) (
 	wire [63:0]  rb = rd_bytes(rb_w0, rb_w1, rb_aph ? d_pa[2:0] : p_pa[2:0], rb_aph ? d_size : p_size);
 	assign store_a = d_st == D_APH && !d_kill && d_we && d_mem && d_writable;
 	assign x_inv = d_st == D_XINV;
-	assign x_idx = x_n ? p_pa[IB:5] + LW'(p_pa[4:3] == 2'd3) : p_pa[IB:5];
+	assign x_idx = x_n ? (`IX(p_pa) + LW'(p_pa[4:3] == 2'd3)) & imask : `IX(p_pa);
 	assign x_store = x_inv || (d_st == D_DRAIN && p_we && p_mem);
 
 	// the store's bytes in the (16-byte) window
@@ -467,7 +481,7 @@ module ppc_cache #(parameter int KB = 32) (
 	// (not as the sweep starts either: a line read in whose tag a snoop's write displaced still has the old one, inv_all)
 	assign d_rdy = !sw && !inv_all && (d_st == D_IDLE || d_st == D_APH);
 	assign d_rdata = d_val;
-	assign d_rva = d_st == D_HRD ? d_pa[IB:3] : d_va[IB:3];
+	assign d_rva = d_st == D_HRD ? d_pa[IB:3] : d_va[IB:3];   // (raw: masked where used)
 	wire d_take = d_req && d_rdy;
 	assign u_pa = p_pa; assign u_we = p_we; assign u_size = p_size; assign u_wdata = p_wdata;
 	assign u_req = d_st == D_DRAIN && w_empty && !p_mem;
@@ -485,23 +499,23 @@ module ppc_cache #(parameter int KB = 32) (
 		ppc_ram_be #(.AW(DB-2)) i_ddata
 		(
 			.clk,
-			.we((d_wr || line_d) && mine), .be(line_d ? 8'hff : d_be), .wa(line_d ? {p_pa[DB:5], d_wn} : d_wa),
-			.wd(line_d ? mem_dout : d_wd), .ra(d_rva[DB:3]), .rd(dd_q[w])
+			.we((d_wr || line_d) && mine), .be(line_d ? 8'hff : d_be), .wa(line_d ? {`DX(p_pa), d_wn} : d_wa),
+			.wd(line_d ? mem_dout : d_wd), .ra(`DW(d_rva)), .rd(dd_q[w])
 		);
 		wire          dt_we = sw || x_inv || sn_dw[w] || (d_fill && mine);
-		wire [DL-1:0] dt_wa = sw ? sw_n[DL-1:0] : x_inv ? x_idx[DL-1:0] : sn_dw[w] ? sn1_a[DB:5] : p_pa[DB:5];
-		wire [DT-1:0] dt_wd = sw || x_inv || sn_dw[w] ? '0 : {!d_cancel && !inv_all, p_pa[31:DB+1]};
-		ppc_ram #(.W(DT), .AW(DL)) i_dtag (.clk, .we(dt_we), .wa(dt_wa), .wd(dt_wd), .ra(d_rva[DB:5]), .rd(dt_q[w]));
+		wire [DL-1:0] dt_wa = sw ? sw_n[DL-1:0] : x_inv ? (x_idx[DL-1:0] & dmask) : sn_dw[w] ? `DX(sn1_a) : `DX(p_pa);
+		wire [DT-1:0] dt_wd = sw || x_inv || sn_dw[w] ? '0 : {!d_cancel && !inv_all, p_pa[31:DBM+1]};
+		ppc_ram #(.W(DT), .AW(DL)) i_dtag (.clk, .we(dt_we), .wa(dt_wa), .wd(dt_wd), .ra(`DX(d_rva)), .rd(dt_q[w]));
 		logic [DT-1:0] dt2_q;
-		ppc_ram #(.W(DT), .AW(DL)) i_dtag2 (.clk, .we(dt_we), .wa(dt_wa), .wd(dt_wd), .ra(sn_a[DB:5]), .rd(dt2_q));
-		assign sn_dw[w] = sn1_v && ((dt2_q[DT-1] && dt2_q[DT-2:0] == sn1_a[31:DB+1]) || (d_recent && mine && sn1_a == p_pa[31:5]));
+		ppc_ram #(.W(DT), .AW(DL)) i_dtag2 (.clk, .we(dt_we), .wa(dt_wa), .wd(dt_wd), .ra(`DX(sn_a)), .rd(dt2_q));
+		assign sn_dw[w] = sn1_v && ((dt2_q[DT-1] && dt2_q[DT-2:0] == sn1_a[31:DBM+1]) || (d_recent && mine && sn1_a == p_pa[31:5]));
 	end
 	endgenerate
 	// the least recent way: the other one, after a hit or a line read in
 	wire          lru_we = (d_st == D_APH && !d_kill && d_mem && d_cacheable && d_hit) || d_fill;
-	wire [DL-1:0] lru_wa = d_fill ? p_pa[DB:5] : d_pa[DB:5];
+	wire [DL-1:0] lru_wa = d_fill ? `DX(p_pa) : `DX(d_pa);
 	wire          lru_wd = d_fill ? !p_way : !d_hw[1];
-	ppc_ram #(.W(1), .AW(DL)) i_lru (.clk, .we(lru_we), .wa(lru_wa), .wd(lru_wd), .ra(d_rva[DB:5]), .rd(lru_q));
+	ppc_ram #(.W(1), .AW(DL)) i_lru (.clk, .we(lru_we), .wa(lru_wa), .wd(lru_wd), .ra(`DX(d_rva)), .rd(lru_q));
 	always_ff @(posedge clk)
 	begin
 		inv_all <= !rst && !sw && ((sn_d && (x_inv || d_fill)) || (sn_i && s_inv));
@@ -532,7 +546,7 @@ module ppc_cache #(parameter int KB = 32) (
 		if (h_aph && d_kill) h_v <= 1'b0;
 		if (h_aph && !d_kill && d_we)
 		begin
-			h_st <= 1'b1; h_idx <= d_pa[IB:5]; h_idx2 <= d_pa[IB:5] + LW'(d_cross && d_pa[4:3] == 2'd3);
+			h_st <= 1'b1; h_idx <= `IX(d_pa); h_idx2 <= (`IX(d_pa) + LW'(d_cross && d_pa[4:3] == 2'd3)) & imask;
 		end
 		else if (d_st == D_APH) h_st <= 1'b0;
 		if (inv_all || (sn_v && sn_a == p_pa[31:5])) d_cancel <= 1'b1;
@@ -563,7 +577,7 @@ module ppc_cache #(parameter int KB = 32) (
 							else
 							begin
 								d_wr <= d_cacheable && d_hit;
-								d_wa <= d_pa[DB:3]; d_wd <= s_win[63:0]; d_be <= s_be[7:0];
+								d_wa <= `DW(d_pa); d_wd <= s_win[63:0]; d_be <= s_be[7:0];
 								d_val <= 64'h0;
 								d_done();
 							end
@@ -579,7 +593,7 @@ module ppc_cache #(parameter int KB = 32) (
 					if (!w_full)
 					begin
 						d_wr <= p_hit;
-						d_wa <= p_pa[DB:3]; d_wd <= p_win[63:0]; d_be <= p_be[7:0];
+						d_wa <= `DW(p_pa); d_wd <= p_win[63:0]; d_be <= p_be[7:0];
 						d_val <= 64'h0;
 						d_finish();
 					end
@@ -619,6 +633,10 @@ module ppc_cache #(parameter int KB = 32) (
 			endcase
 		end
 	end
+`undef IX
+`undef IW
+`undef DX
+`undef DW
 endmodule
 
 // a simple dual-port RAM of 2^AW x 64 with byte enables, the read registered; what an entry written in that clock reads
