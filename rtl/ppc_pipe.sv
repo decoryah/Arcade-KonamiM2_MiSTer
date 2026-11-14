@@ -83,6 +83,7 @@ module ppc_pipe #(
 
 	input  logic        int_ext,        // external interrupt (level; taken when MSR[EE])
 	input  logic        dec_tick,       // decrement DEC (the bus clock / 4 on the board)
+	input  logic        dec_int_off,    // no decrementer exception: DEC counts and reads as ever (CPU 2's, rtl/m2_boot.sv)
 	input  logic        tb_tick,        // advance TB
 
 	// bench: an instruction finished, its address and word, the state after it; retire2: two (ipc0_o / iop0_o the first)
@@ -1595,7 +1596,7 @@ module ppc_pipe #(
 			begin
 				// the decrementer exception when DEC goes negative
 				dec <= dec - 32'd1;
-				if (dec == 32'h0) dec_irq <= 1'b1;
+				if (dec == 32'h0 && !dec_int_off) dec_irq <= 1'b1;
 			end
 			if (tb_tick) tb <= tb + 64'd1;
 
