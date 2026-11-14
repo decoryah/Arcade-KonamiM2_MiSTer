@@ -43,6 +43,20 @@ static uint32_t operand(uint32_t near) {
 	}
 }
 
+// frsqrte as the 602 does it (measured on a Panasonic FZ-35S, as rtl/ppc_fps.sv's rsqrte602): a table, not 1 / sqrt
+static uint32_t rsq602(uint32_t v) {
+	static const uint8_t tab[32] = { 0x7c, 0x75, 0x6e, 0x68, 0x62, 0x5d, 0x58, 0x53, 0x4f, 0x4b, 0x47, 0x43, 0x40, 0x3d, 0x39, 0x36,
+		0x32, 0x2d, 0x28, 0x24, 0x20, 0x1c, 0x19, 0x15, 0x12, 0x0f, 0x0d, 0x0a, 0x08, 0x05, 0x03, 0x01 };
+	if ((v & 0x7f800000) == 0x7f800000) return (v & 0x7fffff) ? (v | 0x400000) : (v >> 31) ? 0x7fc00000 : 0;
+	if (!(v & 0x7fffffff)) return (v & 0x80000000) | 0x7f800000;
+	if (v >> 31) return 0x7fc00000;
+	int e; uint32_t m = v & 0x7fffff;
+	if (v & 0x7f800000) e = int((v >> 23) & 0xff) - 127;
+	else { e = -127; while (!(m & 0x400000)) { m <<= 1; e--; } m = (m << 1) & 0x7fffff; }
+	int p = e & 1;
+	return (uint32_t(-1 - (e - p) / 2 + 127) << 23) | (uint32_t(tab[p * 16 + (m >> 19)]) << 16);
+}
+
 static T *t;
 static void tick() { t->clk = 0; t->eval(); t->clk = 1; t->eval(); }
 
@@ -70,9 +84,9 @@ int main(int argc, char **argv) {
 	t->rst = 0;
 	long errs = 0;
 #ifdef IT
-	static const int ops[] = { F_DIVS, F_DIV, F_SQRTS, F_RES, F_RSQRTE };
+	static const int ops[] = { F_DIVS, F_DIV, F_RES };   // (no square root: the 602 has none; frsqrte is the pipeline's)
 #else
-	static const int ops[] = { F_ADDS, F_SUBS, F_MULS, F_MADDS, F_MSUBS, F_NMADDS, F_NMSUBS, F_ADD, F_MADD, F_RSP, F_CTIW, F_CTIWZ };
+	static const int ops[] = { F_ADDS, F_SUBS, F_MULS, F_MADDS, F_MSUBS, F_NMADDS, F_NMSUBS, F_ADD, F_MADD, F_RSP, F_CTIW, F_CTIWZ, F_RSQRTE };
 #endif
 	const int nops = sizeof(ops) / sizeof(ops[0]);
 	long perop[32] = {0};
@@ -118,7 +132,7 @@ int main(int argc, char **argv) {
 			case F_DIV: case F_DIVS: want = ui(fa / fb); break;
 			case F_SQRT: case F_SQRTS: want = ui(sqrtf(fb)); break;
 			case F_RES: want = ui(1.0f / fb); break;
-			case F_RSQRTE: { volatile float s = sqrtf(fb); want = ui(1.0f / s); break; }
+			case F_RSQRTE: want = rsq602(ui(fb)); break;   // the 602's table
 			case F_MADD: case F_MADDS: want = ui(fmaf(fa, fc, fb)); break;
 			case F_MSUB: case F_MSUBS: want = ui(fmaf(fa, fc, -fb)); break;
 			case F_NMADD: case F_NMADDS: want = ui(fmaf(-fa, fc, -fb)); break;

@@ -123,6 +123,7 @@ int main(int argc, char **argv)
 	std::mt19937_64 rng(seed);
 	onebus bus;
 	ppc602 m(bus);
+	m.exact_sqrt = true;    // the unit has fsqrt and an exact frsqrte (the pipeline's 602 table: sim/ppcfps)
 	m.reset();
 #ifndef FPP
 	m.single_ftz = false;   // the iterative unit's single ops keep MAME's single denormals (the pipeline's don't)

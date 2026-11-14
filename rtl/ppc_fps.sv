@@ -4,9 +4,9 @@
 //   M0-M2  a * c: the operands' specials and a denormal's leading zeros; the normalized multiply; the product normalized
 //   A0-A2  the add: the operands unpacked, the specials and the larger by magnitude; aligned and added; normalized
 //   S0-S1  the shift into a denormal and the round's increment; the pack (or fctiw[z], or frsp, which has nothing to do but
-//          quiet a NaN)
+//          quiet a NaN, or frsqrte, the 602's table from b in S0: it's pipelined on the 602 too, 1-1-1 in the manual's table 6-5)
 // An op goes through the units it needs, in that order, always S: fmadds M A S (8 stages), fmuls M S (5), fadds A S (5).
-// ppc_fps_it is the iterative unit: divide, square root, fres, frsqrte, two bits a clock.
+// ppc_fps_it is the iterative unit: divide and fres, two bits a clock.
 //
 // The control is rtl/ppc_fpp.sv's (a result leaves its last stage, ev, for the next op's operands, and is registered, wv, for the
 // FPRs; see there), and ppc_fps_ctl a CPU's part of it. The double forms do what the single forms do: the real chip
@@ -250,7 +250,7 @@ module ppc_fps_dp (
 	logic        s0_st;
 	logic [23:0] s1_kept;
 	logic        s1_inc;
-	logic [31:0] s0_b;                      // fctiw's operand
+	logic [31:0] s0_b;                      // fctiw's and frsqrte's operand
 	logic        s1_cvsp;                   // a special result (0, 0x80000000)
 	logic [31:0] s1_cvspv;
 	logic [33:0] s1_mag;
@@ -392,7 +392,7 @@ module ppc_fps_dp (
 				s0 <= im; s0_b <= ib; s0_s <= ib[31];
 				s0_sp <= 1'b1; s0_spv <= snan(ib) ? squiet(ib) : ib;
 			end
-			s1 <= s0; s1_sp <= s0_sp; s1_spv <= s0_spv; s1_s <= s0_s; s1_e <= s0_d.e; s1_kept <= s0_d.m[47:24];
+			s1 <= s0; s1_sp <= s0_sp; s1_spv <= s0.k.rq ? rsqrte602(s0_b) : s0_spv; s1_s <= s0_s; s1_e <= s0_d.e; s1_kept <= s0_d.m[47:24];
 			s1_cvsp <= s0_cvsp; s1_cvspv <= s0_cvspv; s1_mag <= s0_mag; s1_inc <= s0_inc;
 
 			wv <= ev; wcpu <= ecpu; wrd <= erd; wval <= evl;
@@ -405,12 +405,13 @@ module ppc_fps_dp (
 	end
 endmodule
 
-// divide, square root, fres (1 / b), frsqrte (the root, then 1 / it): two bits a clock
+// divide and fres (1 / b), two bits a clock (no square root: the 602 has no fsqrt, rtl/ppc_pipe.sv makes it illegal; frsqrte
+// is the pipeline's, as on the 602)
 module ppc_fps_it (
 	input  logic        clk,
 	input  logic        rst,
 	input  logic        start,
-	input  logic [4:0]  op,             // F_DIV(S), F_SQRT(S), F_RES, F_RSQRTE
+	input  logic [4:0]  op,             // F_DIV(S), F_RES
 	input  logic [1:0]  rn,
 	input  logic [31:0] a, b,
 	output logic        done,           // a clock, with res
@@ -418,17 +419,14 @@ module ppc_fps_it (
 );
 	import ppc_fpu_pkg::*;
 
-	typedef enum logic [3:0] { S_IDLE, S_U, S_DIV0, S_DIV, S_SQRT0, S_SQRT, S_N, S_R0, S_R1, S_R2 } state_t;
+	typedef enum logic [3:0] { S_IDLE, S_U, S_DIV0, S_DIV, S_N, S_R0, S_R1, S_R2 } state_t;
 	state_t      state;
-	logic        q_rsq;                 // frsqrte: the root first, then the divide
 	logic [1:0]  q_rn;
-	logic        q_sq;
-	logic [31:0] x, y;                  // the operands, as they are: x / y, or the root of y
+	logic [31:0] x, y;                  // the operands, as they are: x / y
 	sx_t         ux, uy;
 
-	logic [27:0] q;                     // the quotient or the root
+	logic [27:0] q;                     // the quotient
 	logic [31:0] r;                     // the remainder
-	logic [55:0] n;                     // the root's radicand, two bits a step
 	logic [4:0]  k;                     // the steps still to go, two a clock
 	logic        fs;
 	logic signed [9:0] fe;
@@ -439,16 +437,9 @@ module ppc_fps_it (
 	logic        rinc;
 
 	task automatic fin(input logic [31:0] v);
-		if (q_rsq && q_sq)
-		begin
-			// the root's done: 1 / it
-			x <= 32'h3f800000; y <= v; q_sq <= 1'b0; state <= S_U;
-		end
-		else
-		begin
-			res <= v; done <= 1'b1; state <= S_IDLE;
-		end
+		res <= v; done <= 1'b1; state <= S_IDLE;
 	endtask
+
 
 	always_ff @(posedge clk)
 	begin
@@ -460,8 +451,6 @@ module ppc_fps_it (
 					if (start)
 					begin
 						q_rn <= rn;
-						q_rsq <= fop_t'(op) == F_RSQRTE;
-						q_sq <= fop_t'(op) == F_RSQRTE || fop_t'(op) == F_SQRT || fop_t'(op) == F_SQRTS;
 						x <= fop_t'(op) == F_RES ? 32'h3f800000 : a;
 						y <= b;
 						state <= S_U;
@@ -470,7 +459,7 @@ module ppc_fps_it (
 				begin
 					ux <= sunpack(x);
 					uy <= sunpack(y);
-					state <= q_sq ? S_SQRT0 : S_DIV0;
+					state <= S_DIV0;
 				end
 				S_DIV0:
 				begin
@@ -506,43 +495,7 @@ module ppc_fps_it (
 					k <= k - 5'd1;
 					if (k == 5'd1) state <= S_N;
 				end
-				S_SQRT0:
-				begin
-					logic signed [9:0] ee;
-					if (uy.nan) fin(squiet(y));
-					else if (uy.zero) fin(y);
-					else if (uy.s) fin(SDNAN);
-					else if (uy.inf) fin(y);
-					else
-					begin
-						// m * 2^E, E = e - 23; the radicand m << 32 (E even) or m << 31 (E odd): the root's top bit is its 27
-						ee = uy.e - 10'sd23;
-						n <= ee[0] ? {1'b0, uy.m[47:24], 31'h0} : {uy.m[47:24], 32'h0};
-						fe <= 10'sd27 + ((ee - (ee[0] ? 10'sd31 : 10'sd32)) >>> 1);
-						r <= 32'h0;
-						q <= 28'h0;
-						k <= 5'd14;
-						fs <= 1'b0;
-						state <= S_SQRT;
-					end
-				end
-				S_SQRT:
-				begin
-					logic [31:0] r1, r2, t1, t2;
-					logic [27:0] q1, q2;
-					r1 = {r[29:0], n[55:54]};
-					t1 = {2'b0, q, 2'b01};
-					if (r1 >= t1) begin r1 = r1 - t1; q1 = {q[26:0], 1'b1}; end else q1 = {q[26:0], 1'b0};
-					r2 = {r1[29:0], n[53:52]};
-					t2 = {2'b0, q1, 2'b01};
-					if (r2 >= t2) begin r2 = r2 - t2; q2 = {q1[26:0], 1'b1}; end else q2 = {q1[26:0], 1'b0};
-					r <= r2;
-					q <= q2;
-					n <= {n[51:0], 4'h0};
-					k <= k - 5'd1;
-					if (k == 5'd1) state <= S_N;
-				end
-				// normalized: the quotient's top bit is 27 or 26; the root's 27
+				// normalized: the quotient's top bit is 27 or 26
 				S_N:
 				begin
 					if (q[27]) begin fm <= {q, 20'h0}; end
