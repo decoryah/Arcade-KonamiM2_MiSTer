@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Build the CD image rtl/m2_atapi.sv reads, from a game's MAME CHD:
 
-  python3 tools/cdimage.py <chdman> <game.chd> <out.bin>
+  python3 tools/cdimage.py <chdman> <game.chd> <out.bin> [--header]
 
 The image: 2048 bytes of what the drive answers that isn't a sector (the TOC from the CHD; IDENTIFY, REQUEST SENSE and MODE SENSE as
 MAME's CR-589 gives them, captured), then the sectors of the first track, the data track, 2048 bytes each. The audio tracks aren't
 in it (the TOC still lists them). Zip it as <set>_cd.zip with the name in the MRA, beside the set's zip on the SD card.
+
+With --header, only the 2048 bytes: for a game whose data sectors stream from the mounted whole-disc image (Battle Tryst's,
+made by tools/fullimage.py).
 """
 import os
 import re
@@ -84,6 +87,11 @@ def main(chdman, chd, outf):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
+    args = [a for a in sys.argv[1:] if a != '--header']
+    if len(args) != 3:
         sys.exit(__doc__)
-    main(*sys.argv[1:])
+    main(*args)
+    if '--header' in sys.argv[1:]:
+        with open(args[2], 'r+b') as f:
+            f.truncate(2048)
+        print(args[2], 'cut to its 2048-byte header')

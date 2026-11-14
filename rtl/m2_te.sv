@@ -8,14 +8,61 @@
 //                 with the iterated colour
 //   destination   source and Z through write-back caches (te_cache), the blend, the discards, the writes; a list that stops flushes them
 //
-// Only the texture loads that the game's lists use: MMDMA, PIPLOAD. No compressed load (not seen in a list so far). A value that a span's
+// Only the texture loads that the games' lists use: MMDMA, PIPLOAD, and compressed TEXLOAD (Battle Tryst's). No uncompressed TEXLOAD. A value that a span's
 // first pixel has made negative goes to the texture sums as if 0, where MAME's are unsigned.
 `default_nettype none
 
 // The Z buffer's size in 8 KB blocks, from the block a game's Z starts in (a qsf VERILOG_MACRO can change it). At 16 bits a pixel: Polystars 320 x 224,
 // Total Vice and Evil Night 320 x 240, all within 20. Heat of Eleven's Low Res 640 x 240 takes 38, Hell Night's 512 x 384 takes 48.
+// With Z_SDRAM the Z buffer's in the board's SDRAM instead, at RAM's own addresses, so any size and place: Z_BLOCKS is then only how much of what
+// a list clearing it draws goes there (1 MB).
+// The Z cache's size with Z_SDRAM: 2^Z_CACHE_IB lines of 32 bytes
+`ifndef Z_CACHE_IB
+`define Z_CACHE_IB 7
+`endif
 `ifndef Z_BLOCKS
+`ifdef Z_SDRAM
+`define Z_BLOCKS 128
+`else
 `define Z_BLOCKS 20
+`endif
+`endif
+// Features a build can leave out (a qsf VERILOG_MACRO), for room: the registers' bits for them are kept 0 as they're written, so what they'd
+// drive goes. By the M2 emulator's census of what the games draw with (scratch census_apply.py), none of these is used by Battle Tryst:
+//   TE_NO_FB32         32-bit destination and source pixels (DBDESTCNTL / DBSRCCNTL bit 0)
+//   TE_NO_ALPHACTL     the source and destination alpha controls (DBSRCALPHACNTL, DBDESTALPHACNTL)
+//   TE_NO_WCLIPIN      the W clip's inside discard (DBUSERGENCTL bit 8)
+//   TE_NO_DISCARD_A, TE_NO_DISCARD_RGB, TE_NO_DISCARD_Z   the alpha, RGB and Z-clip discards (DBDISCARDCTL bits 0, 1, 3)
+`ifdef TE_NO_FB32
+`define TE_M_FB32 32'hfffffffe
+`else
+`define TE_M_FB32 32'hffffffff
+`endif
+`ifdef TE_NO_WCLIPIN
+`define TE_M_USER 32'hfffffeff
+`else
+`define TE_M_USER 32'hffffffff
+`endif
+`ifdef TE_NO_DISCARD_A
+`define TE_M_DA 32'h1
+`else
+`define TE_M_DA 32'h0
+`endif
+`ifdef TE_NO_DISCARD_RGB
+`define TE_M_DRGB 32'h2
+`else
+`define TE_M_DRGB 32'h0
+`endif
+`ifdef TE_NO_DISCARD_Z
+`define TE_M_DZ 32'h8
+`else
+`define TE_M_DZ 32'h0
+`endif
+`define TE_M_DISCARD (~(`TE_M_DA | `TE_M_DRGB | `TE_M_DZ))
+`ifdef TE_NO_ALPHACTL
+`define TE_M_ALPHA 32'h0
+`else
+`define TE_M_ALPHA 32'hffffffff
 `endif
 module m2_te (
 	input  logic        clk,
@@ -38,12 +85,34 @@ module m2_te (
 	input  logic        m_busy,
 	input  logic        m_ready,
 	input  logic [63:0] m_dout,
+`ifdef Z_SDRAM
+
+	// the Z buffer's SDRAM (rtl/m2_zmem.sv): its clock, twice clk and in phase; the pins but its clock, chip select and clock enable
+	input  logic        clk_mem,
+	input  logic        sd_late,        // its read data a clock later
+	output logic        sd_ready,
+	output logic        z_idle,         // (nothing on its way to the SDRAM: the bench)
+	output logic [12:0] sd_a,
+	output logic [1:0]  sd_ba,
+	output logic [1:0]  sd_dqm,
+	output logic        sd_nras,
+	output logic        sd_ncas,
+	output logic        sd_nwe,
+	output logic [15:0] sd_dq_o,
+	output logic        sd_dq_oe,
+	input  logic [15:0] sd_dq_i,
+`endif
 
 	output logic        busy
 );
 	// verilator lint_off UNUSEDSIGNAL
 	typedef logic signed [26:0] val_t;
 	localparam int A_R = 0, A_G = 1, A_B = 2, A_A = 3, A_UW = 4, A_VW = 5, A_W = 6;
+`ifdef TE_COMPRESSED
+	localparam bit TXCOMP = 1'b1;       // compressed TEXLOADs (Battle Tryst's build)
+`else
+	localparam bit TXCOMP = 1'b0;       // without TE_COMPRESSED a compressed TEXLOAD isn't decoded, as before there was a decoder
+`endif
 
 	typedef enum logic [6:0] {
 		I_STOP, I_FLUSH, I_FETCH, I_REGS, I_REGW, I_AFTER, T_LOAD, T_MM,
@@ -60,7 +129,9 @@ module m2_te (
 	logic [31:0] gc_master, gc_idata, gc_ddata, gc_dcntl, gc_iwp, gc_irp, gc_ien, gc_ist;
 	logic [2:0]  es_cntl;
 	logic [31:0] tm_cntl, tm_ldcntl, tm_addr, tm_pip, tm_tab, tm_lod0, tm_src, tm_count, tm_uvmax, tm_uvmask, tm_exp;
+	logic [31:0] tm_lod1, tm_lod2, tm_lod3; // the coarser levels' places in TRAM (bytes)
 	logic [31:0] tm_c0, tm_c1, tm_c2, tm_c3;
+	logic [31:0] tm_st01, tm_st23;      // a compressed load's source texel formats: types 0 and 1, 2 and 3 (16 bits each, the low half first)
 	logic [31:0] db_super, db_user, db_discard, db_fbclip, db_xwin, db_ywin, db_dctl, db_dbase, db_dstride, db_sctl, db_sbase, db_sstride,
 		db_soff, db_zctl, db_zbase, db_zoff, db_zclip, db_ssb, db_constin, db_tmul, db_tc0, db_tc1, db_smul, db_sc0, db_sc1, db_alu,
 		db_sa, db_da, db_dac, db_dma, db_dmb;
@@ -129,31 +200,127 @@ module m2_te (
 	logic [3:0]  c_wbe;
 	logic        z_rn;
 	logic [31:0] z_ra_full;
-	logic        zw_stall, cr_stall, cw_stall;
-	logic        c_flush, cc_flushed, c_fdone;
+	logic        zw_stall, zr_stall, cr_stall, cw_stall;
+	logic        c_flush, cc_flushed, c_fdone, zc_flushed, z_fdone;
 	logic        c_req, m_owned;
 	logic        cm_rd, cm_we;
 	logic [31:3] cm_a;
 	logic [63:0] cm_wd;
 	logic [7:0]  cm_be;
-	assign pe = !(zw_stall || cr_stall || cw_stall);
+	assign pe = !(zw_stall || zr_stall || cr_stall || cw_stall);
 	assign pu = pe && !t_hold;
-	// The Z buffer's here and nowhere else: nothing but this engine looks at one (the CPUs store only past its end), so memory needn't hear of it, and Z never waits.
-	// A list clearing it draws in its place through the colour cache: what that has for there comes here instead of going to memory
-	logic        cc_sink, x_v;
+	// The Z buffer's apart from RAM: nothing but this engine looks at one (the CPUs store only past its end), so memory needn't hear of it.
+	// A list clearing it draws in its place through the colour cache: what that has for there goes to the Z buffer instead of to memory
+	logic        cc_sink, sink_wait;
+	wire         cc_sinks = db_dbase == db_zbase && 15'(cm_a[27:13] - db_zbase[27:13]) < 15'(`Z_BLOCKS);
+	logic [15:0] z_q;
+`ifdef Z_SDRAM
+	// in the SDRAM, at RAM's addresses, through a cache of its own (te_zc). Both caches are emptied when a list stops, so a clearing list (no Z
+	// of its own) finds none of the Z buffer in the Z cache, and the lines it draws go straight to the SDRAM
+	logic        z_fwd, z_more, z_more2, z_nv;
+	logic [31:0] z_naddr;
+	logic        zl_rd, zl_rbusy, zl_ready, zl_we, zl_wfull, zc_we;
+	logic [24:5] zl_ra, zl_wa, zc_wa, zk_ln;
+	logic        zk_hit;
+	logic [255:0] zl_rdata, zl_wdata, zc_wd;
+	logic [31:0] zl_wbe;
+	te_zc #(.IB(`Z_CACHE_IB)) zc (.clk, .rst, .r_n(z_rn), .r_na(z_ra_full[24:1]), .r_adv(pu), .q(z_q), .r_stall(zr_stall),
+		.w_n(z_wn), .w_na(z_wa[24:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall), .fwd(z_fwd), .more(z_more), .more2(z_more2), .nr_v(z_nv), .nr_ln(z_naddr[24:5]), .flush(c_flush), .flushed(zc_flushed),
+		.l_rd(zl_rd), .l_ra(zl_ra), .l_rbusy(zl_rbusy), .l_ready(zl_ready), .l_rdata(zl_rdata),
+		.l_we(zc_we), .l_wa(zc_wa), .l_wdata(zc_wd), .l_wfull(zl_wfull), .k_ln(zk_ln), .k_hit(zk_hit), .k_c(zk_c));
+
+	// The fast clear: a line a clearing list fills with one value (all of a Z buffer but its edges) isn't written. A bit says so, in a map of the
+	// 32 K lines from the Z base, and the Z cache takes such a line as that value without reading the SDRAM. A line written to the SDRAM clears its
+	// bit, one partly written is first made whole with the value. The value's the first such line's; a reset or a new Z base clears the map (32 K
+	// clocks: meanwhile no bit's set or used). Two copies of the map: the Z cache's look, and the clearing list's.
+	logic        zk_walk, zk_cv, zk_we, zk_wd, zk_q, zk_sq, zk_in, zk_inq;
+	logic [14:0] zk_wi, zk_wa;
+	logic [15:0] zk_c;
+	logic [31:0] zk_base;
+	wire  [19:0] zk_d = zk_ln - db_zbase[24:5];
+	te_ram #(.W(1), .AW(15)) zk_z (.clk, .we(zk_we), .wa(zk_wa), .wd(zk_wd), .re(1'b1), .ra(zk_d[14:0]), .rd(zk_q));
+	always_ff @(posedge clk) zk_inq <= zk_d[19:15] == 5'd0;
+	assign zk_hit = zk_q && zk_inq && !zk_walk;
+
+	// a clearing list's line, the colour cache's four words of it: its bit looked at, then the bit set, or the line to the queue when the Z
+	// cache isn't putting one there
+	logic [255:0] sk_d;
+	logic [31:0] sk_be;
+	logic [24:5] sk_a;
+	logic        sk_full, sk_look;
+	wire  [19:0] sk_off = sk_a - db_zbase[24:5];
+	wire         sk_in = sk_off[19:15] == 5'd0;
+	te_ram #(.W(1), .AW(15)) zk_s (.clk, .we(zk_we), .wa(zk_wa), .wd(zk_wd), .re(1'b1), .ra(sk_off[14:0]), .rd(zk_sq));
+	logic        sk_one;                // one value all through
+	always_comb
+	begin
+		sk_one = sk_be == 32'hffffffff;
+		for (int i = 1; i < 16; i++) if (sk_d[16 * i +: 16] != sk_d[15:0]) sk_one = 1'b0;
+	end
+	wire         sk_fast = sk_one && sk_in && !zk_walk && (!zk_cv || sk_d[15:0] == zk_c);
+	wire         sk_old = zk_sq && sk_in && !zk_walk;  // (the line's the value: what isn't written here is that)
+	logic [255:0] sk_m;
+	always_comb for (int i = 0; i < 32; i++) sk_m[8 * i +: 8] = sk_be[i] ? sk_d[8 * i +: 8] : i[0] ? zk_c[15:8] : zk_c[7:0];
+	wire         sk_go = sk_full && !sk_look && !zc_we && (sk_fast || !zl_wfull);
+	assign sink_wait = sk_full;
+	wire  [19:0] zc_off = zc_wa - db_zbase[24:5];
+	always_ff @(posedge clk)
+	begin
+		zk_we <= 1'b0;
+		if (rst) begin sk_full <= 1'b0; sk_look <= 1'b0; zk_walk <= 1'b1; zk_wi <= 15'd0; zk_cv <= 1'b0; zk_base <= db_zbase; end
+		else
+		begin
+			sk_look <= 1'b0;
+			if (cc_sink && !sk_full)
+			begin
+				sk_d[64 * cm_a[4:3] +: 64] <= cm_wd;
+				sk_be <= (cm_a[4:3] == 2'd0 ? 32'h0 : sk_be) | (32'(cm_be) << {cm_a[4:3], 3'b000});
+				sk_a <= cm_a[24:5];
+				if (cm_a[4:3] == 2'd3) begin sk_full <= 1'b1; sk_look <= 1'b1; end
+			end
+			if (sk_go) sk_full <= 1'b0;
+			// the map's one write a clock: the walk, a line the Z cache puts out, a clearing list's line
+			if (zk_walk)
+			begin
+				zk_we <= 1'b1; zk_wa <= zk_wi; zk_wd <= 1'b0;
+				zk_wi <= zk_wi + 15'd1;
+				if (zk_wi == 15'h7fff) zk_walk <= 1'b0;
+			end
+			else if (zc_we && !zl_wfull) begin zk_we <= zc_off[19:15] == 5'd0; zk_wa <= zc_off[14:0]; zk_wd <= 1'b0; end
+			else if (sk_go && sk_in)
+			begin
+				zk_we <= 1'b1; zk_wa <= sk_off[14:0]; zk_wd <= sk_fast;
+				if (sk_fast) begin zk_c <= sk_d[15:0]; zk_cv <= 1'b1; end
+			end
+			if (db_zbase != zk_base) begin zk_base <= db_zbase; zk_walk <= 1'b1; zk_wi <= 15'd0; zk_cv <= 1'b0; end
+		end
+	end
+	assign zl_we = zc_we || (sk_go && !sk_fast);
+	assign zl_wa = zc_we ? zc_wa : sk_a;
+	assign zl_wdata = zc_we ? zc_wd : sk_old ? sk_m : sk_d;
+	assign zl_wbe = zc_we || sk_old ? 32'hffffffff : sk_be;
+	m2_zmem zmem (.clk, .rst, .clk_mem, .rd_late(sd_late), .ready(sd_ready),
+		.l_rd(zl_rd), .l_ra(zl_ra), .l_rbusy(zl_rbusy), .l_ready(zl_ready), .l_rdata(zl_rdata),
+		.l_we(zl_we), .l_wa(zl_wa), .l_wdata(zl_wdata), .l_wbe(zl_wbe), .l_wfull(zl_wfull), .idle(z_idle),
+		.sd_a, .sd_ba, .sd_dqm, .sd_nras, .sd_ncas, .sd_nwe, .sd_dq_o, .sd_dq_oe, .sd_dq_i);
+`else
+	// here, in block RAM, which never waits
+	logic        x_v;
 	logic [27:3] x_a;
 	logic [63:0] x_wd;
 	logic [7:0]  x_be;
-	wire         cc_sinks = db_dbase == db_zbase && 15'(cm_a[27:13] - db_zbase[27:13]) < 15'(`Z_BLOCKS);
 	always_ff @(posedge clk)
 	begin
 		x_v <= cc_sink;
 		x_a <= cm_a[27:3]; x_wd <= cm_wd; x_be <= cm_be;
 	end
-	logic [15:0] z_q;
+	assign sink_wait = 1'b0;
+	assign zr_stall = 1'b0;
+	assign zc_flushed = 1'b1;
 	te_z zb_ram (.clk, .rst, .z_base(db_zbase[27:13]), .x_v, .x_a, .x_wd, .x_be, .r_na(z_ra_full[27:1]), .r_adv(pu), .q(z_q),
 		.w_n(z_wn), .w_na(z_wa[27:1]), .w_adv(pe), .wd(z_wd), .w_stall(zw_stall));
-	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
+`endif
+	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .sink_wait, .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
 		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_nfour(fc_q[74]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
 		.flush(c_flush), .flushed(cc_flushed), .m_req(c_req), .m_gnt(m_owned),
 		.m_rd(cm_rd), .m_we(cm_we), .m_a(cm_a), .m_wd(cm_wd), .m_be(cm_be), .m_busy, .m_ready, .m_dout);
@@ -177,6 +344,26 @@ module m2_te (
 	logic [1:0]  lb_n;
 	logic [31:0] mm_src;
 	logic [27:0] mm_n;
+	// a compressed load (BDA spec 6.8.8.1, as MAME's M2 driver has it): source bits, MSB first, in cx_acc's low cx_n bits; texels out, packed
+	// MSB first into whole words, in cx_out's low cx_on bits. One control byte or one texel a clock.
+	logic        mm_cmp;
+	logic [63:0] cx_acc, cx_out;
+	logic [6:0]  cx_n, cx_on;
+	logic        cx_grp;                // in a control byte's texels
+	logic        cx_str, cx_tr, cx_lit, cx_ssb, cx_have;
+	logic [3:0]  cx_cb;                 // (an index's or a literal component's bits)
+	logic [5:0]  cx_cbits;
+	logic [3:0]  cx_ab;
+	logic [6:0]  cx_cnt;
+	logic [31:0] cx_cnst, cx_val;
+	logic        cx_pe;                 // a texel for the packer, the clock after it's decoded (cx_pv)
+	logic [1:0]  cx_fs;                 // the texel's field to read next: its ssb, alpha, then colour (a clock each, the first two if it has them)
+	logic        cx_tssb;               // (what's been read of it)
+	logic [14:0] cx_talpha;
+	logic [31:0] cx_pv;
+	logic [2:0]  cx_pr;                 // how many of it: a run's texels go up to four a clock (as many as fit in 32 bits)
+	logic        cx_pp;                 // or two of a string's, both in cx_pv
+	logic signed [29:0] cx_left;
 	logic [3:0]  vf_i;
 	logic [4:0]  v_fl;                  // shaded, textured, perspective, new, replace
 	wire         f_shad = v_fl[0], f_text = v_fl[1], f_prsp = v_fl[2], f_new = v_fl[3], f_rm = v_fl[4];
@@ -202,18 +389,24 @@ module m2_te (
 	always_ff @(posedge clk) if (ms_more != (!ms_left[28] && ms_left != 29'd0)) $display("TE ms_more wrong");
 `endif
 	wire         ms_have = ms_wpd != ms_rp;
-	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have;
+	wire         ms_take = st == T_MM && mm_n != 28'd0 && ms_have && (!mm_cmp || cx_n <= 7'd32);
 	// (a whole word in one clock, when source and place are in step and it's the texture memory)
-	wire         ms_two = ms_skip == 2'd0 && !mm_pip && mm_src[2:0] == 3'd0 && !mm_dst[2] && mm_n >= 28'd8;
+	wire         ms_two = ms_skip == 2'd0 && !mm_pip && !mm_cmp && mm_src[2:0] == 3'd0 && !mm_dst[2] && mm_n >= 28'd8;
 	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2] || ms_two);
 	wire [4:0]   ms_rn = ms_rp + 5'(ms_pop);
 	logic [63:0] ms_q;
 	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && m_ready), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
 	wire [31:0]  ms_raw = mm_src[2] ? ms_q[63:32] : ms_q[31:0];
+	// a compressed load's destination texel: colour (an index, or three literal components), alpha, SSB, as the texture memory holds them
+	wire  [5:0]  cx_dcb = tm_exp[10] ? (tm_exp[12] ? 6'(tm_exp[3:0]) * 6'd3 : 6'(tm_exp[3:0])) : 6'd0;
+	wire  [3:0]  cx_dab = tm_exp[11] ? tm_exp[7:4] : 4'd0;
+	wire         cx_dsb = tm_exp[9];
+	wire  [5:0]  cx_dbits = cx_dcb + 6'(cx_dab) + 6'(cx_dsb);
 	// a source not on a word boundary: each word out is the end of one read and the start of the next (the first byte's in bits 7:0)
 	logic        ms_arm;
 	logic [31:0] ms_prev;
 	logic [31:0] ms_w;
+	wire         cx_word = ms_take && ms_skip == 2'd0 && !ms_arm && mm_cmp;      // a word for the decoder this clock
 	always_comb
 		case (mm_src[1:0])
 			2'd1: ms_w = {ms_raw[7:0], ms_prev[31:8]};
@@ -341,6 +534,9 @@ module m2_te (
 	logic signed [13:0] wk_x2, wk_y2, wk_y3, wk_xst1, wk_xstl, wk_xys1, wk_xysl, wk_dy1, wk_dyl;
 	logic        wk_lr, wk_flat;
 	logic [1:0]  wk_wr;
+`ifdef Z_SDRAM
+	assign       z_fwd = wk_lr;
+`endif
 	logic [31:0] fa_aria;
 	logic signed [13:0] fc_c;
 	logic signed [13:0] xstep0, xstep1, xstepl, dy0, dy1, dyl;
@@ -478,6 +674,13 @@ module m2_te (
 	// ---- the walk --------------------------------------------------------------------------------------------------------
 	logic signed [13:0] y, xs, xe, cf_short, cf_long, xystep, xstep, dy;
 	logic signed [13:0] px, pxe;
+`ifdef Z_SDRAM
+	// (the span goes on past the Z line of its pixel: so the Z cache fetches the next)
+	wire  signed [13:0] z_rem = wk_lr ? pxe - px : px - pxe;
+	wire  signed [13:0] z_left = $signed({9'd0, wk_lr ? 5'd16 - 5'(z_ra_full[4:1]) : 5'(z_ra_full[4:1]) + 5'd1});
+	assign       z_more = z_rem > z_left;
+	assign       z_more2 = z_rem > z_left + 14'sd16;
+`endif
 	logic        omit_right, step_back;
 	// the next line's worked out while this one's pixels run, and taken up as soon as they're out
 	typedef enum logic [2:0] { NX_N1, NX_N2, NX_A1, NX_A2, NX_LINE, NX_ROW, NX_DONE } nx_t;
@@ -520,6 +723,13 @@ module m2_te (
 		&& y >= $signed({3'b000, db_ywin[26:16]}) && y < $signed({3'b000, db_ywin[10:0]});
 	wire         winclipdis = (db_user[8] && win_in) || (db_user[7] && !win_in);
 	wire         zon = !m_dzbuf && db_user[10];
+`ifdef Z_SDRAM
+	// (the Z address the next span starts at, once the walker has it, while this span's drawn: so the Z cache fetches its line)
+	wire signed [13:0] z_npx = (omit_right && !wk_lr) ? xs - 14'sd1 : xs;
+	wire signed [27:0] z_noff = row_zn + 28'(15'($signed(db_zoff[27:16])) + 15'(z_npx));
+	assign       z_naddr = db_zbase + {3'(z_noff[27] ? 3'b111 : 3'b000), z_noff, 1'b0};
+	assign       z_nv = w_on && nx == NX_DONE && !nx_last && zon;
+`endif
 	wire         zclip = zon && (z_xo < 0 || z_yo < 0 || z_xo >= $signed({4'b0000, db_zclip[26:16]}) || z_yo >= $signed({4'b0000, db_zclip[10:0]}));
 	wire         zclipdis = zclip && db_discard[3];
 	wire signed [27:0] z_off = row_z + 28'(z_xo);
@@ -561,8 +771,10 @@ module m2_te (
 	// The list that clears the Z buffer, drawing into the Z buffer itself, wanting nothing but its one colour in 16 bits: where four pixels make a word of memory, they go as one. Only
 	// there: on the board other flat triangles drawn this way lost pixels at the picture's lower left, which the bench doesn't show
 	logic        tri_flat, v1_four;
-	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:5] == 6'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
-	wire         v0_four = f4_on && px[1:0] == (wk_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
+	// (a window that clips what's outside it, as Battle Tryst's clear has, takes four only where all four are inside it)
+	wire         f4_on = wk_flat && db_dbase == db_zbase && !db_dctl[0] && db_user[10:8] == 3'd0 && db_user[6:5] == 2'd0 && !dith_on && db_user[3:0] == 4'hf && db_discard[2:0] == 3'd0 && !t_look && db_dbase[2:1] == 2'd0 && row_d[1:0] == 2'd0;
+	wire         win4 = !db_user[7] || ($signed({px[13:2], 2'b00}) >= $signed({3'b000, db_xwin[26:16]}) && $signed(px[13:2]) < $signed({3'b000, db_xwin[10:2]}));
+	wire         v0_four = f4_on && win4 && px[1:0] == (wk_lr ? 2'd0 : 2'd3) && px[13:2] != pxe[13:2] && $signed(px[13:2]) < $signed({3'b000, db_fbclip[26:18]});
 	assign       z_rn = v0_ok && zon && !zclip;
 	assign       z_ra_full = z_addr;
 
@@ -648,13 +860,24 @@ module m2_te (
 	wire  [9:0]  umask = tm_uvmask[25:16], vmask = tm_uvmask[9:0];
 	// LOD 0's size, less 1 (the largest U and V): UVMAX is the coarsest level's (LODMAX's), each finer one twice it, and no more than UVMASK
 	// (the M2 emulator's addr_calc)
-	wire  [1:0]  lodmax = tm_addr[3:0] > 4'd3 ? 2'd3 : tm_addr[1:0];
-	wire  [13:0] u_full = 14'({1'b0, tm_uvmax[25:16]} + 11'd1) << lodmax, v_full = 14'({1'b0, tm_uvmax[9:0]} + 11'd1) << lodmax;
+	// Mip-maps only with TE_MIPMAP (the console's build): no Konami M2 game has a texture with LODMAX above 0, and without them the levels'
+	// logic goes (the level always LOD 0). LOD 0's size comes from LODMAX in every build (lod_max).
+	wire  [1:0]  lod_max = tm_addr[3:0] > 4'd3 ? 2'd3 : tm_addr[1:0];
+`ifdef TE_MIPMAP
+	wire  [1:0]  lodmax = lod_max;
+`else
+	wire  [1:0]  lodmax = 2'd0;
+`endif
+	wire  [13:0] u_full = 14'({1'b0, tm_uvmax[25:16]} + 11'd1) << lod_max, v_full = 14'({1'b0, tm_uvmax[9:0]} + 11'd1) << lod_max;
 	wire  [9:0]  umax = u_full > 14'({1'b0, umask} + 11'd1) ? umask : 10'(u_full - 14'd1);
 	wire  [9:0]  vmax = v_full > 14'({1'b0, vmask} + 11'd1) ? vmask : 10'(v_full - 14'd1);
 	// The filter: the magnify one, or with more than a texel between this pixel and the next, the minify one (the BDA spec's; MAME 0.289 only ever
-	// read the magnify filter). No level of detail yet: LOD 0 only.
+	// read the magnify filter). The level of detail: log2 of that step in texels, no more than LODMAX (the M2 emulator's lod_calc); a level's
+	// size is LOD 0's halved for each (UVMAX's doubling and UVMASK's halving both make it so), u and v in its texels are LOD 0's shifted down.
 	logic        t_min;
+	logic [1:0]  t_lod;
+	// (a pixel with no next one in its span keeps the last pixel's step, which can be another texture's: no more than this one's LODMAX)
+	wire  [1:0]  t_lodc = t_lod > lodmax ? lodmax : t_lod;
 	wire         t_bil = t_min ? tm_addr[11] : tm_addr[5];
 	wire         t_look = tm_addr[13] && !m_dtext;
 	wire         blen = db_user[6] && !m_dblend;
@@ -718,7 +941,14 @@ module m2_te (
 			tu <= t1_u; tv <= t1_v;
 			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
 			if (wk[8] && wk[7] && wy[8] == wy[7])
-				t_min <= $signed(t_du) > 15'sd16 || $signed(t_du) < -15'sd16 || $signed(t_dv) > 15'sd16 || $signed(t_dv) < -15'sd16;
+			begin
+				logic [14:0] au, av, tstep;    // (15 bits: the step's magnitude, -16384's too)
+				au = t_du[14] ? 15'(-t_du) : t_du;
+				av = t_dv[14] ? 15'(-t_dv) : t_dv;
+				tstep = au > av ? au : av;
+				t_min <= tstep > 15'd16;
+				t_lod <= tstep[14:7] != 8'd0 ? (lodmax > 2'd2 ? 2'd3 : lodmax) : tstep[6] ? (lodmax > 2'd1 ? 2'd2 : lodmax) : tstep[5] && lodmax != 2'd0 ? 2'd1 : 2'd0;
+			end
 			wk <= {wk[8:1], v0_go};
 			wy <= {wy[8:1], y[0]};
 
@@ -735,7 +965,8 @@ module m2_te (
 	// ---- texels: four asked for in T, a stage a clock from there -----------------------------------------------------------
 	logic        tk_i;
 	// (a sample with no fractions, or a point sample, is its one texel: much of what's drawn is copied, one to one)
-	wire         t_one = !t_bil || (tu[3:0] == 4'd0 && tv[3:0] == 4'd0);
+	wire  [13:0] tu_l = tu >> t_lodc, tv_l = tv >> t_lodc;   // (for the fractions)
+	wire         t_one = !t_bil || (tu_l[3:0] == 4'd0 && tv_l[3:0] == 4'd0);
 	assign       t_hold = v9_v && t_look && !t_one && !tk_i;
 	logic        a1_o, a2_o, a3_o, a4_o, a5_o, d0_o, d1_o, d2_o, e1_o, e2_o, e3_o;
 	logic        a1_v, a2_v, a3_v, a4_v, a5_v, d0_v, d1_v, d2_v;
@@ -743,14 +974,20 @@ module m2_te (
 	logic [7:0]  a1_f, a2_f, a3_f, a4_f, a5_f, d0_f, d1_f, d2_f;    // its fractions
 	logic [9:0]  a2_v0;
 	logic [20:0] a3_vo;
-	wire  [13:0] ku = tu + 14'h10;
-	wire  [13:0] kv = tv + (tk_i ? 14'h10 : 14'h0);
-	wire  [9:0]  k_u0 = tu[13:4] & umask, k_u1 = ku[13:4] & umask, k_v0 = kv[13:4] & vmask;
+	logic [1:0]  a2_lod, a3_lod;
+	logic [23:0] a4_base;               // the level's place in TRAM, beside a4_off
+	wire  [13:0] t_st = 14'h10 << t_lodc;    // the next texel, in LOD 0's
+	wire  [13:0] ku = tu + t_st;
+	wire  [13:0] kv = tv + (tk_i ? t_st : 14'h0);
+	wire  [9:0]  k_u0 = (tu[13:4] & umask) >> t_lodc, k_u1 = (ku[13:4] & umask) >> t_lodc, k_v0 = (kv[13:4] & vmask) >> t_lodc;
+	wire  [10:0] uw_l = (11'(umax) + 11'd1) >> t_lodc, vw_l = (11'(vmax) + 11'd1) >> t_lodc;   // the level's size
+	wire  [10:0] uw_a2 = (11'(umax) + 11'd1) >> a2_lod;
+	wire  [9:0]  umax_l = 10'(uw_l - 11'd1), vmax_l = 10'(vw_l - 11'd1);
 	logic [32:0] d3_a, d3_b;
 	te_fetch fetch_a (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
-		.u(k_u0), .umax, .vo(a3_vo), .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
+		.u(k_u0), .umax(umax_l), .vo(a3_vo), .lod0(a4_base), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_a));
 	te_fetch fetch_b (.clk, .pe, .ld_tram, .ld_two, .ld_ta, .ld_pip, .ld_pa, .ld_d, .ld_d2, .r_pip, .r_a(r_reg[7:0]), .r_d,
-		.u(k_u1), .umax, .vo(a3_vo), .lod0(tm_lod0[23:0]), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
+		.u(k_u1), .umax(umax_l), .vo(a3_vo), .lod0(a4_base), .exp(tm_exp), .pip_c(tm_pip), .c0(tm_c0), .c1(tm_c1), .o(d3_b));
 
 	// the first two, then all four for the channels to work through while the next pixel's arrive
 	logic [32:0] tx [0:1];
@@ -761,10 +998,13 @@ module m2_te (
 		if (pe)
 		begin
 			// (each valid is a clock behind the data it's named beside)
-			a1_f <= t_bil ? {tu[3:0], tv[3:0]} : 8'h00;
-			a2_v0 <= k_v0 < vmax ? k_v0 : vmax;
+			a1_f <= t_bil ? {tu_l[3:0], tv_l[3:0]} : 8'h00;
+			a2_v0 <= k_v0 < vmax_l ? k_v0 : vmax_l;
+			a2_lod <= t_lodc;
 			a2_f <= a1_f;
-			a3_vo <= 21'(a2_v0) * 21'({1'b0, umax} + 11'd1);
+			a3_vo <= 21'(a2_v0) * 21'(uw_a2);
+			a3_lod <= a2_lod;
+			a4_base <= a3_lod == 2'd0 ? tm_lod0[23:0] : a3_lod == 2'd1 ? tm_lod1[23:0] : a3_lod == 2'd2 ? tm_lod2[23:0] : tm_lod3[23:0];
 			a3_f <= a2_f;
 			a4_f <= a3_f;
 			a5_f <= a4_f;
@@ -816,9 +1056,25 @@ module m2_te (
 			if (e3_o) ts_c[2] <= one_q[32];
 			one_ra <= one_ra + 3'd1;
 		end
+`ifdef TE_LODDEBUG
+	// (the bench only: texels in the colour of the level they came from, as the M2 emulator's "Mip-map levels" debug setting: LOD 0 red,
+	// 1 green, 2 blue, 3 yellow; the level carried from a3_lod to where rt.. are, e4)
+	logic [1:0]  ldbg [1:10];
+	always_ff @(posedge clk)
+		if (pe)
+		begin
+			ldbg[1] <= a3_lod;
+			for (int i = 2; i <= 10; i++) ldbg[i] <= ldbg[i - 1];
+		end
+	wire  [23:0] ldbg_c = ldbg[10] == 2'd0 ? 24'hff2020 : ldbg[10] == 2'd1 ? 24'h20ff20 : ldbg[10] == 2'd2 ? 24'h2040ff : 24'hffff20;
+	wire  [7:0]  rt = t_look ? ldbg_c[23:16] : 8'h0;
+	wire  [7:0]  gt = t_look ? ldbg_c[15:8] : 8'h0;
+	wire  [7:0]  bt = t_look ? ldbg_c[7:0] : 8'h0;
+`else
 	wire  [7:0]  rt = t_look ? bx_r : 8'h0;
 	wire  [7:0]  gt = t_look ? bx_g : 8'h0;
 	wire  [7:0]  bt = t_look ? bl_oa[15:8] : 8'h0;
+`endif
 	wire  [7:0]  at = t_look ? bl_ob[15:8] : 8'h0;
 	wire         ts = t_look && ts_c[2];
 
@@ -1202,6 +1458,7 @@ module m2_te (
 		lb_inv <= 1'b0;
 		c_flush <= 1'b0;
 		c_fdone <= !c_flush && (c_fdone || cc_flushed);
+		z_fdone <= !c_flush && (z_fdone || zc_flushed);
 		ist_set <= 32'h0;
 		rf_we <= 1'b0;
 		// the fixed-point value of the last clock's float
@@ -1227,7 +1484,7 @@ module m2_te (
 			case (st)
 				I_STOP: ;
 				I_FLUSH:
-					if (!c_flush && c_fdone)
+					if (!c_flush && c_fdone && z_fdone)
 					begin
 						ist_set <= end_set;
 						end_set <= 32'h0;
@@ -1295,7 +1552,19 @@ module m2_te (
 					ms_a <= tm_src[31:5]; ms_left <= ml_ld; ms_more <= !ml_ld[28] && ml_ld != 29'd0; ms_skip <= tm_src[4:3];
 					ms_req <= 5'd0; ms_wp <= 5'd0; ms_wpd <= 5'd0; ms_rp <= 5'd0;
 					ms_arm <= tm_src[1:0] != 2'd0;
-					if (tm_ldcntl[9:8] == 2'd1)
+					mm_cmp <= 1'b0;
+					if (TXCOMP && tm_ldcntl[9:8] == 2'd0 && tm_ldcntl[10] && cx_dbits != 6'd0)
+					begin
+						// compressed: as many source bytes as it takes (asked for until the texels are done), from bit 0 of the first
+						mm_cmp <= 1'b1;
+						mm_pip <= 1'b0;
+						mm_n <= 28'd1;
+						ms_left <= 29'h00ffffff; ms_more <= 1'b1;
+						cx_acc <= 64'd0; cx_n <= 7'd0; cx_out <= 64'd0; cx_on <= 7'd0; cx_grp <= 1'b0; cx_pe <= 1'b0;
+						cx_left <= 30'(signed'({2'b00, tm_count[27:0]}));
+						st <= T_MM;
+					end
+					else if (tm_ldcntl[9:8] == 2'd1)
 					begin
 						mm_pip <= !tm_cntl[2];
 						if (tm_cntl[3:2] != 2'd0) st <= T_MM;
@@ -1327,6 +1596,11 @@ module m2_te (
 							ms_prev <= ms_raw;
 							mm_src <= mm_src + 32'd4;
 						end
+						else if (mm_cmp)
+						begin
+							ms_prev <= ms_raw;
+							mm_src <= mm_src + 32'd4;
+						end
 						else
 						begin
 							ms_prev <= ms_raw;
@@ -1340,6 +1614,147 @@ module m2_te (
 							mm_src <= mm_src + (ms_two ? 32'd8 : 32'd4);
 							mm_dst <= mm_dst + (ms_two ? 14'd8 : 14'd4);
 							mm_n <= ms_two ? mm_n - 28'd8 : mm_n < 28'd4 ? 28'd0 : mm_n - 28'd4;
+						end
+					end
+					if (mm_cmp && mm_n != 28'd0)
+					begin : cx
+						logic [63:0] acc, oacc;
+						logic [6:0]  n, on, k;
+						logic [1:0]  fk;
+						logic [31:0] x, w, colour, alpha, ssb, val;
+						logic [7:0]  cntl;
+						logic [15:0] ty;
+						logic [5:0]  cb;
+						logic        emit, last;
+						logic [5:0]  r, rmax;
+						logic [31:0] rep, xb2, colour2, val2;
+						logic        two, run_rep, run_last, ctl;
+						acc = cx_acc; n = cx_n; oacc = cx_out; on = cx_on;
+						emit = 1'b0; last = 1'b0; val = cx_val; r = 6'd1; val2 = 32'h0; ctl = 1'b0;
+						if (cx_word) begin acc = {acc[31:0], ms_w[7:0], ms_w[15:8], ms_w[23:16], ms_w[31:24]}; n = n + 7'd32; end
+						// a run's texel again (or a string's that reads no bits, all the same texel): as many a clock as fit in 32 bits
+						rmax = cx_dbits <= 6'd8 ? 6'd4 : cx_dbits <= 6'd10 ? 6'd3 : cx_dbits <= 6'd16 ? 6'd2 : 6'd1;
+						run_rep = cx_grp && cx_have && (!cx_str || (cx_cbits == 6'd0 && cx_ab == 4'd0 && !cx_ssb));
+						run_last = run_rep && cx_cnt <= 7'(rmax);
+						// the next field's bits from the source, one extractor for all: a control byte, or a texel's ssb, alpha or colour (fk 0, 1, 2).
+						// A run's last texels read none, so the next control byte comes with them
+						if (!cx_grp || run_last) begin k = 7'd8; fk = 2'd2; end
+						else if (cx_tr) begin k = 7'd0; fk = 2'd2; end
+						else if (cx_fs == 2'd0 && cx_ssb) begin k = 7'd1; fk = 2'd0; end
+						else if (cx_fs != 2'd2 && cx_ab != 4'd0) begin k = 7'(cx_ab); fk = 2'd1; end
+						else begin k = 7'(cx_cbits); fk = 2'd2; end
+						x = k == 7'd0 ? 32'd0 : 32'(acc >> (n - k)) & 32'((33'd1 << k) - 33'd1);
+						// (a string of texels with only a colour each: two a clock when the bits are here, the second from the bits after the first's)
+						two = cx_grp && cx_str && !cx_tr && cx_fs == 2'd0 && cx_ab == 4'd0 && !cx_ssb && cx_cbits != 6'd0 && cx_cbits <= 6'd16
+							&& cx_dbits <= 6'd16 && cx_cnt >= 7'd2 && n >= (k << 1);
+						xb2 = 32'(acc >> (n - (k << 1))) & 32'((33'd1 << k) - 33'd1);
+						if (!cx_grp)
+						begin
+							if (cx_left <= 30'sd0) last = 1'b1;
+							else if (n >= 7'd8) ctl = 1'b1;
+						end
+						else
+						begin
+							// a texel: read (for each of a string, or once for a run), then written
+							if (run_rep)
+							begin
+								// (as many as are left of the group, up to rmax; the load's count is only looked at between groups, as before)
+								r = rmax;
+								if (cx_cnt < 7'(r)) r = 6'(cx_cnt);
+								emit = 1'b1;
+								if (run_last && cx_left - $signed(30'(r)) > 30'sd0 && n >= 7'd8) ctl = 1'b1;
+							end
+							else if (n >= k)
+							begin
+								n = n - k;
+								if (fk == 2'd0) begin cx_tssb <= x[0]; cx_fs <= 2'd1; end
+								else if (fk == 2'd1) begin cx_talpha <= x[14:0]; cx_fs <= 2'd2; end
+								else
+								begin
+									colour = cx_lit ? 32'(cx_cnst[23:0]) : 32'(cx_cnst[7:0]);
+									alpha = 32'(cx_cnst[30:24]);
+									ssb = 32'(cx_cnst[31]);
+									if (!cx_tr)
+									begin
+										if (cx_cbits != 6'd0) colour = cx_lit ? x : x + 32'(cx_cnst[7:0]);
+										if (cx_ab != 4'd0) alpha = 32'(cx_talpha);
+										if (cx_ssb) ssb = 32'(cx_tssb);
+									end
+									val = (colour & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
+										| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
+									cx_val <= val;
+									cx_have <= 1'b1;
+									cx_fs <= 2'd0;
+									emit = 1'b1;
+									if (two)
+									begin
+										n = n - k;
+										colour2 = cx_lit ? xb2 : xb2 + 32'(cx_cnst[7:0]);
+										val2 = (colour2 & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
+											| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
+										cx_val <= val2;
+										r = 6'd2;
+									end
+								end
+							end
+							if (emit)
+							begin
+								cx_left <= cx_left - 30'(r);
+								cx_cnt <= cx_cnt - 7'(r);
+								if (cx_cnt == 7'(r)) cx_grp <= 1'b0;
+							end
+						end
+						if (ctl)
+						begin
+							// a control byte: the type (which source format and constant), a count, a string or a run
+							cntl = x[7:0];
+							n = n - 7'd8;
+							cx_fs <= 2'd0;
+							ty = cntl[7] ? (cntl[6] ? tm_st23[31:16] : tm_st23[15:0]) : (cntl[6] ? tm_st01[31:16] : tm_st01[15:0]);
+							cx_cnst <= cntl[7] ? (cntl[6] ? tm_c3 : tm_c2) : (cntl[6] ? tm_c1 : tm_c0);
+							cx_tr <= ty[8];
+							cx_lit <= ty[12];
+							cx_ssb <= ty[9];
+							cx_cb <= ty[10] ? ty[3:0] : 4'd0;
+							cx_cbits <= ty[10] ? (ty[12] ? 6'(ty[3:0]) * 6'd3 : 6'(ty[3:0])) : 6'd0;
+							cx_ab <= ty[11] ? ty[7:4] : 4'd0;
+							cx_cnt <= ty[8] ? {1'b0, cntl[5:0]} + 7'd1 : {2'b00, cntl[4:0]} + 7'd1;
+							cx_str <= !ty[8] && cntl[5];
+							cx_have <= 1'b0;
+							cx_grp <= 1'b1;
+						end
+						// the packer, a clock behind the decoder: the texel's bits at the top of cx_pv, put in after the cx_on bits at the top of cx_out; a
+						// word's the top 32 when there are 32 (and what's left at the end, padded with zeros, as MAME's)
+						cx_pe <= emit;
+						cx_pv <= (val << (6'd32 - cx_dbits)) | (two && emit ? val2 << (7'd32 - (7'(cx_dbits) << 1)) : 32'h0);
+						cx_pr <= 3'(r);         // (a run's at most four)
+						cx_pp <= two && emit;
+						if (cx_pe)
+						begin
+							// (a string's two texels are both in cx_pv; a run's one is repeated)
+							// (a string's two texels are both in cx_pv; a run's one is repeated)
+							rep = cx_pp ? cx_pv : cx_pv | (cx_pr > 3'd1 ? cx_pv >> cx_dbits : 32'h0) | (cx_pr > 3'd2 ? cx_pv >> (7'(cx_dbits) << 1) : 32'h0)
+								| (cx_pr > 3'd3 ? cx_pv >> (7'(cx_dbits) * 7'd3) : 32'h0);
+							oacc = oacc | ({rep, 32'h0} >> on);
+							on = on + 7'(cx_dbits) * 7'(cx_pr);
+						end
+						if (on >= 7'd32 || (last && on != 7'd0 && !cx_pe))
+						begin
+							w = oacc[63:32];
+							oacc = {oacc[31:0], 32'h0};
+							on = on >= 7'd32 ? on - 7'd32 : 7'd0;
+							// (the texture memory's words have the first byte in bits 7:0)
+							ld_d <= {w[7:0], w[15:8], w[23:16], w[31:24]};
+							ld_two <= 1'b0;
+							ld_ta <= mm_dst[13:2];
+							ld_tram <= 1'b1;
+							mm_dst <= mm_dst + 14'd4;
+						end
+						cx_acc <= acc; cx_n <= n; cx_out <= oacc; cx_on <= on;
+						if (last && on == 7'd0 && !cx_pe)
+						begin
+							mm_n <= 28'd0;
+							ms_left <= 29'd0; ms_more <= 1'b0;
 						end
 					end
 				end
@@ -1862,10 +2277,15 @@ module m2_te (
 								8'd3: tm_pip <= md(tm_pip, r_d, r_mode);
 								8'd4: tm_tab <= md(tm_tab, r_d, r_mode);
 								8'd5: tm_lod0 <= md(tm_lod0, r_d, r_mode);
+								8'd6: tm_lod1 <= md(tm_lod1, r_d, r_mode);
+								8'd7: tm_lod2 <= md(tm_lod2, r_d, r_mode);
+								8'd8: tm_lod3 <= md(tm_lod3, r_d, r_mode);
 								8'd9: tm_src <= md(tm_src, r_d, r_mode);
 								8'd10: tm_count <= md(tm_count, r_d, r_mode);
 								8'd11: tm_uvmax <= md(tm_uvmax, r_d, r_mode);
 								8'd12: tm_uvmask <= md(tm_uvmask, r_d, r_mode);
+								8'd13: tm_st01 <= md(tm_st01, r_d, r_mode);
+								8'd14: tm_st23 <= md(tm_st23, r_d, r_mode);
 								8'd15: tm_exp <= md(tm_exp, r_d, r_mode);
 								8'd16: tm_c0 <= md(tm_c0, r_d, r_mode);
 								8'd17: tm_c1 <= md(tm_c1, r_d, r_mode);
@@ -1876,15 +2296,15 @@ module m2_te (
 					3'd4:
 						case (r_reg)
 							9'd1: db_super <= md(db_super, r_d, r_mode);
-							9'd2: db_user <= md(db_user, r_d, r_mode);
-							9'd3: db_discard <= md(db_discard, r_d, r_mode);
+							9'd2: db_user <= md(db_user, r_d, r_mode) & `TE_M_USER;
+							9'd3: db_discard <= md(db_discard, r_d, r_mode) & `TE_M_DISCARD;
 							9'd6: db_fbclip <= md(db_fbclip, r_d, r_mode);
 							9'd7: db_xwin <= md(db_xwin, r_d, r_mode);
 							9'd8: db_ywin <= md(db_ywin, r_d, r_mode);
-							9'd9: db_dctl <= md(db_dctl, r_d, r_mode);
+							9'd9: db_dctl <= md(db_dctl, r_d, r_mode) & `TE_M_FB32;
 							9'd10: db_dbase <= md(db_dbase, r_d, r_mode);
 							9'd11: db_dstride <= md(db_dstride, r_d, r_mode);
-							9'd12: db_sctl <= md(db_sctl, r_d, r_mode);
+							9'd12: db_sctl <= md(db_sctl, r_d, r_mode) & `TE_M_FB32;
 							9'd13: db_sbase <= md(db_sbase, r_d, r_mode);
 							9'd14: db_sstride <= md(db_sstride, r_d, r_mode);
 							9'd15: db_soff <= md(db_soff, r_d, r_mode);
@@ -1901,8 +2321,8 @@ module m2_te (
 							9'd26: db_sc0 <= md(db_sc0, r_d, r_mode);
 							9'd27: db_sc1 <= md(db_sc1, r_d, r_mode);
 							9'd28: db_alu <= md(db_alu, r_d, r_mode);
-							9'd29: db_sa <= md(db_sa, r_d, r_mode);
-							9'd30: db_da <= md(db_da, r_d, r_mode);
+							9'd29: db_sa <= md(db_sa, r_d, r_mode) & `TE_M_ALPHA;
+							9'd30: db_da <= md(db_da, r_d, r_mode) & `TE_M_ALPHA;
 							9'd31: db_dac <= md(db_dac, r_d, r_mode);
 							9'd32: db_dma <= md(db_dma, r_d, r_mode);
 							9'd33: db_dmb <= md(db_dmb, r_d, r_mode);
@@ -1926,6 +2346,7 @@ module te_cache (
 
 	input  logic        sink_in,        // the line in hand needn't go to memory
 	output logic        m_sink,         // it isn't: its word's on m_wd for the copy
+	input  logic        sink_wait,      // (which isn't taken this clock)
 
 	input  logic        r_n,
 	input  logic [27:1] r_na,
@@ -2027,7 +2448,7 @@ module te_cache (
 	wire  [31:0] q_mask = q_m[31:0];
 	wire  [7:0]  q_be = q_n == 2'd0 ? q_mask[7:0] : q_n == 2'd1 ? q_mask[15:8] : q_n == 2'd2 ? q_mask[23:16] : q_mask[31:24];
 	logic        q_sink;
-	wire         q_go = q_st == Q_WR && (q_be == 8'h0 || q_sink || (m_gnt && !m_busy));
+	wire         q_go = q_st == Q_WR && (q_sink ? !sink_wait : q_be == 8'h0 || (m_gnt && !m_busy));
 	wire         q_end = q_go && q_n == 2'd3;
 	wire         q_push = b_go && b_n == 2'd3;
 	te_ram #(.W(64), .AW(6)) q_data (.clk, .we(b_go), .wa({q_wp, b_n}), .wd(d2_q), .re(1'b1), .ra({q_rp, q_n + 2'(q_go)}), .rd(q_d));
@@ -2250,6 +2671,217 @@ module te_cache (
 			endcase
 		end
 	end
+endmodule
+
+// the Z buffer's cache, for a Z buffer in the SDRAM (Z_SDRAM): 128 lines of 32 bytes (16 pixels), direct mapped, written back. A pixel's Z is
+// read and written in a clock each when its line's here. The line after the one being read, the way the walker goes, is fetched while the
+// pixels go on, so a span seldom waits; the line it replaces goes to the SDRAM's write queue (m2_zmem). A line in a byte's order in memory: the
+// byte at line offset j in bits 8j+7:8j.
+module te_zc #(
+	parameter int IB = 7                // 2^IB lines
+) (
+	input  logic         clk,
+	input  logic         rst,
+
+	input  logic         r_n,
+	input  logic [24:1]  r_na,
+	input  logic         r_adv,
+	output logic [15:0]  q,
+	output logic         r_stall,
+
+	input  logic         w_n,
+	input  logic [24:1]  w_na,
+	input  logic         w_adv,
+	input  logic [15:0]  wd,             // in the clock after the address
+	output logic         w_stall,
+
+	input  logic         fwd,            // the walker's going left to right
+	input  logic         more,           // with r_na: the span goes on into the next line
+	input  logic         more2,          // and the one after
+	input  logic         nr_v,           // the next span starts in this line
+	input  logic [24:5]  nr_ln,
+	input  logic         flush,          // (a clock long) every line to the queue, then none here
+	output logic         flushed,
+
+	output logic         l_rd,           // a line read: one at a time, taken when l_rbusy is low; l_ready with its data
+	output logic [24:5]  l_ra,
+	input  logic         l_rbusy,
+	input  logic         l_ready,
+	input  logic [255:0] l_rdata,
+	output logic         l_we,           // a line written, taken unless the queue's full
+	output logic [24:5]  l_wa,
+	output logic [255:0] l_wdata,
+	input  logic         l_wfull,
+
+	output logic [24:5]  k_ln,           // the line to be fetched: is it the fast clear's value (k_hit, a clock later)?
+	input  logic         k_hit,
+	input  logic [15:0]  k_c
+);
+	localparam int N = 1 << IB, TW = 20 - IB;
+	logic [N-1:0] vld, drt;
+	// the fetcher: one line at a time, what a pixel waits for first (a write before a read: the write's the older pixel, and one line may be
+	// both's place), else the line ahead. The read's asked for first; the line it replaces goes to the queue while it comes
+	typedef enum logic [3:0] { F_IDLE, F_EV0, F_EV1, F_EV2, F_REQ, F_WAIT, F_SET, F_WALK, F_END } fst_t;
+	fst_t         f_st;
+	logic         r_v, w_v, w_done, w_go;
+	logic [24:1]  r_a, w_a;
+	always_ff @(posedge clk)
+		if (rst) begin r_v <= 1'b0; w_v <= 1'b0; w_done <= 1'b0; end
+		else
+		begin
+			if (r_adv) begin r_v <= r_n; r_a <= r_na; end
+			else if (f_st == F_END) r_v <= 1'b0;    // (no pixel's left after a flush: nothing then to fetch)
+			if (w_adv) begin w_v <= w_n; w_a <= w_na; w_done <= 1'b0; end
+			else if (w_go) w_done <= 1'b1;
+		end
+
+	logic [IB-1:0] f_i;                   // the line's place
+	logic [TW-1:0]  f_t;                   // its tag
+	logic         f_walk;                // the flush's
+	logic         f_pend;
+	logic         v_d;
+	logic [TW-1:0]  v_t;
+	logic         f_got;                 // the read's come while the line it replaces went
+	logic         f_kc;                  // the line's the fast clear's value: no read
+
+	// the tags, a RAM for each look: the read's, the write's, the fetcher's, the fetcher's two lines ahead
+	logic         t_we;
+	logic [TW-1:0]  tr_q, tw_q, tp_q, t2_q;
+	logic [IB-1:0] tp_ra;
+	wire  [IB-1:0] r_ix = r_adv ? r_na[IB+4:5] : r_a[IB+4:5];
+	wire  [IB-1:0] w_ix = w_adv ? w_na[IB+4:5] : w_a[IB+4:5];
+	te_ram #(.W(TW), .AW(IB)) tag_r (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(r_ix), .rd(tr_q));
+	te_ram #(.W(TW), .AW(IB)) tag_w (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(w_ix), .rd(tw_q));
+	te_ram #(.W(TW), .AW(IB)) tag_p (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(tp_ra), .rd(tp_q));
+	wire          r_hit = vld[r_a[IB+4:5]] && tr_q == r_a[24:IB+5];
+	wire          w_hit = vld[w_a[IB+4:5]] && tw_q == w_a[24:IB+5];
+
+	// the data, a copy for the pixels' reads and one for the lines put out. A pixel's write and a line's arrival share the write port, the line first
+	wire          f_we = f_st == F_WAIT && (l_ready || f_got || f_kc);
+	assign        w_go = w_v && !w_done && w_hit && !f_we;
+	assign        w_stall = w_v && !w_done && !w_go;
+	assign        r_stall = r_v && !r_hit;
+	wire  [15:0]  d_le = f_we ? 16'hffff : w_go ? 16'(1) << w_a[4:1] : 16'h0000;
+	wire  [255:0] d_wd = f_we ? (f_kc ? {16{k_c}} : l_rdata) : {16{wd[7:0], wd[15:8]}};
+	wire  [IB-1:0] d_wa = f_we ? f_i : w_a[IB+4:5];
+	logic [255:0] dr_q, dv_q;
+	te_lram #(.AW(IB)) d_r (.clk, .le(d_le), .wa(d_wa), .wd(d_wd), .ra(r_ix), .rd(dr_q));
+	te_lram #(.AW(IB)) d_v (.clk, .le(d_le), .wa(d_wa), .wd(d_wd), .ra(f_i), .rd(dv_q));
+	wire  [15:0]  q16 = dr_q[16 * r_a[4:1] +: 16];
+	assign        q = {q16[7:0], q16[15:8]};
+
+	// the lines ahead: the one after the line the reads will be on, then the one after that, looked for in the fetcher's tags a clock before
+	wire  [24:5]  r_ln = r_adv ? r_na[24:5] : r_a[24:5];
+	logic         r_more, r_more2;
+	always_ff @(posedge clk) if (r_adv) begin r_more <= more; r_more2 <= more2; end
+	wire  [24:5]  p_nx = fwd ? r_ln + 20'd1 : r_ln - 20'd1;
+	wire  [24:5]  p_nx2 = fwd ? r_ln + 20'd2 : r_ln - 20'd2;
+	te_ram #(.W(TW), .AW(IB)) tag_2 (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(p_nx2[IB+4:5]), .rd(t2_q));
+	logic [24:5]  p_ln, p_ln2;
+	logic         p_look, p_look2;
+	assign        tp_ra = f_st == F_IDLE ? p_nx[IB+4:5] : f_i;
+	always_ff @(posedge clk)
+	begin
+		p_ln <= p_nx; p_ln2 <= p_nx2;
+		p_look <= f_st == F_IDLE && (r_adv ? r_n && more : r_v && r_more);
+		p_look2 <= f_st == F_IDLE && (r_adv ? r_n && more2 : r_v && r_more2);
+	end
+	wire          p_have = vld[p_ln[IB+4:5]] && tp_q == p_ln[24:IB+5];
+	wire          p_want1 = p_look && !p_have && !(w_v && w_a[IB+4:5] == p_ln[IB+4:5]);
+	wire          p_want2 = p_look2 && p_have && !(vld[p_ln2[IB+4:5]] && t2_q == p_ln2[24:IB+5]) && !(w_v && w_a[IB+4:5] == p_ln2[IB+4:5]);
+	// the line the next span starts in
+	logic [TW-1:0] tn_q;
+	logic [24:5]  n_ln;
+	logic         n_look;
+	te_ram #(.W(TW), .AW(IB)) tag_n (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(nr_ln[IB+4:5]), .rd(tn_q));
+	always_ff @(posedge clk) begin n_ln <= nr_ln; n_look <= nr_v && f_st == F_IDLE; end
+	wire          n_want = n_look && !(vld[n_ln[IB+4:5]] && tn_q == n_ln[24:IB+5]) && !(w_v && w_a[IB+4:5] == n_ln[IB+4:5])
+		&& !(r_v && r_a[IB+4:5] == n_ln[IB+4:5]);
+	wire          p_want = p_want1 || p_want2 || n_want;
+	wire          r_miss = r_v && !r_hit;
+	wire          w_miss = w_v && !w_done && !w_hit;
+
+	assign l_rd = f_st == F_REQ && !k_hit;
+	wire  [24:5]  f_nx = w_miss ? w_a[24:5] : r_miss ? r_a[24:5] : p_want1 ? p_ln : n_want ? n_ln : p_ln2;
+	assign k_ln = f_st == F_IDLE ? f_nx : {f_t, f_i};
+	assign l_ra = {f_t, f_i};
+	assign l_we = f_st == F_EV2 && v_d;
+	assign l_wa = {v_t, f_i};
+	assign l_wdata = dv_q;
+	assign t_we = f_we;
+
+	always_ff @(posedge clk)
+	begin
+		flushed <= 1'b0;
+		if (rst) begin f_st <= F_IDLE; vld <= '0; drt <= '0; f_walk <= 1'b0; f_pend <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0; end
+		else
+		begin
+			if (flush) f_pend <= 1'b1;
+			if (w_go) drt[w_a[IB+4:5]] <= 1'b1;
+			case (f_st)
+				F_IDLE:
+					if (f_pend || flush) begin f_pend <= 1'b0; f_walk <= 1'b1; f_i <= '0; f_st <= F_WALK; end
+					else if (r_miss || w_miss || p_want)
+					begin
+						{f_t, f_i} <= f_nx;
+						f_st <= F_REQ;
+					end
+				// (the line there goes: no pixel writes it from the next clock, and the one it may have this clock is in the RAM for the read
+				// after; its tag's read meanwhile)
+				F_REQ: begin vld[f_i] <= 1'b0; f_kc <= k_hit; if (k_hit || !l_rbusy) f_st <= F_EV1; end
+				F_EV0: begin vld[f_i] <= 1'b0; f_st <= F_EV1; end
+				F_EV1: begin v_d <= drt[f_i]; drt[f_i] <= 1'b0; v_t <= tp_q; f_st <= F_EV2; if (l_ready) f_got <= 1'b1; end
+				F_EV2:
+				begin
+					if (l_ready) f_got <= 1'b1;
+					if (!v_d || !l_wfull)
+					begin
+						if (f_walk) f_st <= f_i == IB'(N - 1) ? F_END : F_WALK;
+						else f_st <= F_WAIT;
+						if (f_walk) f_i <= f_i + 1'b1;
+					end
+				end
+				F_WAIT: if (l_ready || f_got || f_kc) f_st <= F_SET;
+				F_SET: begin vld[f_i] <= 1'b1; if (f_kc) drt[f_i] <= 1'b1; f_got <= 1'b0; f_kc <= 1'b0; f_st <= F_IDLE; end   // (the fast clear's: not in the SDRAM)   // (a clock after the RAMs, so a read sees what they now hold)
+				F_WALK:
+					if (drt[f_i]) f_st <= F_EV0;
+					else if (f_i == IB'(N - 1)) f_st <= F_END;
+					else f_i <= f_i + 1'b1;
+				F_END: begin vld <= '0; f_walk <= 1'b0; flushed <= 1'b1; f_st <= F_IDLE; end
+				default: f_st <= F_IDLE;
+			endcase
+		end
+	end
+endmodule
+
+// 128 lines of 256 bits, written by 16-bit lanes, read a clock after the address
+module te_lram #(
+	parameter int AW = 7
+) (
+	input  logic         clk,
+	input  logic [15:0]  le,
+	input  logic [AW-1:0] wa,
+	input  logic [255:0] wd,
+	input  logic [AW-1:0] ra,
+	output logic [255:0] rd
+);
+`ifdef VERILATOR
+	logic [255:0] mem [0:(1 << AW) - 1];
+	always_ff @(posedge clk)
+	begin
+		for (int i = 0; i < 16; i++) if (le[i]) mem[wa][16 * i +: 16] <= wd[16 * i +: 16];
+		rd <= mem[ra];
+	end
+`else
+	wire  [31:0] be;
+	genvar i;
+	generate for (i = 0; i < 16; i++) begin : g_be assign be[2 * i +: 2] = {2{le[i]}}; end endgenerate
+	altsyncram #(
+		.operation_mode("DUAL_PORT"), .width_a(256), .widthad_a(AW), .numwords_a(1 << AW), .width_b(256), .widthad_b(AW), .numwords_b(1 << AW),
+		.width_byteena_a(32), .byte_size(8), .address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
+		.read_during_write_mode_mixed_ports("DONT_CARE"), .power_up_uninitialized("TRUE")
+	) ram (.clock0(clk), .wren_a(|le), .byteena_a(be), .address_a(wa), .data_a(wd), .address_b(ra), .q_b(rd));
+`endif
 endmodule
 
 // the Z buffer: 8 KB blocks from the one it starts in, Z_BLOCKS of them, read and written a pixel a clock. (64 bits wide for what a clearing list sends, a word of four pixels a clock)
