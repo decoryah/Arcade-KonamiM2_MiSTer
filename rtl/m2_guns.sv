@@ -8,7 +8,7 @@
 // Each player's stick has a mode (OSD): Auto (an axis pushed to 96 or more moves as the d-pad does: arcade sticks on gamepad encoders; below that, absolutely), Aim (always
 // absolute) or D-pad (any deflection moves as the d-pad).
 //
-// The ports: X 0..639, Y 0..239, as MAME's. A gun at the left or right edge is off the screen, X and Y reading 0. To reload, P1's and P3's guns are aimed up (a mercury
+// The ports: X 0..639, Y 0..239, as MAME's; on the arcade monitor (arc: Hell Night) X 0..511, Y 0..383, as MAME's hellngt. A gun at the left or right edge is off the screen, X and Y reading 0. To reload, P1's and P3's guns are aimed up (a mercury
 // switch, in MAME the top edge of the picture), P2's has a button: Button 2 does each of these.
 `default_nettype none
 module m2_guns (
@@ -21,9 +21,10 @@ module m2_guns (
 	input  logic [1:0]  mode [0:2],         // each player's stick: 0 Auto, 1 Aim, 2 D-pad
 	input  logic [1:0]  ms_who,             // the mouse: 0 P1, 1 P2, 2 P3, 3 off
 	input  logic        off_fire,           // Total Vice: Button 2 fires with the gun off the screen, for every player
+	input  logic        arc,                // the arcade monitor's raster (512 x 384: Hell Night), not the TV's (640 x 240)
 
 	output logic [9:0]  gun_x [0:2],
-	output logic [7:0]  gun_y [0:2],
+	output logic [8:0]  gun_y [0:2],
 	output logic [15:0] p5,                 // MAME's P5, the switches, as it's read
 
 	input  logic [2:0]  show,               // the crosshairs: bit 0 P1, bit 1 P2, bit 2 P3
@@ -87,41 +88,44 @@ module m2_guns (
 
 	logic [2:0]  trig, reload, aim_up;
 	logic [17:0] xm [0:2];
-	logic [15:0] ym [0:2];
-	wire  [9:0]  xr [0:2] = '{xm[0][17:8], xm[1][17:8], xm[2][17:8]};      // 0..639
-	wire  [7:0]  yr [0:2] = '{ym[0][15:8], ym[1][15:8], ym[2][15:8]};      // 0..239
+	logic [16:0] ym [0:2];
+	wire  [9:0]  xr [0:2] = '{xm[0][17:8], xm[1][17:8], xm[2][17:8]};      // 0..639 (0..511)
+	wire  [8:0]  yr [0:2] = '{ym[0][16:8], ym[1][16:8], ym[2][16:8]};      // 0..239 (0..383)
+	wire  [9:0]  x_max = arc ? 10'd511 : 10'd639;
 	always_ff @(posedge clk)
 	begin
 		for (int g = 0; g < 3; g++)
 		begin
 			logic off;
-			xm[g] <= {10'd0, vx[g]} * 18'd642;
-			ym[g] <= {8'd0, vy[g]} * 16'd240;
+			// (255 x 642 / 256 = 639, 255 x 514 / 256 = 511; 255 x 240 / 256 = 239, 255 x 385 / 256 = 383)
+			xm[g] <= {10'd0, vx[g]} * (arc ? 18'd514 : 18'd642);
+			ym[g] <= {9'd0, vy[g]} * (arc ? 17'd385 : 17'd240);
 			trig[g] <= j[g][4] | (ms_sel[g] & ms[0]) | (off_fire & reload[g]);
 			reload[g] <= j[g][5] | (ms_sel[g] & ms[1]);
-			off = xr[g] == 10'd0 || xr[g] == 10'd639 || (reload[g] && (g != 1 || off_fire));
+			off = xr[g] == 10'd0 || xr[g] == x_max || (reload[g] && (g != 1 || off_fire));
 			gun_x[g] <= off ? 10'd0 : xr[g];
-			gun_y[g] <= off ? 8'd0 : yr[g];
-			aim_up[g] <= yr[g] == 8'd0 || reload[g];
+			gun_y[g] <= off ? 9'd0 : yr[g];
+			aim_up[g] <= yr[g] == 9'd0 || reload[g];
 		end
 		// (aimed up reads 0: MAME's field is IP_ACTIVE_LOW, and a port's read inverts its custom fields as it does its buttons)
 		p5 <= {1'b1, !aim_up[2], !reload[1], !aim_up[0], 1'b1, ~trig, 8'hff};
 	end
 
 	// ---- the crosshairs ----------------------------------------------------------------------------------------------------
-	function automatic logic on_cross(input logic [9:0] x, input logic [8:0] y, input logic [9:0] cx, input logic [8:0] cy);
+	function automatic logic on_cross(input logic [9:0] x, input logic [8:0] y, input logic [9:0] cx, input logic [8:0] cy, input logic sq);
 		logic [9:0] dx;
 		logic [8:0] dy;
 		dx = x >= cx ? x - cx : cx - x;
 		dy = y >= cy ? y - cy : cy - y;
-		return (dx == 10'd0 && dy <= 9'd6 && dy >= 9'd2) || (dy == 9'd0 && dx <= 10'd12 && dx >= 10'd4);   // (a line's two pixels are as wide as one is high)
+		// (on the TV's raster a line's two pixels are as wide as one is high; the arcade monitor's pixels are square: sq)
+		return (dx == 10'd0 && dy <= 9'd6 && dy >= 9'd2) || (dy == 9'd0 && (sq ? dx <= 10'd6 && dx >= 10'd2 : dx <= 10'd12 && dx >= 10'd4));
 	endfunction
 	logic c0, c1, c2;
 	always_ff @(posedge clk)
 	begin
-		c0 <= show[0] && on_cross(hpos, vpos, xr[0], {1'b0, yr[0]});
-		c1 <= show[1] && on_cross(hpos, vpos, xr[1], {1'b0, yr[1]});
-		c2 <= show[2] && on_cross(hpos, vpos, xr[2], {1'b0, yr[2]});
+		c0 <= show[0] && on_cross(hpos, vpos, xr[0], yr[0], arc);
+		c1 <= show[1] && on_cross(hpos, vpos, xr[1], yr[1], arc);
+		c2 <= show[2] && on_cross(hpos, vpos, xr[2], yr[2], arc);
 	end
 	assign rgb_out = c0 ? 24'hff2020 : c1 ? 24'h20ff20 : c2 ? 24'hffff20 : rgb_in;
 endmodule

@@ -6,6 +6,7 @@
   default   releases/KonamiM2_<date>.rbf        the MRAs that ask for KonamiM2
   heat      releases/KonamiM2Heat_<date>.rbf    Heat of Eleven '98's MRA (KonamiM2.qsf's Heat of Eleven lines)
   tryst     releases/KonamiM2Tryst_<date>.rbf   Battle Tryst's MRA (KonamiM2.qsf's Battle Tryst lines)
+  hellngt   releases/KonamiM2HellNight_<date>.rbf  Hell Night's MRA (KonamiM2.qsf's Hell Night lines)
 
 The repository's files (git ls-files, as they are in the working tree) are copied to build/<build>_<date>_s<seed>/, and its
 KonamiM2.qsf there gets the build's lines (uncommented, with the build's seed in place of the default's); the repository's own
@@ -27,6 +28,7 @@ BUILDS = {
     'default': ('KonamiM2', None),
     'heat': ('KonamiM2Heat', "# Heat of Eleven's build:"),
     'tryst': ('KonamiM2Tryst', "# Battle Tryst's build:"),
+    'hellngt': ('KonamiM2HellNight', "# Hell Night's build:"),
 }
 SEED = re.compile(r'^set_global_assignment -name SEED (\d+)\s*$')
 

@@ -27,7 +27,8 @@ module m2_boot #(
 	input  logic        rst,
 
 	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM, 4 the YMZ280B's samples,
-	// 3 the M48T58's 8 KB then a byte for the board (bit 0: RAM 2 x 8 MB, not 2 x 4 MB); a game without an M48T58 has no index 3
+	// 3 the M48T58's 8 KB then a byte for the board (bit 0: RAM 2 x 8 MB, not 2 x 4 MB; bit 4: the arcade monitor, 512 x 384); a game
+	// without an M48T58 has no index 3
 	input  logic        ld_wr,
 	input  logic [2:0]  ld_sel,
 	input  logic [25:0] ld_addr,
@@ -89,7 +90,7 @@ module m2_boot #(
 	input  logic [15:0] in_p6,
 	input  logic [15:0] in_p5,          // Evil Night's gun switches and aim (rtl/m2_guns.sv)
 	input  logic [9:0]  gun_x [0:2],
-	input  logic [7:0]  gun_y [0:2],
+	input  logic [8:0]  gun_y [0:2],
 
 	// what each CPU is doing: the last instruction retired, how many, the last exception taken (and how many);
 	// the last register stub access
@@ -388,9 +389,10 @@ module m2_boot #(
 		return v;
 	endfunction
 
-	// the registers whose reads MAME 0.289 makes constants (3dom2.cpp): CPUID (which CPU, with the DSW's video resolution bit set)
-	function automatic logic fixed_rd(input logic [31:2] a, input logic s, output logic [31:0] v);
-		v = {s, 31'h40000000};
+	// the registers whose reads MAME 0.289 makes constants (3dom2.cpp): CPUID (which CPU, and the DSW's video resolution: bit 30 set for
+	// Low Res, the TV's raster; clear for High Res, the arcade monitor's, with arc)
+	function automatic logic fixed_rd(input logic [31:2] a, input logic s, input logic hi, output logic [31:0] v);
+		v = {s, !hi, 30'h0};
 		return {a, 2'b00} == 32'h10000000;
 	endfunction
 
@@ -422,10 +424,14 @@ module m2_boot #(
 	logic        cd_stream = 1'b0;      // (bit 3: the CD's data sectors from the mounted image, not memory; only with CD_STREAM)
 	// verilator lint_on PROCASSINIT
 	// verilator lint_on UNUSEDSIGNAL
-	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[3]; end
+	// verilator lint_off PROCASSINIT
+	logic        arc = 1'b0;            // (bit 4: the arcade monitor's raster, 512 x 384, and High Res in CPUID: Hell Night's)
+	// verilator lint_on PROCASSINIT
+	always_ff @(posedge clk)
+		if (ld_wr && ld_sel == 3'd3 && ld_addr == 26'h2000) begin ram8 <= ld_data[0]; cd_stream <= ld_data[3]; arc <= ld_data[4]; end
 	m2_bda bda
 	(
-		.clk, .rst, .vpos,
+		.clk, .rst, .arc, .vpos,
 		.mcfg0(ram8 ? 32'h0000b400 : 32'h00004800),     // (5: 8 MB, 2: 4 MB, as MAME's ramsize_to_mcfg_field)
 		.a(u_pa[19:2]), .we(u_req && u_we && u_bda), .wd(u_wdata[31:0]), .rd(bda_rd),
 		.lines({te_int, mpg_int, dsp_int, 21'h0, cde_int, 3'b000}),
@@ -444,7 +450,7 @@ module m2_boot #(
 	// verilator lint_on PINCONNECTEMPTY
 	m2_vdu vdu
 	(
-		.clk, .rst,
+		.clk, .rst, .arc,
 		.a(u_pa[5:2]), .we(u_req && u_we && u_pa[31:8] == 24'h000300), .wd(u_wdata[31:0]),
 		.hpos, .vpos, .rgb(v_rgb), .on(vdu_on), .frame(vdu_frame), .flip(vdu_flip),
 		.m_rd(vdu_m_rd), .m_four(vdu_m_four), .m_a(vdu_m_a), .m_busy(vdu_m_busy), .m_ready(vdu_m_ready), .m_dout(ddr_dout)
@@ -686,7 +692,7 @@ module m2_boot #(
 			if (u_ata) w = {2{atapi_rd}};
 			if (u_tk) w = {2{tk_q, 8'h00}};
 			if (u_ymz) w = {ymz_ext, 8'h00, ymz_st, 8'h00};
-			if (!u_we && fixed_rd(u_pa[31:2], u_s, fv)) w = fv;
+			if (!u_we && fixed_rd(u_pa[31:2], u_s, arc, fv)) w = fv;
 			if (u_we && (u_cde || u_bda || u_kio || u_ata || u_dsp || u_tk || u_ymz)) a_w <= 32'h0;
 			else if (u_we)
 			begin

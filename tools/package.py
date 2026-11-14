@@ -3,9 +3,9 @@
 
   _Arcade/<title>.mra                   the MRAs                (mra/*.mra that ask for KonamiM2, or for a game's own build below)
   _Arcade/cores/KonamiM2_<date>.rbf     the core                (releases/KonamiM2_<date>.rbf)
-  _Arcade/cores/KonamiM2Heat_<date>.rbf, KonamiM2Tryst_<date>.rbf
-                                        Heat of Eleven's and Battle Tryst's own builds, if releases/ has them for the date
-                                        (tools/build.py heat, tools/build.py tryst); their MRAs only with them
+  _Arcade/cores/KonamiM2Heat_<date>.rbf, KonamiM2Tryst_<date>.rbf, KonamiM2HellNight_<date>.rbf
+                                        Heat of Eleven's, Battle Tryst's and Hell Night's own builds, if releases/ has them for
+                                        the date (tools/build.py heat, tryst, hellngt); their MRAs only with them
 
   python3 tools/package.py [YYYYMMDD[a-z]]
 
@@ -31,7 +31,7 @@ def main(argv):
     rbf = rbfs[-1]
     date = re.search(r'KonamiM2_(.+)\.rbf$', rbf).group(1)
     # the games' own builds of the same date, if made
-    own = [r for r in (os.path.join(REPO, 'releases', '%s_%s.rbf' % (b, date)) for b in ('KonamiM2Heat', 'KonamiM2Tryst'))
+    own = [r for r in (os.path.join(REPO, 'releases', '%s_%s.rbf' % (b, date)) for b in ('KonamiM2Heat', 'KonamiM2Tryst', 'KonamiM2HellNight'))
            if os.path.exists(r)]
     names = ['KonamiM2'] + [re.search(r'(KonamiM2\w+)_', os.path.basename(r)).group(1) for r in own]
     out = os.path.join(REPO, 'dist', 'KonamiM2_MiSTer_%s.zip' % date)
