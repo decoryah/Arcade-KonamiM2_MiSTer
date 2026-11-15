@@ -2720,7 +2720,7 @@ module te_zc #(
 	input  logic [15:0]  k_c
 );
 	localparam int N = 1 << IB, TW = 20 - IB;
-	logic [N-1:0] vld, drt;
+	logic [N-1:0] drt;
 	// the fetcher: one line at a time, what a pixel waits for first (a write before a read: the write's the older pixel, and one line may be
 	// both's place), else the line ahead. The read's asked for first; the line it replaces goes to the queue while it comes
 	typedef enum logic [3:0] { F_IDLE, F_EV0, F_EV1, F_EV2, F_REQ, F_WAIT, F_SET, F_WALK, F_END } fst_t;
@@ -2740,23 +2740,32 @@ module te_zc #(
 	logic [IB-1:0] f_i;                   // the line's place
 	logic [TW-1:0]  f_t;                   // its tag
 	logic         f_walk;                // the flush's
+	logic         f_init;                // (the walk after a reset: every line's valid bit cleared, none dirty; no flushed)
+	logic         f_inv;                 // the line at f_i's being fetched: from the clock after F_REQ's first to F_SET's, as if not valid
 	logic         f_pend;
 	logic         v_d;
 	logic [TW-1:0]  v_t;
 	logic         f_got;                 // the read's come while the line it replaces went
 	logic         f_kc;                  // the line's the fast clear's value: no read
 
-	// the tags, a RAM for each look: the read's, the write's, the fetcher's, the fetcher's two lines ahead
-	logic         t_we;
-	logic [TW-1:0]  tr_q, tw_q, tp_q, t2_q;
+	// the tags, a RAM for each look: the read's, the write's, the fetcher's, the fetcher's two lines ahead. A tag's stored with its line's
+	// valid bit (block RAM, not a register per line: in Hell Night's 512 lines those and their five looks were most of this cache's logic).
+	// A line's set valid with its tag; the line being fetched is hidden by f_inv meanwhile (the RAM has the line it replaces till then), and
+	// a flush's walk (or the one after a reset) clears each line's bit as it passes, every look hidden till it's done
+	logic         t_we, t_inv;
+	logic [TW:0]  tr_q, tw_q, tp_q, t2_q;
 	logic [IB-1:0] tp_ra;
 	wire  [IB-1:0] r_ix = r_adv ? r_na[IB+4:5] : r_a[IB+4:5];
 	wire  [IB-1:0] w_ix = w_adv ? w_na[IB+4:5] : w_a[IB+4:5];
-	te_ram #(.W(TW), .AW(IB)) tag_r (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(r_ix), .rd(tr_q));
-	te_ram #(.W(TW), .AW(IB)) tag_w (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(w_ix), .rd(tw_q));
-	te_ram #(.W(TW), .AW(IB)) tag_p (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(tp_ra), .rd(tp_q));
-	wire          r_hit = vld[r_a[IB+4:5]] && tr_q == r_a[24:IB+5];
-	wire          w_hit = vld[w_a[IB+4:5]] && tw_q == w_a[24:IB+5];
+	wire  [TW:0]  t_wd = {!t_inv, f_t};
+	te_ram #(.W(TW + 1), .AW(IB)) tag_r (.clk, .we(t_we), .wa(f_i), .wd(t_wd), .re(1'b1), .ra(r_ix), .rd(tr_q));
+	te_ram #(.W(TW + 1), .AW(IB)) tag_w (.clk, .we(t_we), .wa(f_i), .wd(t_wd), .re(1'b1), .ra(w_ix), .rd(tw_q));
+	te_ram #(.W(TW + 1), .AW(IB)) tag_p (.clk, .we(t_we), .wa(f_i), .wd(t_wd), .re(1'b1), .ra(tp_ra), .rd(tp_q));
+	function automatic logic t_has(input logic [TW:0] tq, input logic [24:5] ln);   // a look's line there, valid
+		return tq == {1'b1, ln[24:IB+5]} && !f_walk && !(f_inv && ln[IB+4:5] == f_i);
+	endfunction
+	wire          r_hit = t_has(tr_q, r_a[24:5]);
+	wire          w_hit = t_has(tw_q, w_a[24:5]);
 
 	// the data, a copy for the pixels' reads and one for the lines put out. A pixel's write and a line's arrival share the write port, the line first
 	wire          f_we = f_st == F_WAIT && (l_ready || f_got || f_kc);
@@ -2778,7 +2787,7 @@ module te_zc #(
 	always_ff @(posedge clk) if (r_adv) begin r_more <= more; r_more2 <= more2; end
 	wire  [24:5]  p_nx = fwd ? r_ln + 20'd1 : r_ln - 20'd1;
 	wire  [24:5]  p_nx2 = fwd ? r_ln + 20'd2 : r_ln - 20'd2;
-	te_ram #(.W(TW), .AW(IB)) tag_2 (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(p_nx2[IB+4:5]), .rd(t2_q));
+	te_ram #(.W(TW + 1), .AW(IB)) tag_2 (.clk, .we(t_we), .wa(f_i), .wd(t_wd), .re(1'b1), .ra(p_nx2[IB+4:5]), .rd(t2_q));
 	logic [24:5]  p_ln, p_ln2;
 	logic         p_look, p_look2;
 	assign        tp_ra = f_st == F_IDLE ? p_nx[IB+4:5] : f_i;
@@ -2788,16 +2797,16 @@ module te_zc #(
 		p_look <= f_st == F_IDLE && (r_adv ? r_n && more : r_v && r_more);
 		p_look2 <= f_st == F_IDLE && (r_adv ? r_n && more2 : r_v && r_more2);
 	end
-	wire          p_have = vld[p_ln[IB+4:5]] && tp_q == p_ln[24:IB+5];
+	wire          p_have = t_has(tp_q, p_ln);
 	wire          p_want1 = p_look && !p_have && !(w_v && w_a[IB+4:5] == p_ln[IB+4:5]);
-	wire          p_want2 = p_look2 && p_have && !(vld[p_ln2[IB+4:5]] && t2_q == p_ln2[24:IB+5]) && !(w_v && w_a[IB+4:5] == p_ln2[IB+4:5]);
+	wire          p_want2 = p_look2 && p_have && !t_has(t2_q, p_ln2) && !(w_v && w_a[IB+4:5] == p_ln2[IB+4:5]);
 	// the line the next span starts in
-	logic [TW-1:0] tn_q;
+	logic [TW:0]  tn_q;
 	logic [24:5]  n_ln;
 	logic         n_look;
-	te_ram #(.W(TW), .AW(IB)) tag_n (.clk, .we(t_we), .wa(f_i), .wd(f_t), .re(1'b1), .ra(nr_ln[IB+4:5]), .rd(tn_q));
+	te_ram #(.W(TW + 1), .AW(IB)) tag_n (.clk, .we(t_we), .wa(f_i), .wd(t_wd), .re(1'b1), .ra(nr_ln[IB+4:5]), .rd(tn_q));
 	always_ff @(posedge clk) begin n_ln <= nr_ln; n_look <= nr_v && f_st == F_IDLE; end
-	wire          n_want = n_look && !(vld[n_ln[IB+4:5]] && tn_q == n_ln[24:IB+5]) && !(w_v && w_a[IB+4:5] == n_ln[IB+4:5])
+	wire          n_want = n_look && !t_has(tn_q, n_ln) && !(w_v && w_a[IB+4:5] == n_ln[IB+4:5])
 		&& !(r_v && r_a[IB+4:5] == n_ln[IB+4:5]);
 	wire          p_want = p_want1 || p_want2 || n_want;
 	wire          r_miss = r_v && !r_hit;
@@ -2810,12 +2819,18 @@ module te_zc #(
 	assign l_we = f_st == F_EV2 && v_d;
 	assign l_wa = {v_t, f_i};
 	assign l_wdata = dv_q;
-	assign t_we = f_we;
+	// a walk's line not valid: a clean one as it's passed, a dirty one once its tag's been read for the queue (F_EV1)
+	assign t_inv = f_walk && (f_st == F_WALK && !drt[f_i] || f_st == F_EV1);
+	assign t_we = f_we || t_inv;
 
 	always_ff @(posedge clk)
 	begin
 		flushed <= 1'b0;
-		if (rst) begin f_st <= F_IDLE; vld <= '0; drt <= '0; f_walk <= 1'b0; f_pend <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0; end
+		if (rst)
+		begin
+			f_st <= F_WALK; f_walk <= 1'b1; f_init <= 1'b1; f_i <= '0; f_inv <= 1'b0;
+			drt <= '0; f_pend <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0;
+		end
 		else
 		begin
 			if (flush) f_pend <= 1'b1;
@@ -2830,9 +2845,9 @@ module te_zc #(
 					end
 				// (the line there goes: no pixel writes it from the next clock, and the one it may have this clock is in the RAM for the read
 				// after; its tag's read meanwhile)
-				F_REQ: begin vld[f_i] <= 1'b0; f_kc <= k_hit; if (k_hit || !l_rbusy) f_st <= F_EV1; end
-				F_EV0: begin vld[f_i] <= 1'b0; f_st <= F_EV1; end
-				F_EV1: begin v_d <= drt[f_i]; drt[f_i] <= 1'b0; v_t <= tp_q; f_st <= F_EV2; if (l_ready) f_got <= 1'b1; end
+				F_REQ: begin f_inv <= 1'b1; f_kc <= k_hit; if (k_hit || !l_rbusy) f_st <= F_EV1; end
+				F_EV0: f_st <= F_EV1;
+				F_EV1: begin v_d <= drt[f_i]; drt[f_i] <= 1'b0; v_t <= tp_q[TW-1:0]; f_st <= F_EV2; if (l_ready) f_got <= 1'b1; end
 				F_EV2:
 				begin
 					if (l_ready) f_got <= 1'b1;
@@ -2844,12 +2859,12 @@ module te_zc #(
 					end
 				end
 				F_WAIT: if (l_ready || f_got || f_kc) f_st <= F_SET;
-				F_SET: begin vld[f_i] <= 1'b1; if (f_kc) drt[f_i] <= 1'b1; f_got <= 1'b0; f_kc <= 1'b0; f_st <= F_IDLE; end   // (the fast clear's: not in the SDRAM)   // (a clock after the RAMs, so a read sees what they now hold)
+				F_SET: begin f_inv <= 1'b0; if (f_kc) drt[f_i] <= 1'b1; f_got <= 1'b0; f_kc <= 1'b0; f_st <= F_IDLE; end   // (the fast clear's: not in the SDRAM)   // (a clock after the RAMs, so a read sees what they now hold)
 				F_WALK:
 					if (drt[f_i]) f_st <= F_EV0;
 					else if (f_i == IB'(N - 1)) f_st <= F_END;
 					else f_i <= f_i + 1'b1;
-				F_END: begin vld <= '0; f_walk <= 1'b0; flushed <= 1'b1; f_st <= F_IDLE; end
+				F_END: begin f_walk <= 1'b0; f_init <= 1'b0; flushed <= !f_init; f_st <= F_IDLE; end
 				default: f_st <= F_IDLE;
 			endcase
 		end
