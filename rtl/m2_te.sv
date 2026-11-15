@@ -2720,10 +2720,9 @@ module te_zc #(
 	input  logic [15:0]  k_c
 );
 	localparam int N = 1 << IB, TW = 20 - IB;
-	logic [N-1:0] drt;
 	// the fetcher: one line at a time, what a pixel waits for first (a write before a read: the write's the older pixel, and one line may be
 	// both's place), else the line ahead. The read's asked for first; the line it replaces goes to the queue while it comes
-	typedef enum logic [3:0] { F_IDLE, F_EV0, F_EV1, F_EV2, F_REQ, F_WAIT, F_SET, F_WALK, F_END } fst_t;
+	typedef enum logic [3:0] { F_IDLE, F_EV0, F_EV1, F_EV2, F_REQ, F_WAIT, F_SET, F_WALK, F_WLOOK, F_END } fst_t;
 	fst_t         f_st;
 	logic         r_v, w_v, w_done, w_go;
 	logic [24:1]  r_a, w_a;
@@ -2772,6 +2771,12 @@ module te_zc #(
 	assign        w_go = w_v && !w_done && w_hit && !f_we;
 	assign        w_stall = w_v && !w_done && !w_go;
 	assign        r_stall = r_v && !r_hit;
+	// each line's dirty bit, a RAM beside the data's (no register per line: at Z_CACHE_IB 11 those and their looks were 2,000+ ALMs),
+	// written through the data's port: a pixel's write sets it, a line's arrival clears it (sets it: the fast clear's line, not in the
+	// SDRAM). Read at f_i a clock later, as the data for the queue is, and only with the line's valid bit (a walk leaves a line's bit
+	// as it was when it clears the line's valid one)
+	logic         dt_q, v_vld;
+	te_ram #(.W(1), .AW(IB)) dirt (.clk, .we(f_we || w_go), .wa(f_we ? f_i : w_a[IB+4:5]), .wd(f_we ? f_kc : 1'b1), .re(1'b1), .ra(f_i), .rd(dt_q));
 	wire  [15:0]  d_le = f_we ? 16'hffff : w_go ? 16'(1) << w_a[4:1] : 16'h0000;
 	wire  [255:0] d_wd = f_we ? (f_kc ? {16{k_c}} : l_rdata) : {16{wd[7:0], wd[15:8]}};
 	wire  [IB-1:0] d_wa = f_we ? f_i : w_a[IB+4:5];
@@ -2816,11 +2821,15 @@ module te_zc #(
 	wire  [24:5]  f_nx = w_miss ? w_a[24:5] : r_miss ? r_a[24:5] : p_want1 ? p_ln : n_want ? n_ln : p_ln2;
 	assign k_ln = f_st == F_IDLE ? f_nx : {f_t, f_i};
 	assign l_ra = {f_t, f_i};
+	// the line going out was dirty: its bit and its valid bit, both read at f_i (in F_EV2 the data's read of F_EV1's clock)
+	assign v_d = dt_q && v_vld;
 	assign l_we = f_st == F_EV2 && v_d;
 	assign l_wa = {v_t, f_i};
 	assign l_wdata = dv_q;
-	// a walk's line not valid: a clean one as it's passed, a dirty one once its tag's been read for the queue (F_EV1)
-	assign t_inv = f_walk && (f_st == F_WALK && !drt[f_i] || f_st == F_EV1);
+	// a walk: f_i's tag and dirty bit read in F_WALK, looked at in F_WLOOK (two clocks a line); its line not valid: a clean one in
+	// F_WLOOK, a dirty one once its tag's been read for the queue (F_EV1). After a reset nothing's dirty (the RAM's as it powered up)
+	wire          wk_dirty = dt_q && tp_q[TW] && !f_init;
+	assign t_inv = f_walk && (f_st == F_WLOOK && !wk_dirty || f_st == F_EV1);
 	assign t_we = f_we || t_inv;
 
 	always_ff @(posedge clk)
@@ -2829,12 +2838,11 @@ module te_zc #(
 		if (rst)
 		begin
 			f_st <= F_WALK; f_walk <= 1'b1; f_init <= 1'b1; f_i <= '0; f_inv <= 1'b0;
-			drt <= '0; f_pend <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0;
+			f_pend <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0;
 		end
 		else
 		begin
 			if (flush) f_pend <= 1'b1;
-			if (w_go) drt[w_a[IB+4:5]] <= 1'b1;
 			case (f_st)
 				F_IDLE:
 					if (f_pend || flush) begin f_pend <= 1'b0; f_walk <= 1'b1; f_i <= '0; f_st <= F_WALK; end
@@ -2847,7 +2855,7 @@ module te_zc #(
 				// after; its tag's read meanwhile)
 				F_REQ: begin f_inv <= 1'b1; f_kc <= k_hit; if (k_hit || !l_rbusy) f_st <= F_EV1; end
 				F_EV0: f_st <= F_EV1;
-				F_EV1: begin v_d <= drt[f_i]; drt[f_i] <= 1'b0; v_t <= tp_q[TW-1:0]; f_st <= F_EV2; if (l_ready) f_got <= 1'b1; end
+				F_EV1: begin v_vld <= tp_q[TW]; v_t <= tp_q[TW-1:0]; f_st <= F_EV2; if (l_ready) f_got <= 1'b1; end
 				F_EV2:
 				begin
 					if (l_ready) f_got <= 1'b1;
@@ -2859,11 +2867,12 @@ module te_zc #(
 					end
 				end
 				F_WAIT: if (l_ready || f_got || f_kc) f_st <= F_SET;
-				F_SET: begin f_inv <= 1'b0; if (f_kc) drt[f_i] <= 1'b1; f_got <= 1'b0; f_kc <= 1'b0; f_st <= F_IDLE; end   // (the fast clear's: not in the SDRAM)   // (a clock after the RAMs, so a read sees what they now hold)
-				F_WALK:
-					if (drt[f_i]) f_st <= F_EV0;
+				F_SET: begin f_inv <= 1'b0; f_got <= 1'b0; f_kc <= 1'b0; f_st <= F_IDLE; end   // (a clock after the RAMs, so a read sees what they now hold)
+				F_WALK: f_st <= F_WLOOK;
+				F_WLOOK:
+					if (wk_dirty) f_st <= F_EV1;
 					else if (f_i == IB'(N - 1)) f_st <= F_END;
-					else f_i <= f_i + 1'b1;
+					else begin f_i <= f_i + 1'b1; f_st <= F_WALK; end
 				F_END: begin f_walk <= 1'b0; f_init <= 1'b0; flushed <= !f_init; f_st <= F_IDLE; end
 				default: f_st <= F_IDLE;
 			endcase
