@@ -29,13 +29,12 @@ module ppc_fpx #(
 	// verilator lint_on UNUSEDSIGNAL
 	assign r = turn ? req1 : req0;
 
-	ppc_fps_dp dp (
+	// (FPSCR[NI] not wired yet: IEEE denormals)
+	ppc_fps3 dp (
 		.clk, .rst, .issue(r.issue), .cpu(turn), .op(r.op), .rn(r.rn), .a(r.a), .b(r.b), .c(r.c), .rd(r.rd),
-		.i_bw(r.bw), .i_fe(r.fe), .i_fw(r.fw),
-		.res_a(res.res_a), .res_s(res.res_s), .res_w(res.res_w),
+		.i_fe(r.fe), .i_fw(r.fw), .ni(1'b0), .hold(res.hold),
 		.ev(res.ev), .ecpu(res.ecpu), .erd(res.erd), .evl(res.evl), .wv(res.wv), .wcpu(res.wcpu), .wrd(res.wrd), .wval(res.wval)
 	);
-
 	logic f_busy, f_cpu;
 	ppc_fps_it fpu (
 		.clk, .rst, .start(r.start), .op(r.op), .rn(r.rn), .a(r.a), .b(r.b), .done(res.fdone), .res(res.fres)

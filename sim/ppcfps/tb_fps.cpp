@@ -13,8 +13,8 @@
 #include "Vppc_fps_it.h"
 typedef Vppc_fps_it T;
 #else
-#include "Vppc_fps_dp.h"
-typedef Vppc_fps_dp T;
+#include "Vppc_fps3.h"
+typedef Vppc_fps3 T;
 #endif
 
 enum { F_ADD, F_SUB, F_MUL, F_DIV, F_SQRT, F_RSQRTE, F_MADD, F_MSUB, F_NMADD, F_NMSUB,
@@ -109,7 +109,7 @@ int main(int argc, char **argv) {
 		uint32_t got = t->res;
 		if (w >= 100) { printf("TIMEOUT op %d\n", op); return 1; }
 #else
-		t->c = c; t->cpu = 0; t->rd = 1; t->i_bw = 0;
+		t->c = c; t->cpu = 0; t->rd = 1; t->ni = 0;
 		t->issue = 1;
 		tick();
 		t->issue = 0;
@@ -117,6 +117,7 @@ int main(int argc, char **argv) {
 		t->eval();
 		while (!t->ev && w < 20) { tick(); w++; }
 		if (w >= 20) { printf("TIMEOUT op %d\n", op); return 1; }
+		{ static int wmin = 99, wmax = 0; if (w < wmin) wmin = w; if (w > wmax) wmax = w; if (i == n - 1) printf("clocks after the issue clock to ev: %d to %d (latency = that + 1)\n", wmin, wmax); }
 		uint32_t got = (uint32_t)t->evl;
 		int gotint = (int)((t->evl >> 32) & 1);
 		tick();

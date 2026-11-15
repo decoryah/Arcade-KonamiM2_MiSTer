@@ -34,12 +34,11 @@ module fp_noise (
 	wire slow = op == F_DIVS;   // (frsqrte: the pipeline's)
 
 	logic ok, go, f_mine;
-	logic [2:0] bw, fe, fw;
+	logic [2:0] fe, fw;
 	// verilator lint_off PINCONNECTEMPTY
 	ppc_fps_ctl ctl (
-		.clk, .rst, .allow(res.allow[1]), .res_a(res.res_a), .res_s(res.res_s), .res_w(res.res_w),
-		.issue(go && !slow), .pk(fpk_s(op)), .rd(x[16:12]), .ra(x[56:52]), .rb(x[21:17]), .rc(x[61:57]), .ok, .dok(), .busy(), .bw, .fe, .fw, .pe(), .pw(), .pn(),
-		.lb()
+		.clk, .rst, .allow(res.allow[1]), .hold(res.hold),
+		.issue(go && !slow), .pk(fpk_s(op)), .rd(x[16:12]), .ra(x[56:52]), .rb(x[21:17]), .rc(x[61:57]), .ok, .dok(), .busy(), .fe, .fw, .pe(), .pw(), .pn()
 	);
 	// verilator lint_on PINCONNECTEMPTY
 	wire busy_burst = x[40:38] != 3'd0;
@@ -66,6 +65,6 @@ module fp_noise (
 			default: vb = {x[3:0], x[63:36]};
 		endcase
 	end
-	assign req = '{go && !slow, go && slow, op, x[27:26], va, vb, {va[15:0], vb[31:16]}, x[16:12], bw, fe, fw,
+	assign req = '{go && !slow, go && slow, op, x[27:26], va, vb, {va[15:0], vb[31:16]}, x[16:12], fe, fw,
 		!rst && busy_burst && x[4]};
 endmodule

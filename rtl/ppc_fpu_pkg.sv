@@ -103,13 +103,12 @@ package ppc_fpu_pkg;
 		logic [1:0]  rn;
 		logic [31:0] a, b, c;
 		logic [4:0]  rd;
-		logic [2:0]  bw;                // a multiply-add's addend: the clocks until it comes (ev), 0 if it's in b
 		logic [2:0]  fe, fw;            // operands a, b, c the pipeline makes, leaving it this clock: as ev, as wv
 		logic        want;              // an op for the units waits (so the next clock may be this CPU's)
 	} fp_req_t;
 	typedef struct packed {
 		logic [1:0]  allow;             // whose op may go this clock
-		logic [15:0] res_a, res_s, res_w; // the pipeline's reservations (A0, S0, write): bit j, the clock j from now
+		logic        hold;              // nothing goes this clock, and the op issued last clock is a clock later (ppc_fps3)
 		logic        ev;                // a result leaving its last stage: FPR erd = evl, ecpu's
 		logic        ecpu;
 		logic [4:0]  erd;
@@ -530,26 +529,17 @@ package ppc_fpu_pkg;
 	endfunction
 
 	// ---- single precision, as the chip has it (rtl/ppc_fps.sv) ------------------------------------------------------------
-	localparam int SLM = 3, SLA = 3, SLS = 2;   // its units' stages
 	localparam logic [31:0] SDNAN = 32'h7fc00000;
-	function automatic logic [3:0] sat_a(input cls_t k);
-		return k.mul ? 4'(SLM + 1) : 4'd1;
-	endfunction
-	function automatic logic [3:0] sat_s(input cls_t k);
-		return 4'd1 + (k.mul ? 4'(SLM) : 4'd0) + (k.add ? 4'(SLA) : 4'd0);
-	endfunction
-	function automatic logic [3:0] sat_w(input cls_t k);
-		return (k.mul ? 4'(SLM) : 4'd0) + (k.add ? 4'(SLA) : 4'd0) + 4'(SLS);
-	endfunction
-	// an op's class and clocks for its float control (ppc_fps_ctl), decoded with the CPU's instruction (one way: no fast
-	// multiply; every op takes S)
+	// an op's class and clocks for its float control (ppc_fps_ctl), decoded with the CPU's instruction: ppc_fps3, every op
+	// SLAT clocks from its issue to its result's write (wv), one pipe
+	localparam int SLAT = 3;
 	function automatic fpk_t fpk_s(input logic [4:0] o);
 		fpk_t p;
 		p.k = cls(o);
 		p.ns = 1'b1;
-		p.a0 = sat_a(p.k); p.a1 = p.a0;
-		p.s = sat_s(p.k);
-		p.w0 = sat_w(p.k); p.w1 = p.w0;
+		p.a0 = 4'd1; p.a1 = p.a0;
+		p.s = 4'd1;
+		p.w0 = 4'(SLAT); p.w1 = p.w0;
 		return p;
 	endfunction
 	// frsqrte as the 602 does it (measured on a Panasonic FZ-35S, as the M2 emulator's ppccom_frsqrte_602): not 1 / sqrt but a
