@@ -5,8 +5,9 @@
 // finds black (dividing by 6 left 6.7 us for all three, and a picture with a bright left edge went dark on a CRT)
 //
 // With arc (the board byte's bit 4: Hell Night's), the arcade monitor's raster, MAME's set_arcres() (684 x 416, 512 x 384 shown from
-// (104, 26), a pixel clock of 16.93 MHz, 24.8 kHz): here 684 x 416 at 58.6 Hz, 512 x 384 shown from (104, 26), the machine clock
-// divided by 4 (16.67 MHz, 24.4 kHz). 3.4 us of sync from the line's start, as above.
+// (104, 26), a pixel clock of 16.93 MHz, 24.76 kHz, 59.52 Hz): here 673 x 416, 512 x 384 shown from (104, 26), the machine clock
+// divided by 4 (16.67 MHz): 24.77 kHz and 59.53 Hz, MAME's line and frame rates within 0.1 % (684 pixels, MAME's at its own clock,
+// made 58.6 Hz here: the game 1.6 % slow). 3.4 us of sync from the line's start, as above; 57 pixels (3.4 us) after the picture.
 module m2_vtiming (
 	input  logic       clk,
 	input  logic       rst,
@@ -24,7 +25,7 @@ module m2_vtiming (
 	// picture, and the board's HDMI (the RetroTINK 4K's DV1 too) lost the picture's last lines
 	localparam int VTOT = 262, VVIS0 = 20, VVIS1 = 20 + 240, VS0 = 2, VS1 = 5;
 	// the arcade monitor's (arc)
-	localparam int A_HTOT = 684, A_HVIS0 = 104, A_HVIS1 = 104 + 512, A_HS1 = 58;
+	localparam int A_HTOT = 673, A_HVIS0 = 104, A_HVIS1 = 104 + 512, A_HS1 = 58;
 	localparam int A_VTOT = 416, A_VVIS0 = 26, A_VVIS1 = 26 + 384;
 
 	wire   [2:0] div_n  = arc ? 3'd3 : 3'd4;
