@@ -2586,11 +2586,13 @@ module te_cache (
 	// A fill's read waits only while its own line is in the queue (what it reads may be in it), not for the queue to empty: each waiting
 	// line's address is kept beside the queue, compared with the fill's a clock before its read may go (no line of the fill's address can
 	// be put in meanwhile: it isn't in the cache). The read goes before the queue's next word
-	logic [22:0] qa [0:15];
+	// (QB bits of each address are enough: a line that only looks like the fill's makes it wait a little, as its own would)
+	localparam int QB = 10;
+	logic [QB-1:0] qa [0:15];
 	logic [15:0] qv;
 	logic        q_hit, fl2, f_rd;
 	logic [15:0] q_eq;
-	always_comb for (int k = 0; k < 16; k++) q_eq[k] = qv[k] && qa[k] == l_a;
+	always_comb for (int k = 0; k < 16; k++) q_eq[k] = qv[k] && qa[k] == l_a[QB-1:0];
 	always_ff @(posedge clk) begin q_hit <= |q_eq; fl2 <= st == C_FILL; end
 	wire         q_go = q_st == Q_WR && (q_sink ? !sink_wait : q_be == 8'h0 || (m_gnt && !m_busy && !f_rd));
 	wire         q_end = q_go && q_n == 2'd3;
@@ -2795,7 +2797,7 @@ module te_cache (
 				B_TAG: if (!fb_v) begin b_st <= B_IDLE; b_n <= 2'd0; end
 				default: b_st <= B_IDLE;
 			endcase
-			if (q_push) begin q_wp <= q_wp + 4'd1; qa[q_wp] <= {b_t, b_i}; qv[q_wp] <= 1'b1; end
+			if (q_push) begin q_wp <= q_wp + 4'd1; qa[q_wp] <= QB'({b_t, b_i}); qv[q_wp] <= 1'b1; end
 			if (q_end) qv[q_rp] <= 1'b0;
 			q_cnt <= q_cnt + 5'(q_push) - 5'(q_end);
 			case (q_st)
