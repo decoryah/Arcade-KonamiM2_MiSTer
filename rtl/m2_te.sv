@@ -2417,6 +2417,8 @@ module te_cache (
 	logic [6:0]  walk;
 	logic        walking;               // the eviction's the flush's
 	logic        fill;                  // what comes after the eviction: a fill, or the line just cleared
+	logic [1:0]  n;
+	logic [22:0] l_a;                   // [27:5]
 
 	logic        r_v, w_v, w_done, r_s32, w_s32, w_go, w_four;
 	logic [27:1] r_a, w_a;
@@ -2488,8 +2490,14 @@ module te_cache (
 	te_ram #(.W(55), .AW(4)) q_meta (.clk, .we(q_push), .wa(q_wp), .wd({b_t, b_i, b_mask}), .re(1'b1), .ra(q_rp), .rd(q_m));
 	// (a write takes a line that nothing needs at once: a clean one's just replaced)
 	wire         w_clean = t2_f ? !(t_wr[18] && t_wr[16]) : !(t2_m[18] && t2_m[16]);
-	wire         w_ok = idle && (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i);
-	assign r_stall = r_v && !(idle && r_hit);
+	// A fetch (a line going out for it, the read, its words coming) stops only the line it's for: the others' reads and writes go on.
+	// A flush's walk and the reset's stop them all (the walk has the read port's tags)
+	wire         x_v = (st == C_EVW && !walking) || st == C_FILL || st == C_FILLW || st == C_REARM;
+	wire  [6:0]  x_i = (st == C_EVW || !fill) ? b_i : l_a[6:0];
+	wire         walkst = st == C_INIT || st == C_FWALK || st == C_FLOOK || st == C_FEND || (st == C_EVW && walking);
+	wire         f_beat = st == C_FILLW && m_ready && m_gnt;     // a word of the fill: the write ports are its
+	wire         w_ok = (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i) && !walkst && !(x_v && w_a[11:5] == x_i) && !f_beat;
+	assign r_stall = r_v && !(r_hit && !walkst && !(x_v && r_a[11:5] == x_i));
 	assign       w_stall = w_v && !w_done && !w_ok;
 	assign       w_go = w_v && !w_done && w_ok;
 
@@ -2507,8 +2515,6 @@ module te_cache (
 	end
 	endgenerate
 
-	logic [1:0]  n;
-	logic [22:0] l_a;                   // [27:5]
 
 	// the answer to a read, from the 64
 	wire  [31:0] q32 = r_a[2] ? d_q[63:32] : d_q[31:0];
@@ -2554,27 +2560,24 @@ module te_cache (
 		// writes
 		t_we = 1'b0; t_wa = l_a[6:0]; t_wd = {32'h0, 1'b1, fill, 1'b0, l_a[22:7]};
 		d_we = 1'b0; d_be = 8'hff; d_wa = {l_a[6:0], n}; d_wd = m_dout;
-		case (st)
-			C_INIT: begin t_we = 1'b1; t_wa = walk; t_wd = 51'h0; end
-			C_IDLE:
-				if (w_go)
-				begin
-					d_we = 1'b1;
-					d_wa = w_a[11:3];
-					d_wd = {2{w32}};
-					d_be = w_be;
-					t_we = 1'b1; t_wa = w_a[11:5]; t_wd = {(w_hit ? t2_q[50:19] : 32'h0) | (32'(w_be) << {w_a[4:3], 3'b000}), 1'b1, w_hit && t2_q[17], 1'b1, w_t};
-				end
-			C_FILLW:
-				if (m_ready && m_gnt)
-				begin
-					d_we = 1'b1;
-					if (n == 2'd3) t_we = 1'b1;
-				end
-			C_FLOOK:
-				if (!(t1_q[18] && t1_q[16])) begin t_we = 1'b1; t_wa = walk; t_wd = 51'h0; end
-			default: ;
-		endcase
+		if (st == C_INIT) begin t_we = 1'b1; t_wa = walk; t_wd = 51'h0; end
+		else if (f_beat)
+		begin
+			d_we = 1'b1;
+			if (n == 2'd3) t_we = 1'b1;
+		end
+		else if (st == C_FLOOK)
+		begin
+			if (!(t1_q[18] && t1_q[16])) begin t_we = 1'b1; t_wa = walk; t_wd = 51'h0; end
+		end
+		else if (w_go)
+		begin
+			d_we = 1'b1;
+			d_wa = w_a[11:3];
+			d_wd = {2{w32}};
+			d_be = w_be;
+			t_we = 1'b1; t_wa = w_a[11:5]; t_wd = {(w_hit ? t2_q[50:19] : 32'h0) | (32'(w_be) << {w_a[4:3], 3'b000}), 1'b1, w_hit && t2_q[17], 1'b1, w_t};
+		end
 		if (b_tw) begin t_we = 1'b1; t_wa = b_i; t_wd = b_inv ? 51'h0 : {32'h0, 1'b1, b_f, 1'b0, b_t}; end
 	end
 
