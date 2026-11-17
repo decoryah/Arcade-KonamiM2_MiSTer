@@ -127,6 +127,7 @@ module m2_te (
 
 	// ---- the registers --------------------------------------------------------------------------------------------------
 	logic [31:0] gc_master, gc_idata, gc_ddata, gc_dcntl, gc_iwp, gc_irp, gc_ien, gc_ist;
+	logic [5:0]  gc_icntl;              // TEICntl: STRT RSTRT STPI STPL STEP INT, its own register (a write doesn't touch the master mode)
 	logic [2:0]  es_cntl;
 	logic [31:0] tm_cntl, tm_ldcntl, tm_addr, tm_pip, tm_tab, tm_lod0, tm_src, tm_count, tm_uvmax, tm_uvmask, tm_exp;
 	logic [31:0] tm_lod1, tm_lod2, tm_lod3; // the coarser levels' places in TRAM (bytes)
@@ -163,6 +164,7 @@ module m2_te (
 			case (a[10:2])
 				9'd0: rd = gc_master;
 				9'd2: rd = gc_idata;
+				9'd3: rd = 32'(gc_icntl);
 				9'd4: rd = gc_ddata;
 				9'd5: rd = gc_dcntl;
 				9'd6: rd = gc_iwp;
@@ -180,7 +182,7 @@ module m2_te (
 	wire         m_dblend = gc_master[3];
 	wire         m_dzbuf = gc_master[4];
 	wire         m_ddith = gc_master[5];   // DDith: no dither, whatever DBUSERGENCTL asks (BDA spec 6.10)
-	wire         dith_on = db_user[4] && !m_ddith;
+	wire         dith_on = db_user[4] && !m_ddith && !db_dctl[0];   // (DitherEn: "Enable dithering for output to 555", 16-bit only)
 
 	// ---- TRAM and the palette --------------------------------------------------------------------------------------------
 	logic        ld_tram, ld_pip;
@@ -1159,8 +1161,9 @@ module m2_te (
 	always_comb
 	begin
 		logic [1:0] cn;
-		if (td_a == 8'd0) cn = db_sa[5:4];
-		else if (td_a == 8'd255) cn = db_sa[1:0];
+		// AClampCntl: [5:4] for alpha 0xff, [1:0] for alpha 0 (BDA spec 6.10.2.6.8.1; measured on an FZ-35S)
+		if (td_a == 8'd0) cn = db_sa[1:0];
+		else if (td_a == 8'd255) cn = db_sa[5:4];
 		else cn = db_sa[3:2];
 		case (cn)
 			2'd0: tp_an = td_a;
@@ -1225,13 +1228,19 @@ module m2_te (
 	function automatic logic [7:0] pick(input logic [7:0] c, input logic [7:0] v, input logic [15:0] p);
 		return c == 8'd255 ? v : v == 8'd255 ? c : p[15:8];
 	endfunction
-	function automatic logic [7:0] alu(input logic [7:0] x, input logic [7:0] z, input logic [2:0] cn, input logic [2:0] fd);
+	// ALUSel cn (ALUCntl[7:3], 5 bits): [4] Boolean, its output for A,B = 11 10 01 00 in [3:0]; else [3] subtract, [2] B - A, [1] no clamp,
+	// [0] unused. FinalDivide fd (ALUCntl[2:0]): the shift, then the clamp. The BDA spec's C model (C_ALU); all 32 codes and FinalDivide 1, 2,
+	// 7 measured on an FZ-35S (a test disc's lists, 2026-11-16)
+	function automatic logic [7:0] alu(input logic [7:0] x, input logic [7:0] z, input logic [4:0] cn, input logic [2:0] fd);
 		logic [8:0] r9;
 		logic [11:0] bo;
 		logic borrow;
+		logic [3:0] bsel;
 		borrow = 1'b0;
-		if (!cn[2]) r9 = 9'(x) + 9'(z);
-		else if (cn[1]) begin r9 = 9'(z) - 9'(x); borrow = z < x; end
+		bsel = cn[3:0];
+		if (cn[4]) begin r9[8] = 1'b0; for (int i = 0; i < 8; i++) r9[i] = bsel[{x[i], z[i]}]; end
+		else if (!cn[3]) r9 = 9'(x) + 9'(z);
+		else if (cn[2]) begin r9 = 9'(z) - 9'(x); borrow = z < x; end
 		else begin r9 = 9'(x) - 9'(z); borrow = x < z; end
 		case (fd)
 			3'd1: bo = 12'(r9) << 1;
@@ -1242,16 +1251,16 @@ module m2_te (
 			3'd5: bo = 12'(r9) >> 3;
 			default: bo = 12'(r9);
 		endcase
-		if (!cn[0] || cn[1])
+		if (!cn[4] && !cn[1])
 		begin
 			if (bo > 12'd255) bo = 12'd255;
 			if (borrow) bo = 12'd0;
 		end
 		return bo[7:0];
 	endfunction
-	wire  [7:0]  bl_ro = blen ? alu(b_tr, b_sr, db_alu[7:5], db_alu[2:0]) : b_tr;
-	wire  [7:0]  bl_go = blen ? alu(b_tg, b_sg, db_alu[7:5], db_alu[2:0]) : b_tg;
-	wire  [7:0]  bl_bo = blen ? alu(b_tb, b_sb, db_alu[7:5], db_alu[2:0]) : b_tb;
+	wire  [7:0]  bl_ro = blen ? alu(b_tr, b_sr, db_alu[7:3], db_alu[2:0]) : b_tr;
+	wire  [7:0]  bl_go = blen ? alu(b_tg, b_sg, db_alu[7:3], db_alu[2:0]) : b_tg;
+	wire  [7:0]  bl_bo = blen ? alu(b_tb, b_sb, db_alu[7:3], db_alu[2:0]) : b_tb;
 
 	logic [3:0]  dx3, dx4, dx5, dx6;    // y, x
 	wire  [31:0] dith_m = dx6[3] ? db_dmb : db_dma;
@@ -1497,6 +1506,7 @@ module m2_te (
 		begin
 			st <= I_STOP;
 			gc_master <= 32'h0; gc_idata <= 32'h0; gc_ddata <= 32'h0; gc_dcntl <= 32'h0; gc_iwp <= 32'h0; gc_irp <= 32'h0; gc_ien <= 32'h0; gc_ist <= 32'h0;
+			gc_icntl <= 6'h0;
 			fd_run <= 1'b0; vf_v <= 1'b0; vm_v <= 4'd0; w_on <= 1'b0;
 			es_cntl <= 3'd0; vcnt <= 2'd0; tsort <= 3'd0; run_stop <= 1'b0; start_p <= 1'b0; end_set <= 32'h0;
 			db_super <= 32'h0; db_user <= 32'h0; db_discard <= 32'h0; tm_cntl <= 32'h0; tm_addr <= 32'h0;
@@ -1537,7 +1547,7 @@ module m2_te (
 						end
 						else
 						begin
-							end_set <= end_set | 32'h00002000 | (32'(gc_master[0]) << 9);
+							end_set <= end_set | 32'h00002000 | (32'(gc_icntl[0]) << 9);
 							c_flush <= 1'b1;
 							st <= I_FLUSH;
 						end
@@ -1818,16 +1828,16 @@ module m2_te (
 					begin
 						if (!w_on && !p_any)
 						begin
-							end_set <= end_set | 32'h00000400 | (32'(gc_master[0]) << 9);
+							end_set <= end_set | 32'h00000400 | (32'(gc_icntl[0]) << 9);
 							c_flush <= 1'b1;
 							st <= I_FLUSH;
 						end
 					end
-					else if (run_stop || gc_master[3] || gc_master[1])
+					else if (run_stop || gc_icntl[3] || gc_icntl[1])
 					begin
 						if (!w_on && !p_any)
 						begin
-							end_set <= end_set | (32'(gc_master[0]) << 9);
+							end_set <= end_set | (32'(gc_icntl[0]) << 9);
 							c_flush <= 1'b1;
 							st <= I_FLUSH;
 						end
@@ -2304,8 +2314,9 @@ module m2_te (
 							9'd2: gc_idata <= md(gc_idata, r_d, r_mode);
 							9'd3:
 							begin
-								// (TEICNTL lands on the master mode as well, in MAME; list ends and so on test it there)
-								gc_master <= md(gc_master, r_d, r_mode);
+								// (its own register: STRT|INT doesn't set the master mode's DDith and RSET; measured on an FZ-35S, a list
+								// started so dithers, 2026-11-16. List ends and so on test it here)
+								gc_icntl <= 6'(md(32'(gc_icntl), r_d, r_mode));
 								if (ic_new[5] || ic_new[4])
 								begin
 									if (ic_new[5]) gc_irp <= gc_idata;
