@@ -361,8 +361,8 @@ module m2_te (
 	logic        cx_tssb;               // (what's been read of it)
 	logic [14:0] cx_talpha;
 	logic [31:0] cx_pv;
-	logic [2:0]  cx_pr;                 // how many of it: a run's texels go up to four a clock (as many as fit in 32 bits)
-	logic        cx_pp;                 // or two of a string's, both in cx_pv
+	logic [5:0]  cx_pr;                 // how many of it: a run's texels go as many a clock as fit in 32 bits (of 1, 2, 4, 8 bits; else up to five)
+	logic        cx_pp;                 // or two or four of a string's, all in cx_pv
 	logic signed [29:0] cx_left;
 	logic [3:0]  vf_i;
 	logic [4:0]  v_fl;                  // shaded, textured, perspective, new, replace
@@ -1628,13 +1628,18 @@ module m2_te (
 						logic [5:0]  cb;
 						logic        emit, last;
 						logic [5:0]  r, rmax;
-						logic [31:0] rep, xb2, colour2, val2;
-						logic        two, run_rep, run_last, ctl;
+						logic [31:0] rep, xb2, colour2, val2, xb3, xb4, colour3, colour4, val3, val4;
+						logic        two, four, run_rep, run_last, ctl;
 						acc = cx_acc; n = cx_n; oacc = cx_out; on = cx_on;
 						emit = 1'b0; last = 1'b0; val = cx_val; r = 6'd1; val2 = 32'h0; ctl = 1'b0;
 						if (cx_word) begin acc = {acc[31:0], ms_w[7:0], ms_w[15:8], ms_w[23:16], ms_w[31:24]}; n = n + 7'd32; end
 						// a run's texel again (or a string's that reads no bits, all the same texel): as many a clock as fit in 32 bits
-						rmax = cx_dbits <= 6'd8 ? 6'd4 : cx_dbits <= 6'd10 ? 6'd3 : cx_dbits <= 6'd16 ? 6'd2 : 6'd1;
+						case (cx_dbits)
+							6'd1: rmax = 6'd32;
+							6'd2: rmax = 6'd16;
+							6'd4: rmax = 6'd8;
+							default: rmax = cx_dbits <= 6'd6 ? 6'd5 : cx_dbits <= 6'd8 ? 6'd4 : cx_dbits <= 6'd10 ? 6'd3 : cx_dbits <= 6'd16 ? 6'd2 : 6'd1;
+						endcase
 						run_rep = cx_grp && cx_have && (!cx_str || (cx_cbits == 6'd0 && cx_ab == 4'd0 && !cx_ssb));
 						run_last = run_rep && cx_cnt <= 7'(rmax);
 						// the next field's bits from the source, one extractor for all: a control byte, or a texel's ssb, alpha or colour (fk 0, 1, 2).
@@ -1649,6 +1654,11 @@ module m2_te (
 						two = cx_grp && cx_str && !cx_tr && cx_fs == 2'd0 && cx_ab == 4'd0 && !cx_ssb && cx_cbits != 6'd0 && cx_cbits <= 6'd16
 							&& cx_dbits <= 6'd16 && cx_cnt >= 7'd2 && n >= (k << 1);
 						xb2 = 32'(acc >> (n - (k << 1))) & 32'((33'd1 << k) - 33'd1);
+						// (and four, of up to 8 bits each into texels of up to 8 bits)
+						four = two && cx_cbits <= 6'd8 && cx_dbits <= 6'd8 && cx_cnt >= 7'd4 && n >= (k << 2);
+						xb3 = 32'(acc >> (n - (k << 1) - k)) & 32'((33'd1 << k) - 33'd1);
+						xb4 = 32'(acc >> (n - (k << 2))) & 32'((33'd1 << k) - 33'd1);
+						val3 = 32'h0; val4 = 32'h0;
 						if (!cx_grp)
 						begin
 							if (cx_left <= 30'sd0) last = 1'b1;
@@ -1695,6 +1705,18 @@ module m2_te (
 											| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
 										cx_val <= val2;
 										r = 6'd2;
+										if (four)
+										begin
+											n = n - (k << 1);
+											colour3 = cx_lit ? xb3 : xb3 + 32'(cx_cnst[7:0]);
+											colour4 = cx_lit ? xb4 : xb4 + 32'(cx_cnst[7:0]);
+											val3 = (colour3 & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
+												| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
+											val4 = (colour4 & 32'((33'd1 << cx_dcb) - 33'd1)) | ((alpha & 32'((33'd1 << cx_dab) - 33'd1)) << cx_dcb)
+												| ((ssb & 32'(cx_dsb)) << (cx_dcb + 6'(cx_dab)));
+											cx_val <= val4;
+											r = 6'd4;
+										end
 									end
 								end
 							end
@@ -1727,15 +1749,24 @@ module m2_te (
 						// the packer, a clock behind the decoder: the texel's bits at the top of cx_pv, put in after the cx_on bits at the top of cx_out; a
 						// word's the top 32 when there are 32 (and what's left at the end, padded with zeros, as MAME's)
 						cx_pe <= emit;
-						cx_pv <= (val << (6'd32 - cx_dbits)) | (two && emit ? val2 << (7'd32 - (7'(cx_dbits) << 1)) : 32'h0);
-						cx_pr <= 3'(r);         // (a run's at most four)
+						cx_pv <= (val << (6'd32 - cx_dbits)) | (two && emit ? val2 << (7'd32 - (7'(cx_dbits) << 1)) : 32'h0)
+							| (four && emit ? (val3 << (7'd32 - (7'(cx_dbits) * 7'd3))) | (val4 << (7'd32 - (7'(cx_dbits) << 2))) : 32'h0);
+						cx_pr <= r;
 						cx_pp <= two && emit;
 						if (cx_pe)
 						begin
 							// (a string's two texels are both in cx_pv; a run's one is repeated)
-							// (a string's two texels are both in cx_pv; a run's one is repeated)
-							rep = cx_pp ? cx_pv : cx_pv | (cx_pr > 3'd1 ? cx_pv >> cx_dbits : 32'h0) | (cx_pr > 3'd2 ? cx_pv >> (7'(cx_dbits) << 1) : 32'h0)
-								| (cx_pr > 3'd3 ? cx_pv >> (7'(cx_dbits) * 7'd3) : 32'h0);
+							// (1, 2, 4 and 8-bit texels repeat as a pattern; others up to five times, by shifts; then only the cx_pr texels' bits)
+							case (cx_dbits)
+								6'd1: rep = {32{cx_pv[31]}};
+								6'd2: rep = {16{cx_pv[31:30]}};
+								6'd4: rep = {8{cx_pv[31:28]}};
+								6'd8: rep = {4{cx_pv[31:24]}};
+								default: rep = cx_pv | (cx_pr > 6'd1 ? cx_pv >> cx_dbits : 32'h0) | (cx_pr > 6'd2 ? cx_pv >> (7'(cx_dbits) << 1) : 32'h0)
+									| (cx_pr > 6'd3 ? cx_pv >> (7'(cx_dbits) * 7'd3) : 32'h0) | (cx_pr > 6'd4 ? cx_pv >> (7'(cx_dbits) << 2) : 32'h0);
+							endcase
+							if (cx_pp) rep = cx_pv;
+							else rep = rep & ~(32'hffffffff >> (7'(cx_dbits) * 7'(cx_pr)));
 							oacc = oacc | ({rep, 32'h0} >> on);
 							on = on + 7'(cx_dbits) * 7'(cx_pr);
 						end
