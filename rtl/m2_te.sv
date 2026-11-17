@@ -1154,22 +1154,21 @@ module m2_te (
 	// ---- the destination ------------------------------------------------------------------------------------------------
 	logic [7:0]  sr, sg, sb, sa;        // the source pixel
 	logic        dsb_s;                 // its destination bit
-	logic [7:0]  tp_a;                  // MAME's texpath.a and blend.r keep what they had when they aren't set
 	logic        taz5, taz6, taz7, tcz5, tcz6, tcz7;    // the texture unit's alpha (after the clamp controls), its colour: zero, for the discards
 
 	logic [7:0]  tp_an;
 	always_comb
 	begin
 		logic [1:0] cn;
-		// AClampCntl: [5:4] for alpha 0xff, [1:0] for alpha 0 (BDA spec 6.10.2.6.8.1; measured on an FZ-35S)
+		// AClampCntl: [5:4] for alpha 0xff, [1:0] for alpha 0 (BDA spec 6.10.2.6.8.1; measured on an FZ-35S); a field of
+		// 3 (reserved in the spec) forces 0 as 2 does (measured too)
 		if (td_a == 8'd0) cn = db_sa[1:0];
 		else if (td_a == 8'd255) cn = db_sa[5:4];
 		else cn = db_sa[3:2];
 		case (cn)
 			2'd0: tp_an = td_a;
 			2'd1: tp_an = 8'd255;
-			2'd2: tp_an = 8'd0;
-			default: tp_an = tp_a;
+			default: tp_an = 8'd0;
 		endcase
 	end
 
@@ -1423,7 +1422,6 @@ module m2_te (
 				dsb_s <= c_q[15];
 			end
 			// T4: the operands
-			if (t4_v) tp_a <= tp_an;
 			if (blen)
 				case (db_da[1:0])
 					2'd0: da5 <= tp_an;
