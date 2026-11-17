@@ -58,6 +58,11 @@ set_global_assignment -name SEED 11
 # (about 4 clocks) and an lfd it traps reboots the M2, and without them the data path to each CPU's cache can be 32 bits
 set_global_assignment -name VERILOG_MACRO "PPC_NO_FPDOUBLE=1"
 set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"
+# Every build: no TLB-miss machinery in the CPUs (rtl/ppc_pipe.sv: the three TLB-miss exceptions, DMISS / DCMP / HASH1 / HASH2 and
+# the hash, the TGPRs). The core has no TLB, so that logic could never run in the core. A real M2 spends at most 0.19-0.53 % of
+# CPU 1's clocks on TLB misses in the six arcade games (counted in the M2 emulator with a model of the 602's TLBs). A miss, if one
+# came, takes DSI or for a fetch ISI ("not found"). With the option off the RTL is as before
+set_global_assignment -name VERILOG_MACRO "PPC_NO_TLBMISS=1"
 
 
 #enable it only if 8bit indexed mode is used in core

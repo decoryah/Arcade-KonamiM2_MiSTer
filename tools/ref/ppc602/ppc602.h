@@ -99,6 +99,9 @@ public:
 	// 602's emulation trap (EX_EMUL, 0x1600; emul_prog: the program exception instead, as the RTL's EX_CUT may have it), tw / twi
 	// (no_trap) the program exception
 	bool no_fpdouble = false, no_string = false, no_trap = false, emul_prog = false;
+	// PPC_NO_TLBMISS (no_tlbmiss): no TLB-miss exceptions; a miss is DSI (DSISR not found, | store) or for a fetch ISI (SRR1
+	// 0x40000000); DMISS, DCMP, HASH1, HASH2 read 0; no TGPRs (MSR[TGPR] changes nothing)
+	bool no_tlbmiss = false;
 	// as the old core (rtl/ppc_core.sv with rtl/ppc_fpu.sv, not in the build) and MAME 0.289 (whose captures sim/ppcreplay
 	// replays) have them: fsqrt(s) and an exact frsqrte (1 / sqrt), not the 602's (a program exception; its table). For the
 	// double forms (not with sp, the pipeline's)

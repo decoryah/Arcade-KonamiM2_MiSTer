@@ -74,6 +74,7 @@ void ppc602::set_cr(uint32_t v)
 
 void ppc602::swap_tgpr()
 {
+	if (no_tlbmiss) return;
 	for (int i = 0; i < 4; i++)
 	{
 		uint32_t t = r[i];
@@ -132,9 +133,11 @@ uint32_t ppc602::ea_phys(uint32_t ea, int type)
 	{
 		if (dsisr & DSISR_PROTECTED)
 			raise(EX_ISI, 0x08000000);
+		if (no_tlbmiss)
+			raise(EX_ISI, DSISR_NOT_FOUND);
 		raise(EX_ITLBMISS);
 	}
-	if (dsisr & DSISR_PROTECTED)
+	if ((dsisr & DSISR_PROTECTED) || no_tlbmiss)
 	{
 		spr[SPR_DSISR] = dsisr;
 		raise(EX_DSI, ea);
@@ -311,6 +314,7 @@ uint32_t ppc602::mfspr(uint32_t n)
 		case 0: return 0;                                                                              // MQ, not on a 602
 	}
 	if (p602 && spr_gone(n)) return 0;
+	if (no_tlbmiss && n >= SPR_DMISS && n <= SPR_HASH2) return 0;
 	return spr[n];
 }
 
