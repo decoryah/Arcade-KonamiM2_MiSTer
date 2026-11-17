@@ -41,7 +41,7 @@ public:
 	enum
 	{
 		EX_NONE = 0, EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_ALIGN = 6, EX_PROGRAM = 7, EX_FPU = 8, EX_DECREMENT = 9, EX_SYSCALL = 12,
-		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18
+		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18, EX_EMUL = 22
 	};
 
 	// MSR
@@ -93,6 +93,10 @@ public:
 	// and 1013, SPRs MAME keeps and a 602 doesn't have, read 0 and ignore writes
 	bool p602 = false;
 	static bool spr_gone(uint32_t n) { return n == SPR_EAR || n == 346 || n == 1011 || n == 1013; }
+	// a build's options (rtl/ppc_pipe.sv's PPC_NO_*): the lfd / stfd family (no_fpdouble) and the strings (no_string) take the
+	// 602's emulation trap (EX_EMUL, 0x1600; emul_prog: the program exception instead, as the RTL's EX_CUT may have it), tw / twi
+	// (no_trap) the program exception
+	bool no_fpdouble = false, no_string = false, no_trap = false, emul_prog = false;
 	// as the old core (rtl/ppc_core.sv with rtl/ppc_fpu.sv, not in the build) and MAME 0.289 (whose captures sim/ppcreplay
 	// replays) have them: fsqrt(s) and an exact frsqrte (1 / sqrt), not the 602's (a program exception; its table). For the
 	// double forms (not with sp, the pipeline's)

@@ -9,7 +9,9 @@
 // delays, the data side with two accesses out at most, answered in order; the registers are compared at each retire
 // (two at once: after the second) but for the ones an older
 // load or float op hasn't written yet, and all of them after the last instruction. The model then has the pipeline's
-// single-precision FPRs and its FP-unavailable exception (ppc602's sp, fpu_exc).
+// single-precision FPRs and its FP-unavailable exception (ppc602's sp, fpu_exc), and the 602's ways where MAME differs (p602).
+// Built with a build's PPC_NO_* defines (run.sh's DEFS), the reference takes the exceptions the RTL takes for what they leave out
+// (no_fpdouble, no_string, no_trap); the programs still have those instructions.
 // Built with CACHE too (run.sh with PIPE=1 CACHE=1), the pipeline with its caches (rtl/ppc_cache.sv) over a memory of the
 // bench's own (a second copy, written only by what the store buffer sends), with random wait states and latency if lat is 1:
 // each load's value is checked as it comes as well.
@@ -313,6 +315,16 @@ int main(int argc, char **argv)
 #ifdef PIPE
 		// the pipeline's FPRs are the 602's singles (rtl/ppc_fps.sv), and it takes the FP-unavailable exception
 		ref.sp = true; ref.fpu_exc = true; ref.p602 = true; ref.sp_canon();
+		// a build's options (run.sh's DEFS: the RTL built with them too): what they leave out traps in the reference as in the RTL
+#ifdef PPC_NO_FPDOUBLE
+		ref.no_fpdouble = true;
+#endif
+#ifdef PPC_NO_STRING
+		ref.no_string = true;
+#endif
+#ifdef PPC_NO_TRAP
+		ref.no_trap = true;
+#endif
 #endif
 		for (int i = 0; i < 4; i++) ref.tgpr[i] = uint32_t(rng());
 		ref.set_cr(uint32_t(rng()));

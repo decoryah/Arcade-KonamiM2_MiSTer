@@ -340,6 +340,19 @@ void ppc602::exec(uint32_t op)
 			x == 0x277 || x == 0x297 || x == 0x2b7 || x == 0x2d7 || x == 0x2f7 || x == 0x3d7)))
 			raise(EX_FPU);
 	}
+	if (no_fpdouble || no_string || no_trap)
+	{
+		uint32_t p = op >> 26, x = (op >> 1) & 0x3ff;
+		bool fd = (p >= 0x32 && p <= 0x37 && p != 0x34 && p != 0x35) || (p == 0x1f && (x == 0x257 || x == 0x277 || x == 0x2d7 ||
+			x == 0x2f7));
+		bool str = p == 0x1f && (x == 0x255 || x == 0x215 || x == 0x2d5 || x == 0x295);
+		if ((no_fpdouble && fd) || (no_string && str))
+		{
+			if (emul_prog) raise(EX_PROGRAM, 0x80000);
+			raise(EX_EMUL);
+		}
+		if (no_trap && (p == 0x03 || (p == 0x1f && x == 0x004))) raise(EX_PROGRAM, 0x80000);
+	}
 	switch (op >> 26)
 	{
 		case 0x03:                                                                                     // TWI

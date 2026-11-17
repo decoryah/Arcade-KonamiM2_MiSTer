@@ -1,8 +1,10 @@
-// Instructions a build can leave out (a qsf VERILOG_MACRO), for room; left out, they take the program exception (illegal
-// instruction), as anything not decoded does. None is in the code the M2 emulator compiles for Battle Tryst (scratch census_apply.py):
-//   PPC_NO_FPDOUBLE   lfd, lfdu, lfdx, lfdux, stfd, stfdu, stfdx, stfdux (and the conversions between single and double)
-//   PPC_NO_STRING     lswi, lswx, stswi, stswx
-//   PPC_NO_TRAP       tw, twi
+// Instructions a build can leave out (a qsf VERILOG_MACRO), for room. None is in the code the M2 emulator compiles for any title
+// (the M2 emulator's census). Left out, those a 602 emulates take its emulation trap (0x1600, EX_CUT), the others the program
+// exception (illegal instruction), as anything not decoded does:
+//   PPC_NO_FPDOUBLE   lfd, lfdu, lfdx, lfdux, stfd, stfdu, stfdx, stfdux (and the conversions between single and double): 0x1600,
+//                     every one, on purpose (a 602 runs stfd, and lfd of an exact normal single, itself: KonamiM2.qsf says why)
+//   PPC_NO_STRING     lswi, lswx, stswi, stswx: 0x1600
+//   PPC_NO_TRAP       tw, twi: 0x700
 // PowerPC 602 as MAME 0.289 runs it, pipelined: the same instruction semantics as rtl/ppc_core.sv (checked against the
 // reference model, tools/ref/ppc602, by sim/ppccore and sim/ppcreplay), an instruction a clock when nothing stalls.
 //
@@ -169,7 +171,13 @@ module ppc_pipe #(
 		MSR_TGPR = 32'h00020000, MSR_EE = 32'h00008000, MSR_PR = 32'h00004000, MSR_IP = 32'h00000040,
 		MSR_IR = 32'h00000020, MSR_DR = 32'h00000010, MSR_LE = 32'h00000001;
 	localparam logic [4:0] EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_PROGRAM = 7, EX_FPU = 8, EX_DECREMENT = 9, EX_SYSCALL = 12,
-		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18;
+		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18, EX_EMUL = 22;
+	// what the instructions a 602 emulates take when the core leaves them out: its emulation trap (0x1600), as a 602 (EX_PROGRAM
+	// here: the illegal-instruction program exception, which the core took for them before EX_CUT)
+	localparam logic [4:0] EX_CUT = EX_EMUL;
+	// verilator lint_off UNUSEDPARAM
+	localparam logic [31:0] EX_CUT_P = EX_CUT == EX_PROGRAM ? 32'h80000 : 32'h0;   // (its SRR1 bits; used with PPC_NO_*)
+	// verilator lint_on UNUSEDPARAM
 
 	// a GPR's physical register
 	function automatic logic [5:0] pg(input logic [4:0] r);
@@ -1873,6 +1881,9 @@ module ppc_pipe #(
 				6'h2e: begin sq_count <= 7'd32 - {2'b0, rD}; sq_reg <= rD; seq_start(Q_LMW, raz + simm, 4'd4); end
 				6'h2f: begin sq_count <= 7'd32 - {2'b0, rD}; sq_reg <= rD; sq_wdata <= {32'h0, rs_v}; seq_start(Q_STMW, raz + simm, 4'd4); end
 				6'h3b, 6'h3f: opfp();
+`ifdef PPC_NO_FPDOUBLE
+				6'h32, 6'h33, 6'h36, 6'h37: raise(EX_CUT, EX_CUT_P);                                  // LFD, LFDU, STFD, STFDU
+`endif
 				default: raise(EX_PROGRAM, 32'h80000);
 			endcase
 	endtask
@@ -2042,6 +2053,11 @@ module ppc_pipe #(
 				sq_reg <= rD;
 				if (cnt != 0) seq_start(Q_LSW, xo == 10'h255 ? raz : raz + b, 4'd1);
 			end
+`else
+			10'h255, 10'h215, 10'h2d5, 10'h295: raise(EX_CUT, EX_CUT_P);                         // LSWI, LSWX, STSWI, STSWX
+`endif
+`ifdef PPC_NO_FPDOUBLE
+			10'h257, 10'h277, 10'h2d7, 10'h2f7: raise(EX_CUT, EX_CUT_P);                         // LFDX, LFDUX, STFDX, STFDUX
 `endif
 			10'h096:                                                                               // STWCX.
 			begin
