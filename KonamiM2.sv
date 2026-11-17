@@ -97,6 +97,7 @@ localparam CONF_STR = {
 	"H1O[45:43],Crosshair,Off,Player 1,Player 2,Player 3,P1+P2,All;",
 	"H1-;",
 	"O[3],Service mode,Off,On;",
+	"O[8],Pause when OSD is open,Off,On;",  // (and P1's Pause button; while paused, Step runs a frame: below)
 	"P1,Advanced;",
 `ifndef PPC_CACHE_KB
 	"P1O[6:5],CPU caches (at reset),32 KB,16 KB,8 KB,4 KB as the 602;",  // (each side: rtl/ppc_cache.sv's size; a build that sets PPC_CACHE_KB has its own)
@@ -107,7 +108,7 @@ localparam CONF_STR = {
 	"P1O[7],CPU 2 DEC interrupt,Off,On;",  // (off: the M2 OS's slave-decrementer race can't start; see the README)
 	"DIP;",
 	"R0,Reset;",
-	"J1,Button 1,Button 2,Button 3,Start,Coin;",
+	"J1,Button 1,Button 2,Button 3,Start,Coin,Pause,Step;",
 	"V,v",`BUILD_DATE
 };
 
@@ -265,6 +266,21 @@ end
 // the gun games' 2P Start, and P1's Button 3 while the OSD's Service mode is on: Total Vice's test menu opens an item only with 2P Start
 wire        p2_start = joystick_1[7] | (status[3] & joystick_0[6]);
 
+// the pause, for screenshots (rtl/m2_boot.sv's hold: both CPUs, their timers and the sound; the picture stays): P1's Pause button
+// toggles it (a reset ends it), and with the OSD's "Pause when OSD is open" an open OSD holds it too; while paused, P1's Step button
+// runs the machine to the next frame's start
+reg         pad_pause = 1'b0, pad_pause_q = 1'b0, pad_step_q = 1'b0;
+reg   [1:0] osd_s = 2'b00;
+always @(posedge clk_sys) begin
+	pad_pause_q <= joystick_0[9];
+	pad_step_q <= joystick_0[10];
+	osd_s <= {osd_s[0], OSD_STATUS};
+	if (reset_sw) pad_pause <= 1'b0;
+	else if (joystick_0[9] & ~pad_pause_q) pad_pause <= ~pad_pause;
+end
+wire        m2_pause = pad_pause | (status[8] & osd_s[1]);
+wire        m2_step = joystick_0[10] & ~pad_step_q;
+
 wire  [9:0] gun_x [0:2];
 wire  [8:0] gun_y [0:2];
 wire [15:0] gun_p5;
@@ -291,6 +307,7 @@ m2_boot #(.TICK(8)) u_boot
 `else
 	.cache_size(2'd0),
 `endif
+	.pause(m2_pause), .step(m2_step),
 	.ddr_busy(DDRAM_BUSY), .ddr_burstcnt(DDRAM_BURSTCNT), .ddr_addr(DDRAM_ADDR), .ddr_dout(DDRAM_DOUT),
 	.ddr_dout_ready(DDRAM_DOUT_READY), .ddr_rd(DDRAM_RD), .ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_we(DDRAM_WE),
 `ifdef Z_SDRAM

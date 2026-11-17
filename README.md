@@ -168,6 +168,9 @@ each player shoots off the screen. Reload (Button 2) does each of these for you.
 
 The service coin isn't on a button: Coin does the same.
 
+**Pause and Step** (every game; R and L on the pad): Player 1's Pause holds the machine and the sound, with the picture as it is, and
+Pause again goes on (a reset ends it too). While paused, Step runs one frame and holds again: for screenshots.
+
 | Option | Values |
 |---|---|
 | CD audio image | the disc's whole image, `<set>_full.bin` |
@@ -177,6 +180,7 @@ The service coin isn't on a button: Coin does the same.
 | Mouse (gun games) | Player 1, Player 2, Player 3, Off |
 | Crosshair (gun games) | Off, Player 1, Player 2, Player 3, P1+P2, All |
 | Service mode | Off, On: the game's service menu |
+| Pause when OSD is open | Off, On |
 | Advanced: CPU caches (at reset) | 32 KB, 16 KB, 8 KB, 4 KB as the 602 (each side; Hell Night's build is fixed at 32 KB) |
 | Advanced: SDRAM read timing (Battle Tryst, Heat of Eleven, Hell Night) | Normal, Late: the Z buffer's reads a clock later, for a module that answers slowly |
 | Advanced: CPU 2 DEC interrupt | Off (the default), On: whether CPU 2 takes its decrementer exception. On is the 602's own behavior, but with it the M2 OS's scheduler can run on CPU 2 and corrupt its task queue (a freeze after hours); DEC counts either way |

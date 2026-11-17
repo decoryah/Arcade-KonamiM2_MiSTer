@@ -5,7 +5,7 @@
     <year>1998</year>
     <manufacturer>Konami</manufacturer>
     <rbf>KonamiM2</rbf>
-    <buttons names="Trigger,Reload,-,Start,Coin" default="B,A,Start,Select" />
+    <buttons names="Trigger,Reload,-,Start,Coin,Pause,Step" default="B,A,Start,Select,R,L" />
     <!-- the board's DIP switches, as MAME's P2 (the rest unused) -->
     <switches default="FF" base="16">
         <dip bits="1" name="Flip Screen" ids="On,Off" values="0,1"/>

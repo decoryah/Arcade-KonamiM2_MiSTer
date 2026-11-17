@@ -5,7 +5,7 @@
     <year>1998</year>
     <manufacturer>Konami</manufacturer>
     <rbf>KonamiM2Tryst</rbf>
-    <buttons names="Guard,Punch,Kick,Start,Coin" default="A,B,X,Start,Select" />
+    <buttons names="Guard,Punch,Kick,Start,Coin,Pause,Step" default="A,B,X,Start,Select,R,L" />
 
     <!--
       Battle Tryst's own build (KonamiM2.qsf's Battle Tryst lines), as KonamiM2Tryst_<date>.rbf in _Arcade/cores: the Z buffer in the SDRAM board's memory, compressed texture loads, the

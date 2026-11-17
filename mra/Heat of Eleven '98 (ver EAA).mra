@@ -6,7 +6,7 @@
     <manufacturer>Konami</manufacturer>
     <rbf>KonamiM2Heat</rbf>
     <!-- the buttons as the game's guides name them -->
-    <buttons names="Pass/Tackle/Lifting,Long/Sliding/H.Lift,Shift,Start,Coin" default="A,B,X,Start,Select" />
+    <buttons names="Pass/Tackle/Lifting,Long/Sliding/H.Lift,Shift,Start,Coin,Pause,Step" default="A,B,X,Start,Select,R,L" />
 
     <!--
       Heat of Eleven's own build (KonamiM2.qsf's Heat of Eleven lines, its Z buffer in the SDRAM board's memory), as
