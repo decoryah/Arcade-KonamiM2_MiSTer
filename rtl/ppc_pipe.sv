@@ -1501,7 +1501,11 @@ module ppc_pipe #(
 	localparam int GAW = 6;
 `endif
 `ifdef PPC_REGS_MLAB
-	localparam bit RMLAB = 1'b1;
+`ifndef PPC_REGS_BRAM
+	localparam bit RMLAB = 1'b1;               // (PPC_REGS_BRAM: a build that keeps them in block RAM anyway)
+`else
+	localparam bit RMLAB = 1'b0;
+`endif
 `else
 	localparam bit RMLAB = 1'b0;
 `endif
