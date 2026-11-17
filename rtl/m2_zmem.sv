@@ -133,7 +133,6 @@ module m2_zmem #(
 	assign idle = !o_on && !r_pend && q_n == 5'd0 && s_st == S_IDLE && s_t == o_t;
 	logic [15:0]  dq_in;
 	logic [6:0]   cap_v;
-	logic [3:0]   cap_w [0:6];
 	logic         rst_m, rst_m1;        // the reset, for clk_mem
 	always_ff @(posedge clk_mem) begin rst_m1 <= rst; rst_m <= rst_m1; end
 	always_ff @(posedge clk_mem)
@@ -143,11 +142,11 @@ module m2_zmem #(
 		n_dqm <= 2'b00;
 		s_ref <= s_ref + 11'd1;
 		s_due <= s_ref >= 11'(REFRESH);
-		// the read data: the pins' register every clock; a READ's word index behind it, by the pins' clock and CAP
+		// the read data: the pins' register every clock; a READ's mark behind it, by the pins' clock and CAP. The line's words come in
+		// order (0 to 15), so each goes in at the top and the line shifts down a word: a pin's register feeds one register, beside it
 		dq_in <= sd_dq_i;
 		cap_v <= {1'b0, cap_v[6:1]};
-		for (int i = 0; i < 6; i++) cap_w[i] <= cap_w[i + 1];
-		if (cap_v[0]) z_rdata[16 * cap_w[0] +: 16] <= dq_in;
+		if (cap_v[0]) z_rdata <= {dq_in, z_rdata[255:16]};
 		case (s_st)
 			S_INIT:
 			begin
@@ -194,8 +193,8 @@ module m2_zmem #(
 				else
 				begin
 					n_cmd <= C_READ;
-					if (rd_late) begin cap_v[6] <= 1'b1; cap_w[6] <= s_w; end
-					else begin cap_v[5] <= 1'b1; cap_w[5] <= s_w; end
+					if (rd_late) cap_v[6] <= 1'b1;
+					else cap_v[5] <= 1'b1;
 				end
 				s_w <= s_w + 4'd1;
 				if (s_w == 4'd15)
