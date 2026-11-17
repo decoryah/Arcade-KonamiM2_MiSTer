@@ -3090,7 +3090,9 @@ module te_zc #(
 	end
 endmodule
 
-// 128 lines of 256 bits, written by 16-bit lanes, read a clock after the address
+// 128 lines of 256 bits, written by 16-bit lanes, read a clock after the address: the Z cache's data. A line read in the clock some of
+// its lanes are written gives the old ones ("OLD_DATA", as the bench's model and te_lram8: with "DONT_CARE" the M10K may return anything
+// for the whole line, the lanes not written too; a pixel's Z read beside an earlier pixel's write in the same 16-pixel line does that)
 module te_lram #(
 	parameter int AW = 7
 ) (
@@ -3115,7 +3117,7 @@ module te_lram #(
 	altsyncram #(
 		.operation_mode("DUAL_PORT"), .width_a(256), .widthad_a(AW), .numwords_a(1 << AW), .width_b(256), .widthad_b(AW), .numwords_b(1 << AW),
 		.width_byteena_a(32), .byte_size(8), .address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
-		.read_during_write_mode_mixed_ports("DONT_CARE"), .power_up_uninitialized("TRUE")
+		.read_during_write_mode_mixed_ports("OLD_DATA"), .power_up_uninitialized("FALSE")
 	) ram (.clock0(clk), .wren_a(|le), .byteena_a(be), .address_a(wa), .data_a(wd), .address_b(ra), .q_b(rd));
 `endif
 endmodule
