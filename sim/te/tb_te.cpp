@@ -23,7 +23,7 @@ static const uint32_t RAM_BASE = 0x40000000, RAM_SIZE = 0x1000000;
 static std::vector<uint8_t> ram, wrote;
 static Vm2_te *t;
 static uint64_t clocks;
-static bool slow;
+static bool slow, rand_lat;       // (-rand: each read's latency its own, 4 to 40 clocks)
 static uint32_t rnd = 12345;
 static uint32_t rn() { rnd = rnd * 1103515245 + 12345; return rnd >> 16; }
 
@@ -56,6 +56,11 @@ static std::map<unsigned, uint64_t> cx_bits;
 static std::map<std::string, uint64_t> cc_why;    // (TE_PROF: the color cache's state in the clocks pixels stall on it)                          // (texels by their bits and the group's fields: colour bits, alpha bits, ssb)
 static std::map<unsigned, uint64_t> regw_n;          // (TE_PROF: the list's register writes, by byte offset)
 static std::map<unsigned, uint64_t> regh_n, regh_w;  // (TE_PROF: register instructions by offset << 8 | count: how many, the clocks they waited for the pixels)  // I_FETCH waiting for the list's word, for the pixels; E_START for the walk, for the drain
+// (TE_PROF, the color cache: a fill's clocks before its read is taken, by what it waits for; each read miss's clocks to its hit, in bins of 4)
+static uint64_t cf_q, cf_gnt, cf_busy, cm_hist[17], cm_n, cm_clk;
+// (TE_PROF, for an estimate of the real chip's time: pixels the walker hands in, by texture (none, point, bilinear) x blend x Z test; Z writes;
+// triangles; the 32-byte blocks the destination, the source and the Z addresses enter; pixels with no blend and no bilinear texture)
+static uint64_t mp_class[12], mp_zw, mp_tri, mp_dblk, mp_sblk, mp_zrblk, mp_zwblk, mp_two;
 #endif
 
 #ifdef Z_SDRAM
@@ -184,7 +189,7 @@ static void clock1()
 		if (t->m_rd)
 		{
 			reads++;
-			rq.push_back({ uint32_t(t->m_a) << 3, 0, clocks + (slow ? 30 : 12) });
+			rq.push_back({ uint32_t(t->m_a) << 3, 0, clocks + (rand_lat ? 4 + rn() % 37 : slow ? 30 : 12) });
 		}
 		else if (t->m_we)
 		{
@@ -327,6 +332,54 @@ static void clock1()
 				unsigned(q->m2_te__DOT__db_ssb), unsigned(q->m2_te__DOT__db_da), unsigned(q->m2_te__DOT__db_sa), unsigned(q->m2_te__DOT__db_discard), unsigned(q->m2_te__DOT__tm_tab), unsigned(q->m2_te__DOT__gc_master), unsigned(q->m2_te__DOT__db_zctl));
 	}
 	stalled += !t->rootp->m2_te__DOT__pe;
+	{
+		auto *q = t->rootp;
+		// the color cache's fill: what holds its read back
+		if (q->m2_te__DOT__cc__DOT__st == 3)
+		{
+			if (q->m2_te__DOT__cc__DOT__q_cnt != 0) cf_q++;
+			else if (!q->m2_te__DOT__m_owned) cf_gnt++;
+			else if (t->m_busy) cf_busy++;
+		}
+		// a read miss: the clocks the read port stalls from its miss to its hit
+		static unsigned run;
+		static bool missed;
+		if (q->m2_te__DOT__cr_stall)
+		{
+			run++;
+			if (q->m2_te__DOT__cc__DOT__r_v && !q->m2_te__DOT__cc__DOT__r_hit) missed = true;
+		}
+		else if (run)
+		{
+			if (missed) { cm_hist[run / 4 > 16 ? 16 : run / 4]++; cm_n++; cm_clk += run; }
+			run = 0; missed = false;
+		}
+		// the pixels the walker hands in, by what sets the real chip's rate
+		static uint32_t l_d = ~0u, l_s = ~0u, l_zr = ~0u, l_zw = ~0u;
+		static int st_was;
+		int sn = q->m2_te__DOT__st & 127;
+		if (!strcmp(st_name[sn], "E_START") && sn != st_was) mp_tri++;
+		if (!strcmp(st_name[sn], "I_STOP") && sn != st_was) l_d = l_s = l_zr = l_zw = ~0u;
+		st_was = sn;
+		if (q->m2_te__DOT__v0_ok && q->m2_te__DOT__pu)
+		{
+			unsigned n = q->m2_te__DOT__v0_four ? 4 : 1;
+			int tex = !q->m2_te__DOT__t_look ? 0 : q->m2_te__DOT__t_bil ? 2 : 1;
+			bool bl = q->m2_te__DOT__blen, zt = q->m2_te__DOT__zon;
+			mp_class[tex * 4 + bl * 2 + zt] += n;
+			if (!bl && tex != 2) mp_two += n;
+			uint32_t d = uint32_t(q->m2_te__DOT__d_addr) >> 5, s = uint32_t(q->m2_te__DOT__s_addr) >> 5, z = uint32_t(q->m2_te__DOT__z_addr) >> 5;
+			if (d != l_d) { mp_dblk++; l_d = d; }
+			if (q->m2_te__DOT__sren && s != l_s) { mp_sblk++; l_s = s; }
+			if (q->m2_te__DOT__z_rn && z != l_zr) { mp_zrblk++; l_zr = z; }
+		}
+		if (q->m2_te__DOT__z_wn && q->m2_te__DOT__pe)
+		{
+			mp_zw++;
+			uint32_t z = uint32_t(q->m2_te__DOT__z_wa) >> 5;
+			if (z != l_zw) { mp_zwblk++; l_zw = z; }
+		}
+	}
 #ifdef Z_SDRAM
 	{
 		// the Z cache's fetches, by what asked: a write's miss, a read's, the line ahead; and the clocks a read waited after each kind
@@ -553,6 +606,7 @@ int main(int argc, char **argv)
 		std::string a = argv[i];
 		if (a == "-d") dir = argv[++i];
 		else if (a == "-slow") slow = true;
+		else if (a == "-rand") rand_lat = true;
 		else if (a == "-ppm") pfx = argv[++i];
 		else if (a == "-v") verbose = true;
 		else ks.push_back(atoi(argv[i]));
@@ -646,6 +700,16 @@ int main(int argc, char **argv)
 			printf("\n");
 			cc_why.clear();
 		}
+		printf("  color fills held: by the write-back queue %llu, for the port %llu, by memory busy %llu; read misses %llu, %llu clocks to their hits, by 4 clocks:",
+			(unsigned long long)cf_q, (unsigned long long)cf_gnt, (unsigned long long)cf_busy, (unsigned long long)cm_n, (unsigned long long)cm_clk);
+		for (int i = 0; i < 17; i++) printf(" %llu", (unsigned long long)cm_hist[i]);
+		printf("\n");
+		cf_q = cf_gnt = cf_busy = cm_n = cm_clk = 0; memset(cm_hist, 0, sizeof cm_hist);
+		printf("  model: %llu triangles; pixels (no texture / point / bilinear, each: plain, Z, blend, blend + Z):", (unsigned long long)mp_tri);
+		for (int i = 0; i < 12; i++) printf("%s%llu", i % 4 ? " " : i ? " / " : " ", (unsigned long long)mp_class[i]);
+		printf("; Z written %llu; blocks entered: destination %llu, source %llu, Z read %llu, Z write %llu; no blend and no bilinear %llu\n", (unsigned long long)mp_zw,
+			(unsigned long long)mp_dblk, (unsigned long long)mp_sblk, (unsigned long long)mp_zrblk, (unsigned long long)mp_zwblk, (unsigned long long)mp_two);
+		memset(mp_class, 0, sizeof mp_class); mp_zw = mp_tri = mp_dblk = mp_sblk = mp_zrblk = mp_zwblk = mp_two = 0;
 		if (cx_clk)
 		{
 			printf("  compressed loads: %llu clocks: control %llu, in a run %llu, in a string %llu, short of source %llu; texels by dbits/cbits/abits/ssb:", (unsigned long long)cx_clk,
