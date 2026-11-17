@@ -14,6 +14,9 @@
 // DMISS, DCMP, HASH1 and HASH2 read 0 (mtspr of them did nothing already, as MAME's); no TGPRs: MSR[TGPR] is a bit with no
 // effect (no exception sets it now; rfi and every exception clear it), r0-r3 always the GPR file's 0-3, which has 32 entries
 // in use, not 36; the bench's loads of the TGPRs (72-75) do nothing
+// And with PPC_NO_FPDOUBLE, the data path to the cache can be 32 bits (PPC_DATA32; rtl/ppc_cache.sv has the rest): no load is
+// wider than 4 bytes then and no store but dcbz's four 8-byte stores of zeros, so d_wdata's upper half is 0 and d_rdata's
+// isn't read
 // PowerPC 602 as MAME 0.289 runs it, pipelined: the same instruction semantics as rtl/ppc_core.sv (checked against the
 // reference model, tools/ref/ppc602, by sim/ppccore and sim/ppcreplay), an instruction a clock when nothing stalls.
 //
@@ -414,7 +417,14 @@ module ppc_pipe #(
 	logic        a_tok, a_tprot;
 	logic [3:0]  a_size;
 	logic [2:0]  a_cw;                  // (X's: the words after a_va's its store reaches, for a_cov)
+`ifdef PPC_DATA32
+`ifndef PPC_NO_FPDOUBLE
+	PPC_DATA32_needs_PPC_NO_FPDOUBLE stop ();   // (lfd and stfd are 8-byte accesses)
+`endif
+	logic [31:0] a_wdata;
+`else
 	logic [63:0] a_wdata;
+`endif
 	logic [5:0]  a_ra;
 
 	// M: the access out (the older, which d_valid answers)
@@ -449,7 +459,13 @@ module ppc_pipe #(
 	logic [6:0]  sq_count;
 	logic [4:0]  sq_reg, sq_ra;
 	logic [1:0]  sq_byte;
+`ifdef PPC_DATA32
+	// verilator lint_off UNUSEDSIGNAL
+	logic [63:0] sq_wdata;              // (its low word)
+	// verilator lint_on UNUSEDSIGNAL
+`else
 	logic [63:0] sq_wdata;
+`endif
 	logic        sq_out;
 	wire         sq_wr = sq_kind == Q_STMW || sq_kind == Q_STSW || sq_kind == Q_DCBZ || sq_kind == Q_STWCX;
 
@@ -939,7 +955,13 @@ module ppc_pipe #(
 	mkind_t      xm_kind;
 	logic [31:0] xm_ea;
 	logic [3:0]  xm_size;
+`ifdef PPC_DATA32
+	// verilator lint_off UNUSEDSIGNAL
+	logic [63:0] xm_wdata;              // (its low word)
+	// verilator lint_on UNUSEDSIGNAL
+`else
 	logic [63:0] xm_wdata;
+`endif
 	always_comb
 	begin
 		logic [31:0] ix, iu;            // indexed: rA|0 + rB, and the update form's rA + rB
@@ -1172,7 +1194,11 @@ module ppc_pipe #(
 		// (where the adder's own LUTs take the choice)
 		d_va = (xstate == XS_SEQ ? sq_ea : pd.ea_z ? 32'h0 : ra_v) + (xstate == XS_SEQ ? 32'h0 : pd.m.idx ? rb_v : simm);
 		d_kill = a_flt;
+`ifdef PPC_DATA32
+		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = {32'h0, a_wdata};
+`else
 		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
+`endif
 	end
 
 	// the segment registers and the SPRs only software reads (xr_mem). Written by X's mtsr / mtsrin / mtspr as it takes them
@@ -1710,12 +1736,20 @@ module ppc_pipe #(
 				a_pa <= dt_id ? d_va : dts.pa; a_tok <= dck[1]; a_tprot <= dck[0];
 				if (xstate == XS_SEQ)
 				begin
+`ifdef PPC_DATA32
+					a_we <= sq_wr; a_size <= sq_size; a_wdata <= sq_wdata[31:0]; a_upd <= 1'b0;
+`else
 					a_we <= sq_wr; a_size <= sq_size; a_wdata <= sq_wdata; a_upd <= 1'b0;
+`endif
 					a_ipc <= mc_ipc;
 				end
 				else
 				begin
+`ifdef PPC_DATA32
+					a_we <= xm_we; a_size <= xm_size; a_wdata <= xm_wdata[31:0]; a_upd <= xm_upd;
+`else
 					a_we <= xm_we; a_size <= xm_size; a_wdata <= xm_wdata; a_upd <= xm_upd;
+`endif
 					a_cw <= cov_w(d_va[1:0], xm_size);
 					a_ipc <= ipc; a_op <= op; a_ra <= pg(rA); a_rav <= ra_v;
 				end

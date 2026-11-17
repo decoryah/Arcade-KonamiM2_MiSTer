@@ -63,6 +63,9 @@ set_global_assignment -name VERILOG_MACRO "PPC_NO_STRING=1"
 # CPU 1's clocks on TLB misses in the six arcade games (counted in the M2 emulator with a model of the 602's TLBs). A miss, if one
 # came, takes DSI or for a fetch ISI ("not found"). With the option off the RTL is as before
 set_global_assignment -name VERILOG_MACRO "PPC_NO_TLBMISS=1"
+# Every build: with no lfd / stfd, no CPU load is wider than 4 bytes and no store but dcbz's 8-byte stores of zeros, so the data
+# path between each CPU and its cache is 32 bits (rtl/ppc_pipe.sv, rtl/ppc_cache.sv). Needs PPC_NO_FPDOUBLE
+set_global_assignment -name VERILOG_MACRO "PPC_DATA32=1"
 
 
 #enable it only if 8bit indexed mode is used in core

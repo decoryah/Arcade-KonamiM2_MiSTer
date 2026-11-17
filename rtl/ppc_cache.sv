@@ -26,6 +26,14 @@
 // physical address of the first word. A line read waits for the store buffer, and a store to a line being read
 // keeps that line from being valid, so nothing reads older than a store done.
 //
+// PPC_DATA32 (a build option; it needs PPC_NO_FPDOUBLE, which rtl/ppc_pipe.sv checks): no load is wider than 4 bytes and no
+// store but dcbz's 8-byte ones of zeros, so the data between the core and the cache is 32 bits: d_wdata's and d_rdata's upper
+// halves are 0. A store's bytes are kept in one word, each in its lane (its address mod 4: four bytes in a row never share one),
+// which serves both halves of an 8-byte word (an 8-byte store's are all 0, so its halves are the same) and both words of a
+// store across 8 bytes, the byte enables choosing as before. The line RAMs and
+// the 64-bit memory side are as they were; only the widths of the store path (s_win, p_win, the store buffer, d_wd, the
+// memory engine's word) and the load path (rd_bytes, d_val) change, not the control.
+//
 `default_nettype none
 module ppc_cache #(parameter int KB = 32) (
 	input  logic        clk,
@@ -52,7 +60,13 @@ module ppc_cache #(parameter int KB = 32) (
 	input  logic        d_we,
 	input  logic [31:0] d_pa,
 	input  logic [3:0]  d_size,
+`ifdef PPC_DATA32
+	// verilator lint_off UNUSEDSIGNAL
+`endif
 	input  logic [63:0] d_wdata,
+`ifdef PPC_DATA32
+	// verilator lint_on UNUSEDSIGNAL
+`endif
 	output logic        d_rdy,
 	output logic        d_valid,
 	output logic [63:0] d_rdata,
@@ -67,7 +81,13 @@ module ppc_cache #(parameter int KB = 32) (
 	output logic [3:0]  u_size,
 	output logic [63:0] u_wdata,
 	input  logic        u_ack,
+`ifdef PPC_DATA32
+	// verilator lint_off UNUSEDSIGNAL
+`endif
 	input  logic [63:0] u_rdata,
+`ifdef PPC_DATA32
+	// verilator lint_on UNUSEDSIGNAL
+`endif
 
 	// memory: 8-byte words, the lowest address in bits 7:0
 	output logic        mem_rd,
@@ -111,6 +131,23 @@ module ppc_cache #(parameter int KB = 32) (
 	// bytes [off, off + n) of two words (the first the lower address), big-endian, right-aligned: the answer's byte i (its
 	// last first) the window's off + n - 1 - i, each its own choice (not a chain of shifts, which made the loads' answer
 	// in the address clock a long path)
+`ifdef PPC_DATA32
+	// (n at most 4: of the second word only its first three bytes, of the answer the low word)
+	function automatic logic [31:0] rd_bytes(input logic [63:0] w0, input logic [23:0] w1, input logic [2:0] off,
+		input logic [3:0] n);
+		logic [127:0] win;
+		logic [31:0] v;
+		logic [3:0] k;
+		win = {40'h0, w1, w0};
+		v = 32'h0;
+		for (int i = 0; i < 4; i++)
+		begin
+			k = {1'b0, off} + n - 4'd1 - 4'(i);
+			if (4'(i) < n) v[8 * i +: 8] = win[8 * k +: 8];
+		end
+		return v;
+	endfunction
+`else
 	function automatic logic [63:0] rd_bytes(input logic [63:0] w0, input logic [63:0] w1, input logic [2:0] off,
 		input logic [3:0] n);
 		logic [127:0] win;
@@ -125,6 +162,12 @@ module ppc_cache #(parameter int KB = 32) (
 		end
 		return v;
 	endfunction
+`endif
+`ifdef PPC_DATA32
+`define D0 32'h0
+`else
+`define D0 64'h0
+`endif
 
 	// ---- the tags' sweep: all of them invalid after reset, or inv_all ------------------------------------------------------
 	// (as many lines as the size uses: the rest are never indexed then, and a smaller cache's sweep takes as long as its own)
@@ -153,12 +196,21 @@ module ppc_cache #(parameter int KB = 32) (
 	logic [1:0]  e_n;                   // beats still to come of a line; the words of a J_U
 	logic        e_two, e_second, e_we;
 	logic [31:3] e_a;
+`ifdef PPC_DATA32
+	logic [31:0] e_wd;                  // a store's word (its bytes in their lanes: both halves, both words)
+	logic [63:40] e_rd0;                // (the first of a read across 8 bytes: its last three bytes are all that's read)
+`else
 	logic [63:0] e_wd0, e_wd1, e_rd0;
+`endif
 	logic [7:0]  e_be0, e_be1;
 
 	// the store buffer
 	logic [31:3] w_a [0:FIFO-1];
+`ifdef PPC_DATA32
+	logic [31:0] w_d [0:FIFO-1];
+`else
 	logic [63:0] w_d [0:FIFO-1];
+`endif
 	logic [7:0]  w_be [0:FIFO-1];
 	logic [$clog2(FIFO)-1:0] w_rp, w_wp;
 	logic [$clog2(FIFO):0]   w_cnt;
@@ -166,7 +218,11 @@ module ppc_cache #(parameter int KB = 32) (
 	wire         w_full = w_cnt == ($clog2(FIFO)+1)'(FIFO);
 	logic        w_push;
 	logic [31:3] w_pa;
+`ifdef PPC_DATA32
+	logic [31:0] w_pd;
+`else
 	logic [63:0] w_pd;
+`endif
 	logic [7:0]  w_pbe;
 
 	// the jobs waiting
@@ -174,7 +230,11 @@ module ppc_cache #(parameter int KB = 32) (
 	logic [31:5] d_line_a, i_line_a;
 	logic [31:3] u_ja;
 	logic        u_jwe, u_jtwo;
+`ifdef PPC_DATA32
+	logic [31:0] u_jwd;
+`else
 	logic [63:0] u_jwd0, u_jwd1;
+`endif
 	logic [7:0]  u_jbe0, u_jbe1;
 
 	wire e_pick_w = e_st == E_IDLE && !w_empty;
@@ -188,7 +248,11 @@ module ppc_cache #(parameter int KB = 32) (
 	assign mem_we = e_st == E_REQ && e_we;
 	assign mem_a = e_second ? e_a + 29'd1 : e_a;
 	assign mem_burst = e_own == J_DLINE || e_own == J_ILINE ? 8'd4 : 8'd1;
+`ifdef PPC_DATA32
+	assign mem_wd = {e_wd, e_wd};
+`else
 	assign mem_wd = e_second ? e_wd1 : e_wd0;
+`endif
 	assign mem_be = e_second ? e_be1 : e_be0;
 
 	wire line_beat = e_st == E_WAIT && mem_ready && (e_own == J_DLINE || e_own == J_ILINE);
@@ -211,13 +275,21 @@ module ppc_cache #(parameter int KB = 32) (
 					if (e_pick_w)
 					begin
 						e_own <= J_WORD; e_we <= 1'b1; e_two <= 1'b0; e_a <= w_a[w_rp];
+`ifdef PPC_DATA32
+						e_wd <= w_d[w_rp]; e_be0 <= w_be[w_rp];
+`else
 						e_wd0 <= w_d[w_rp]; e_be0 <= w_be[w_rp];
+`endif
 						e_st <= E_REQ;
 					end
 					else if (e_pick_u)
 					begin
 						e_own <= J_U; e_we <= u_jwe; e_two <= u_jtwo; e_a <= u_ja;
+`ifdef PPC_DATA32
+						e_wd <= u_jwd; e_be0 <= u_jbe0; e_be1 <= u_jbe1;
+`else
 						e_wd0 <= u_jwd0; e_wd1 <= u_jwd1; e_be0 <= u_jbe0; e_be1 <= u_jbe1;
+`endif
 						e_st <= E_REQ;
 					end
 					else if (e_pick_d)
@@ -245,7 +317,11 @@ module ppc_cache #(parameter int KB = 32) (
 						begin
 							if (e_two && !e_second)
 							begin
+`ifdef PPC_DATA32
+								e_rd0 <= mem_dout[63:40];
+`else
 								e_rd0 <= mem_dout;
+`endif
 								e_second <= 1'b1;
 								e_st <= E_REQ;
 							end
@@ -408,21 +484,38 @@ module ppc_cache #(parameter int KB = 32) (
 	logic        h_v, h_aph;            // an access taken waits; its address clock is this clock (it may be killed)
 	logic [31:0] p_pa;
 	logic [3:0]  p_size;
+`ifdef PPC_DATA32
+	logic [31:0] p_wdata;
+	logic [31:0] d_val;
+`else
 	logic [63:0] p_wdata;
 	logic [63:0] d_val;
+`endif
 	logic        p_we, p_cross, d_wr;   // d_wr: a store hit's write to the line, the clock after it's done
+`ifdef PPC_DATA32
+	logic [31:0] d_wd;                  // (a store's word: its bytes in their lanes, both halves)
+`else
 	logic [63:0] d_wd;
+`endif
 	logic [7:0]  d_be;
 	logic [DB:3] d_wa;
 	logic        dw1_v, dw1_way;        // d_wr's of the clock before (what a read then may not have seen)
 	logic [DB:3] dw1_wa;
+`ifdef PPC_DATA32
+	logic [31:0] dw1_wd;
+`else
 	logic [63:0] dw1_wd;
+`endif
 	logic [7:0]  dw1_be;
 	logic [1:0]  d_wn;
 	logic        p_mem, p_hit, x_n;
 	logic        d_cancel;              // the line read isn't to be kept: a write to it, or inv_all
 	logic        d_recent;              // its tag was written last clock
+`ifdef PPC_DATA32
+	logic [31:0]  p_win;
+`else
 	logic [127:0] p_win;
+`endif
 	logic [15:0]  p_be;
 
 	logic [DT-1:0] dt_q [2];
@@ -441,22 +534,49 @@ module ppc_cache #(parameter int KB = 32) (
 			dd_m[w] = dd_q[w];
 			for (int b = 0; b < 8; b++)
 			begin
+`ifdef PPC_DATA32
+				if (dw1_v && dw1_way == 1'(w) && dw1_wa == `DW(d_pa) && dw1_be[b]) dd_m[w][8 * b +: 8] = dw1_wd[8 * (b % 4) +: 8];
+				if (d_wr && p_way == 1'(w) && d_wa == `DW(d_pa) && d_be[b]) dd_m[w][8 * b +: 8] = d_wd[8 * (b % 4) +: 8];
+`else
 				if (dw1_v && dw1_way == 1'(w) && dw1_wa == `DW(d_pa) && dw1_be[b]) dd_m[w][8 * b +: 8] = dw1_wd[8 * b +: 8];
 				if (d_wr && p_way == 1'(w) && d_wa == `DW(d_pa) && d_be[b]) dd_m[w][8 * b +: 8] = d_wd[8 * b +: 8];
+`endif
 			end
 		end
 	wire [63:0]  dd_hq = d_hw[1] ? dd_m[1] : dd_m[0];
 	wire         d_cross = {1'b0, d_pa[2:0]} + d_size > 4'd8;
 	// one byte-picker for every load's answer: a hit's way (in the address clock), a line's beat, an uncached word or two
 	wire         rb_aph = d_st == D_APH;
+`ifdef PPC_DATA32
+	wire [63:0]  rb_w0 = rb_aph ? dd_hq : d_st == D_U && p_cross ? {e_rd0, 40'h0} : mem_dout;
+	wire [23:0]  rb_w1 = !rb_aph && p_cross ? mem_dout[23:0] : 24'h0;
+	wire [31:0]  rb = rd_bytes(rb_w0, rb_w1, rb_aph ? d_pa[2:0] : p_pa[2:0], rb_aph ? d_size : p_size);
+`else
 	wire [63:0]  rb_w0 = rb_aph ? dd_hq : d_st == D_U && p_cross ? e_rd0 : mem_dout;
 	wire [63:0]  rb_w1 = !rb_aph && p_cross ? mem_dout : 64'h0;
 	wire [63:0]  rb = rd_bytes(rb_w0, rb_w1, rb_aph ? d_pa[2:0] : p_pa[2:0], rb_aph ? d_size : p_size);
+`endif
 	assign store_a = d_st == D_APH && !d_kill && d_we && d_mem && d_writable;
 	assign x_inv = d_st == D_XINV;
 	assign x_idx = x_n ? (`IX(p_pa) + LW'(p_pa[4:3] == 2'd3)) & imask : `IX(p_pa);
 	assign x_store = x_inv || (d_st == D_DRAIN && p_we && p_mem);
 
+`ifdef PPC_DATA32
+	// the store's bytes, each in its lane of a word (its address mod 4), and their enables in the (16-byte) window (all 8 for
+	// dcbz's 8-byte stores, whose bytes are all 0: the word's four serve both halves)
+	logic [31:0]  s_win;
+	logic [15:0]  s_be;
+	always_comb
+	begin
+		s_win = 32'h0; s_be = 16'h0;
+		for (int j = 0; j < 4; j++)
+			if (4'(j) < d_size)
+				s_win[8 * ((32'(d_pa[2:0]) + j) % 4) +: 8] = d_wdata[8 * (32'(d_size) - 1 - j) +: 8];
+		for (int j = 0; j < 8; j++)
+			if (4'(j) < d_size)
+				s_be[32'(d_pa[2:0]) + j] = 1'b1;
+	end
+`else
 	// the store's bytes in the (16-byte) window
 	logic [127:0] s_win;
 	logic [15:0]  s_be;
@@ -470,20 +590,33 @@ module ppc_cache #(parameter int KB = 32) (
 				s_be[32'(d_pa[2:0]) + j] = 1'b1;
 			end
 	end
+`endif
 	wire d_push_ok = store_a && !d_cross && !w_full;
 	assign w_push = d_push_ok || (d_st == D_WFULL && !w_full);
 	assign w_pa = d_st == D_WFULL ? p_pa[31:3] : d_pa[31:3];
+`ifdef PPC_DATA32
+	assign w_pd = d_st == D_WFULL ? p_win : s_win;
+`else
 	assign w_pd = d_st == D_WFULL ? p_win[63:0] : s_win[63:0];
+`endif
 	assign w_pbe = d_st == D_WFULL ? p_be[7:0] : s_be[7:0];
 
 	assign pf = {d_st == D_DRAIN || d_st == D_U, d_st == D_WFULL, d_st == D_LINE, i_st != I_RUN};
 	assign d_valid = d_resp;
 	// (not as the sweep starts either: a line read in whose tag a snoop's write displaced still has the old one, inv_all)
 	assign d_rdy = !sw && !inv_all && (d_st == D_IDLE || d_st == D_APH);
+`ifdef PPC_DATA32
+	assign d_rdata = {32'h0, d_val};
+`else
 	assign d_rdata = d_val;
+`endif
 	assign d_rva = d_st == D_HRD ? d_pa[IB:3] : d_va[IB:3];   // (raw: masked where used)
 	wire d_take = d_req && d_rdy;
+`ifdef PPC_DATA32
+	assign u_pa = p_pa; assign u_we = p_we; assign u_size = p_size; assign u_wdata = {32'h0, p_wdata};
+`else
 	assign u_pa = p_pa; assign u_we = p_we; assign u_size = p_size; assign u_wdata = p_wdata;
+`endif
 	assign u_req = d_st == D_DRAIN && w_empty && !p_mem;
 
 	wire line_d = line_beat && e_own == J_DLINE;
@@ -500,7 +633,11 @@ module ppc_cache #(parameter int KB = 32) (
 		(
 			.clk,
 			.we((d_wr || line_d) && mine), .be(line_d ? 8'hff : d_be), .wa(line_d ? {`DX(p_pa), d_wn} : d_wa),
+`ifdef PPC_DATA32
+			.wd(line_d ? mem_dout : {d_wd, d_wd}), .ra(`DW(d_rva)), .rd(dd_q[w])
+`else
 			.wd(line_d ? mem_dout : d_wd), .ra(`DW(d_rva)), .rd(dd_q[w])
+`endif
 		);
 		wire          dt_we = sw || x_inv || sn_dw[w] || (d_fill && mine);
 		wire [DL-1:0] dt_wa = sw ? sw_n[DL-1:0] : x_inv ? (x_idx[DL-1:0] & dmask) : sn_dw[w] ? `DX(sn1_a) : `DX(p_pa);
@@ -565,20 +702,28 @@ module ppc_cache #(parameter int KB = 32) (
 					if (d_kill) d_st <= d_take ? D_APH : D_IDLE;
 					else
 					begin
+`ifdef PPC_DATA32
+						p_pa <= d_pa; p_we <= d_we; p_size <= d_size; p_wdata <= d_wdata[31:0]; p_cross <= d_cross;
+`else
 						p_pa <= d_pa; p_we <= d_we; p_size <= d_size; p_wdata <= d_wdata; p_cross <= d_cross;
+`endif
 						p_win <= s_win; p_be <= s_be;
 						p_mem <= d_mem; p_hit <= d_cacheable && d_hit; p_way <= d_hit ? d_hw[1] : lru_q;
 						if (!d_mem) d_busy(D_DRAIN);
 						else if (d_we)
 						begin
-							if (!d_writable) begin d_val <= 64'h0; d_done(); end
+							if (!d_writable) begin d_val <= `D0; d_done(); end
 							else if (d_cross) begin x_n <= 1'b0; d_busy(D_XINV); end
 							else if (w_full) d_busy(D_WFULL);
 							else
 							begin
 								d_wr <= d_cacheable && d_hit;
+`ifdef PPC_DATA32
+								d_wa <= `DW(d_pa); d_wd <= s_win; d_be <= s_be[7:0];
+`else
 								d_wa <= `DW(d_pa); d_wd <= s_win[63:0]; d_be <= s_be[7:0];
-								d_val <= 64'h0;
+`endif
+								d_val <= `D0;
 								d_done();
 							end
 						end
@@ -593,8 +738,12 @@ module ppc_cache #(parameter int KB = 32) (
 					if (!w_full)
 					begin
 						d_wr <= p_hit;
+`ifdef PPC_DATA32
+						d_wa <= `DW(p_pa); d_wd <= p_win; d_be <= p_be[7:0];
+`else
 						d_wa <= `DW(p_pa); d_wd <= p_win[63:0]; d_be <= p_be[7:0];
-						d_val <= 64'h0;
+`endif
+						d_val <= `D0;
 						d_finish();
 					end
 				D_LINE:
@@ -615,7 +764,11 @@ module ppc_cache #(parameter int KB = 32) (
 						if (p_mem)
 						begin
 							u_ja <= p_pa[31:3]; u_jwe <= p_we; u_jtwo <= p_cross;
+`ifdef PPC_DATA32
+							u_jwd <= p_win; u_jbe0 <= p_be[7:0]; u_jbe1 <= p_be[15:8];
+`else
 							u_jwd0 <= p_win[63:0]; u_jwd1 <= p_win[127:64]; u_jbe0 <= p_be[7:0]; u_jbe1 <= p_be[15:8];
+`endif
 							u_pend <= 1'b1;
 							d_st <= D_U;
 						end
@@ -624,17 +777,22 @@ module ppc_cache #(parameter int KB = 32) (
 				D_U:
 					if (u_done)
 					begin
-						d_val <= p_we ? 64'h0 : rb;
+						d_val <= p_we ? `D0 : rb;
 						d_finish();
 					end
 				D_STUB:
+`ifdef PPC_DATA32
+					if (u_ack) begin d_val <= u_rdata[31:0]; d_finish(); end
+`else
 					if (u_ack) begin d_val <= u_rdata; d_finish(); end
+`endif
 				default: d_st <= D_IDLE;
 			endcase
 		end
 	end
 `undef IX
 `undef IW
+`undef D0
 `undef DX
 `undef DW
 endmodule
