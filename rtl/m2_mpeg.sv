@@ -6,9 +6,27 @@
 //
 // The bitstream's read from memory a 32-byte line at a time into block RAM, then a word of it into registers (a clock), and a byte a clock
 // from that. The emulator takes a buffer 10 us after it's given one.
+//
+// MPEG_HPS: the pictures are decoded by a program on the MiSTer's ARM (m2mpegd; hps/m2mpegd/PROTOCOL.md, version 1), which this
+// unit tells what to decode through a block of DDR3 (at the bus's addresses 0x58000000 +: rtl/m2_boot.sv puts the block there):
+// - each register write's an entry in a log there, in order (a queue of 16: hold asks m2_boot to start no register access while
+//   it's nearly full);
+// - each byte of a picture's data (the bytes taken looking for the start code that ends it) goes into a ring there, a byte a write
+//   (the parser waits for it: eight to a write took about 90 registers more, and the build has no room);
+// - where a picture ends, an entry says so, after its last bytes; then the line the program writes (it's there, it's alive, the
+//   last picture it's done) is read, and if a program is there the end-of-picture interrupts wait, the line read again every 2^14
+//   clocks, until it says this picture's pixels are in memory, or it stops moving for 50 ms, or 120 ms have gone;
+// - a reset clears the log and that line, then writes the header; a count goes up there every 2^20 clocks.
+// The memory port then writes too (a word; never with a read).
 `default_nettype none
 
-module m2_mpeg (
+module m2_mpeg
+`ifdef MPEG_HPS
+#(
+	parameter int BEAT_LOG2 = 20        // the count for the ARM goes up every 2^BEAT_LOG2 clocks (a bench makes it less; 14 at least)
+)
+`endif
+(
 	input  logic        clk,
 	input  logic        rst,
 
@@ -22,6 +40,12 @@ module m2_mpeg (
 	// memory: a line of 4 words
 	output logic        m_rd,
 	output logic [31:3] m_a,
+`ifdef MPEG_HPS
+	output logic        m_we,           // a word of the block
+	output logic [63:0] m_wd,
+	output logic [7:0]  m_be,
+	output logic        hold,           // the log's queue is nearly full: no register access may start
+`endif
 	input  logic        m_busy,
 	input  logic        m_ready,
 	input  logic [63:0] m_dout
@@ -87,8 +111,190 @@ module m2_mpeg (
 	// (a B picture cropped vertically is done when the formatter's last row is out: the driver goes on from the DMA's address without the
 	// read-ahead, so the start code's left unread)
 	wire         cropped_b = parser[2:0] == 3'd3 && 8'(crop[6:0]) + 8'd1 < isize[15:8];
-	assign m_rd = ps == P_FETCH;
+	// a byte's taken this clock; it's a picture's; the picture ends with it
+	logic        ring_stall;
+	wire         take = ps == P_RUN && !ring_stall && cur_n != 32'h0 && taking && lb_hit && w_hit;
+	wire         ring_byte = take && ms == M_SLICES;
+	wire         pic_end = take && (ms == M_SLICES ? ends && cropped_b : ra_n == 2'd1);
+	wire         cfg_off = we && a == R_CONFIG && !wd[1];
+	wire         cfg_start = we && a == R_CONFIG && wd[1] && !cfg[1];
+`ifdef MPEG_HPS
+	localparam bit HPS = 1'b1;
+	localparam logic [63:0] HEADER = {32'h4D324D50, 16'd1, 8'd12, 8'd18};
+	localparam logic [31:0] MAGIC_PRESENT = 32'h4D504744;
+	localparam logic [8:0] POLLS_TIMEOUT = 9'd487;      // 120 ms of polls (2^14 clocks at 66.67 MHz: 0.246 ms)
+	localparam logic [7:0] POLLS_DEAD = 8'd202;         // 50 ms
+	// the ring: a picture's byte is written there as the parser takes it (the parser waits for the write), a byte a write
+	logic [23:0] sp;                    // the stream's position
+	logic [17:0] pl;                    // the picture's length so far (the ring holds no more)
+	logic        pl_clr;                // (the bitstream was started again before the last picture's entry was written: pl's cleared after it)
+	// the log's queue: [40] a picture's end (its contents are taken from pl and sp when it's written), [39:0] a register write's
+	(* ramstyle = "MLAB" *) logic [40:0] ef [0:15];
+	logic [40:0] ef_q;
+	logic [3:0]  ef_wp, ef_rp;
+	logic [4:0]  ef_cnt;
+	logic        ef_ok;                 // ef_q is the first entry
+	logic [12:0] en;                    // the next entry's number (and the reset clear's count before the first)
+	logic        pe_pend;               // a picture's ended: its entry's to be queued
+	logic        k1_out;                // ... and isn't written yet (no bitstream is taken meanwhile)
+	logic        rel_pend;              // its interrupts are still to come
+	// the reset's clear, the count
+	logic        c_run;
+	logic [BEAT_LOG2-1:0] bt;
+	logic [31:0] beat_n;                // (32 bits: the program takes a count that goes down for a reset)
+	logic        beat_pend;
+	typedef enum logic [2:0] { X_IDLE, X_CLR, X_RING, X_ENT, X_BEAT } xst_t;
+	xst_t        xs;
+	// the wait for the program
+	typedef enum logic [1:0] { H_IDLE, H_RD, H_GET, H_EVAL } hst_t;
+	hst_t        h_st;
+	logic        holding, h_first, h_due, mg_ok, dn_ok, dead_v;
+	logic [12:0] h_seq;
+	logic [1:0]  h_n;
+	logic [15:0] hb, hb_last;           // (the low half of its count: it moves by one every 5 ms)
+	logic [8:0]  to_n;
+	logic [7:0]  hb_n;
+	wire         hb_dead = hb == hb_last && hb_n == POLLS_DEAD;
+	// (a program that stopped moving is known by the count it stopped at, the last one seen)
+	wire         h_rel = h_st == H_EVAL && holding &&
+		(!mg_ok || dn_ok || (h_first ? dead_v && hb == hb_last : hb_dead || to_n == POLLS_TIMEOUT));
+
+	// the port: the bitstream's read first, then the line's, then a write
+	wire         blk_rd = h_st == H_RD && ps != P_FETCH && ps != P_FILL;
+	wire         p_rd = ps == P_FETCH && h_st != H_GET;
+	wire         ring_req = ps == P_RUN && cur_n != 32'h0 && ms == M_SLICES && lb_hit && w_hit;    // a picture's byte, ready
+	logic [15:0] x_a;
+	logic [63:0] x_d;
+	logic [7:0]  x_be;
+	always_comb
+	begin
+		x_a = 16'h0200 + 16'(en[11:0]); x_be = 8'hff;
+		x_d = {1'b1, 1'b0, ef_q[40], en, ef_q[40] ? {6'h00, pl, sp} : {8'h00, ef_q[39:0]}};
+		case (xs)
+			X_CLR:
+			begin
+				x_d = en == 13'h1005 ? HEADER : 64'h0;
+				x_a = !en[12] ? 16'h0200 + 16'(en[11:0]) : !en[2] ? 16'd8 + 16'(en[1:0]) : en[0] ? 16'd0 : 16'd1;
+			end
+			X_RING: begin x_a = 16'h2000 + 16'(sp[17:3]); x_d = {8{byte_in}}; x_be = 8'h01 << sp[2:0]; end
+			X_BEAT: begin x_a = 16'd1; x_d = {32'h0, beat_n}; end
+			default: ;
+		endcase
+	end
+	assign m_rd = p_rd || blk_rd;
+	assign m_we = !m_rd && (xs == X_RING ? ring_req : xs != X_IDLE);
+	assign m_a = p_rd ? {cur_a[31:5], 2'b00} : {5'b01011, 8'h00, blk_rd ? 16'd8 : x_a};
+	assign m_wd = x_d;
+	assign m_be = x_be;
+	assign hold = ef_cnt >= 5'd11;
+	wire         x_tk = m_we && !m_busy;
+	assign ring_stall = ring_req && !(xs == X_RING && x_tk);
+	wire         ef_push = we || pe_pend;
+	wire         ef_pop = xs == X_ENT && x_tk;
+	always_ff @(posedge clk)
+	begin
+		if (ef_push) ef[ef_wp] <= we ? {1'b0, a, wd} : {1'b1, 40'h0};
+		ef_q <= ef[ef_rp];
+	end
+	always_ff @(posedge clk)
+		if (rst)
+		begin
+			sp <= 24'h0; pl <= 18'h0; pl_clr <= 1'b0;
+			ef_wp <= 4'd0; ef_rp <= 4'd0; ef_cnt <= 5'd0; ef_ok <= 1'b0; en <= 13'd0; pe_pend <= 1'b0; k1_out <= 1'b0; rel_pend <= 1'b0;
+			c_run <= 1'b1; bt <= '0; beat_n <= 32'd0; beat_pend <= 1'b0; xs <= X_IDLE;
+			h_st <= H_IDLE; holding <= 1'b0; h_first <= 1'b0; h_due <= 1'b0; dead_v <= 1'b0;
+		end
+		else
+		begin
+			bt <= bt + 1'b1;
+			if (&bt) begin beat_n <= beat_n + 32'd1; beat_pend <= 1'b1; end
+
+			if (ring_byte) begin sp <= sp + 24'd1; pl <= pl + 18'd1; end
+			if (cfg_start) begin if (k1_out) pl_clr <= 1'b1; else pl <= 18'h0; end
+
+			// a picture's end: its entry queued the clock after (a register write goes first)
+			if (pic_end) begin pe_pend <= 1'b1; k1_out <= 1'b1; rel_pend <= 1'b1; end
+			if (pe_pend && !we) pe_pend <= 1'b0;
+			if (ef_push) ef_wp <= ef_wp + 4'd1;
+			if (ef_pop) ef_rp <= ef_rp + 4'd1;
+			ef_cnt <= ef_cnt + 5'(ef_push) - 5'(ef_pop);
+			ef_ok <= ef_cnt != 5'd0 && !ef_pop;
+
+			// the writes, one at a time: the clear, an entry, a picture's byte, the count (a picture's bytes are all written when
+			// its end is queued, so its entry comes after them)
+			case (xs)
+				X_IDLE:
+					if (c_run) xs <= X_CLR;
+					else if (ef_ok) xs <= X_ENT;
+					else if (ring_req) xs <= X_RING;
+					else if (beat_pend) xs <= X_BEAT;
+				X_CLR:
+					if (x_tk)
+					begin
+						en <= en + 13'd1;
+						if (en == 13'h1005) begin c_run <= 1'b0; en <= 13'd0; xs <= X_IDLE; end
+					end
+				X_RING: if (!ring_req || ef_ok || beat_pend) xs <= X_IDLE;       // (byte after byte while nothing else waits)
+				X_ENT:
+					if (x_tk)
+					begin
+						en <= en + 13'd1;
+						if (ef_q[40])
+						begin
+							k1_out <= 1'b0;
+							if (pl_clr) begin pl <= 18'h0; pl_clr <= 1'b0; end
+							if (rel_pend) begin holding <= 1'b1; h_first <= 1'b1; h_seq <= en; end
+						end
+						xs <= X_IDLE;
+					end
+				X_BEAT: if (x_tk) begin beat_pend <= 1'b0; xs <= X_IDLE; end
+				default: xs <= X_IDLE;
+			endcase
+
+			// the program's line: read at once, then every 2^14 clocks while the picture waits
+			if (holding && bt[13:0] == 14'h3fff) h_due <= 1'b1;
+			case (h_st)
+				H_IDLE: if (holding && (h_first || h_due)) begin h_due <= 1'b0; h_st <= H_RD; end
+				H_RD: if (blk_rd && !m_busy) begin h_n <= 2'd0; h_st <= H_GET; end
+				H_GET:
+					if (m_ready)
+					begin
+						h_n <= h_n + 2'd1;
+						if (h_n == 2'd0) begin mg_ok <= m_dout[63:32] == MAGIC_PRESENT; hb <= m_dout[15:0]; end
+						if (h_n == 2'd1) dn_ok <= m_dout[31] && m_dout[30:13] == 18'h0 && m_dout[12:0] == h_seq;
+						if (h_n == 2'd3) h_st <= H_EVAL;
+					end
+				default:
+				begin
+					h_st <= H_IDLE;
+					if (holding && !h_rel)
+					begin
+						h_first <= 1'b0;
+						if (h_first) begin hb_last <= hb; hb_n <= 8'd0; to_n <= 9'd0; dead_v <= 1'b0; end
+						else
+						begin
+							to_n <= to_n + 9'd1;
+							if (hb != hb_last) begin hb_last <= hb; hb_n <= 8'd0; end
+							else hb_n <= hb_n + 8'd1;
+						end
+					end
+					// (a program that's stopped moving: pictures don't wait for it again until it moves)
+					if (holding && !h_first && mg_ok && !dn_ok && hb_dead) dead_v <= 1'b1;
+				end
+			endcase
+			if (h_rel || cfg_off || cfg_start) begin holding <= 1'b0; rel_pend <= 1'b0; end
+		end
+`else
+	localparam bit HPS = 1'b0;
+	assign ring_stall = 1'b0;
+	wire         k1_out = 1'b0, h_rel = 1'b0;
+	wire         p_rd = ps == P_FETCH;
+	// verilator lint_off UNUSEDSIGNAL
+	wire         unused_hps = &{1'b0, ring_byte, pic_end, cfg_off, cfg_start};
+	// verilator lint_on UNUSEDSIGNAL
+	assign m_rd = p_rd;
 	assign m_a = {cur_a[31:5], 2'b00};
+`endif
 
 	always_ff @(posedge clk)
 		if (rst)
@@ -101,7 +307,7 @@ module m2_mpeg (
 		else
 		begin
 			case (ps)
-				P_IDLE: if (kick) begin kick <= 1'b0; wait_n <= 10'd666; ps <= P_WAIT; end
+				P_IDLE: if (kick && !k1_out) begin kick <= 1'b0; wait_n <= 10'd666; ps <= P_WAIT; end
 				P_WAIT: if (wait_n == 10'd0) ps <= P_TAKE; else wait_n <= wait_n - 10'd1;
 				P_TAKE:
 				begin
@@ -109,7 +315,8 @@ module m2_mpeg (
 					ps <= P_RUN;
 				end
 				P_RUN:
-					if (cur_n != 32'h0 && taking)
+					if (ring_stall) ;       // (the ring's word waits to be written)
+					else if (cur_n != 32'h0 && taking)
 					begin
 						if (!lb_hit) ps <= P_FETCH;
 						else if (!w_hit) ps <= P_WORD;
@@ -126,7 +333,7 @@ module m2_mpeg (
 									begin
 										if (used + 32'd1 >= 32'd4) begin cur_a <= cur_a - 32'd3; cur_n <= cur_n + 32'd3; used <= used - 32'd3; end
 										ms <= M_DONE; ev <= 3'd0; ra_n <= 2'd0;
-										int_st <= int_st | I_DONE;
+										if (!HPS) int_st <= int_st | I_DONE;
 										ps <= P_IDLE;
 									end
 									else begin ms <= M_READAHEAD; ra_n <= 2'd0; end
@@ -139,7 +346,7 @@ module m2_mpeg (
 								if (ra_n == 2'd1)
 								begin
 									ms <= M_DONE; ev <= 3'd0;
-									int_st <= int_st | I_DONE;
+									if (!HPS) int_st <= int_st | I_DONE;
 									ps <= P_IDLE;
 								end
 							end
@@ -151,7 +358,7 @@ module m2_mpeg (
 						if (cur_n == 32'h0) int_st <= int_st | I_VBS_DMA;
 						ps <= P_IDLE;
 					end
-				P_FETCH: if (!m_busy) begin lb_v <= 1'b0; w_v <= 1'b0; lb_a <= cur_a[31:5]; lb_n <= 2'd0; ps <= P_FILL; end
+				P_FETCH: if (p_rd && !m_busy) begin lb_v <= 1'b0; w_v <= 1'b0; lb_a <= cur_a[31:5]; lb_n <= 2'd0; ps <= P_FILL; end
 				P_FILL:
 					if (m_ready)
 					begin
@@ -161,6 +368,8 @@ module m2_mpeg (
 				P_WORD: begin w <= lb_q; w_a <= cur_a[31:3]; w_v <= 1'b1; ps <= P_RUN; end   // (lb_q: the word at cur_a, read last clock)
 				default: ps <= P_IDLE;
 			endcase
+
+			if (h_rel) int_st <= int_st | I_DONE;     // (MPEG_HPS: the picture's pixels are in memory, or nothing will put them there)
 
 			// the registers
 			if (we)
@@ -178,7 +387,7 @@ module m2_mpeg (
 						else if (wd[4] && ms == M_DONE && ev != 3'd7) ev <= ev + 3'd1;
 					end
 					R_INTENABLE:    int_en <= wd;
-					R_INTSTATUS:    int_st <= int_st & ~wd;
+					R_INTSTATUS:    int_st <= (int_st & ~wd) | (h_rel ? I_DONE : 32'h0);    // (MPEG_HPS: a picture let go in this clock isn't lost)
 					R_VBSCURADDR:   cur_a <= wd;
 					R_VBSCURLEN:    cur_n <= wd;
 					R_VBSNEXTADDR:  nxt_a <= wd;

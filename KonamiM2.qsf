@@ -99,6 +99,9 @@ set_global_assignment -name VERILOG_MACRO "PPC_REGS_MLAB=1"
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "CD_STREAM=1"
 #set_global_assignment -name VERILOG_MACRO "MPEG_CTL=1"
+# (with MPEG_CTL, not in a release yet: the videos' pictures decoded by a program on the MiSTer's ARM, m2mpegd, through a block of DDR3 at
+# 0x30400000: rtl/m2_mpeg.sv. Bench only so far: sim/mpeg/run_hps.sh)
+#set_global_assignment -name VERILOG_MACRO "MPEG_HPS=1"
 #set_global_assignment -name VERILOG_MACRO "NO_GUN_BOARD=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_REGS_BRAM=1"
 #set_global_assignment -name VERILOG_MACRO "TE_COMPRESSED=1"

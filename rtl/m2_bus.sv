@@ -41,6 +41,11 @@ module m2_bus (
 	// verilator lint_on UNUSEDSIGNAL
 	output logic        mpg_busy,
 	output logic        mpg_ready,
+`ifdef MPEG_HPS
+	input  logic        mpg_we,         // (one word, never with its read: the block it shares with the ARM, MPEG_HPS)
+	input  logic [63:0] mpg_wd,
+	input  logic [7:0]  mpg_be,
+`endif
 
 	input  logic        vdu_rd,
 	input  logic        vdu_four,       // 4 words, else one
@@ -85,11 +90,20 @@ module m2_bus (
 `ifdef MPEG_CTL
 	wire         m7_rd = mpg_rd;
 	wire [31:3]  m7_a = mpg_a;
-	wire [7:0]   m7_burst = 8'd4;
+	wire [7:0]   m7_burst = mpg_rd ? 8'd4 : 8'd1;
 `else
 	wire         m7_rd = ymz_rd;
 	wire [31:3]  m7_a = ymz_a;
 	wire [7:0]   m7_burst = 8'd1;
+`endif
+`ifdef MPEG_HPS
+	wire         m7_we = mpg_we;
+	wire [63:0]  m7_wd = mpg_wd;
+	wire [7:0]   m7_be = mpg_be;
+`else
+	wire         m7_we = 1'b0;
+	wire [63:0]  m7_wd = 64'h0;
+	wire [7:0]   m7_be = 8'h00;
 `endif
 	logic        last_c;                // the cache that went last
 	logic        io_turn;               // a cache went last: the others', if they want it
@@ -100,11 +114,11 @@ module m2_bus (
 	// (the Triangle Engine's texture load asks ahead: it leaves room in the list of reads out)
 	logic        q_room;
 	wire         te_rd_ok = te_rd && q_room;
-	wire         wio = vdu_rd || te_rd_ok || te_we || dma_rd || dma_we || ata_rd || dsp_rd || m7_rd;
+	wire         wio = vdu_rd || te_rd_ok || te_we || dma_rd || dma_we || ata_rd || dsp_rd || m7_rd || m7_we;
 	always_comb
 	begin
 		any = !hold;
-		if (wio && (io_turn || !(w0 || w1))) who = vdu_rd ? M_VDU : (dma_rd || dma_we) ? M_DMA : ata_rd ? M_ATA : dsp_rd ? M_DSP : m7_rd ? M_7 : M_TE;
+		if (wio && (io_turn || !(w0 || w1))) who = vdu_rd ? M_VDU : (dma_rd || dma_we) ? M_DMA : ata_rd ? M_ATA : dsp_rd ? M_DSP : (m7_rd || m7_we) ? M_7 : M_TE;
 		else if (w0 && (!w1 || last_c)) who = 3'd0;
 		else if (w1) who = 3'd1;
 		else begin who = 3'd0; any = 1'b0; end
@@ -133,7 +147,7 @@ module m2_bus (
 			M_ATA: begin g_a = ata_a; rd = 1'b1; we = 1'b0; g_burst = 8'd4; end
 			M_VDU: begin g_a = vdu_a; rd = 1'b1; we = 1'b0; g_burst = vdu_four ? 8'd4 : 8'd1; end
 			M_DSP: begin g_a = dsp_a; rd = 1'b1; we = 1'b0; g_burst = 8'd1; end
-			M_7: begin g_a = m7_a; rd = 1'b1; we = 1'b0; g_burst = m7_burst; end
+			M_7: begin g_a = m7_a; rd = m7_rd; we = m7_we; g_burst = m7_burst; g_wd = m7_wd; g_be = m7_be; end
 			M_TE: begin g_a = te_a; rd = te_rd; we = te_we; g_burst = te_rd ? 8'd4 : 8'd1; g_wd = te_wd; g_be = te_be; end
 			default: ;
 		endcase

@@ -312,6 +312,109 @@ int main(int argc, char **argv)
 	printf("%s: %zu instructions in %llu clocks (%.2f clocks an instruction), last PC %08X; status: pc %08X count %u exc %u/%u, %u register accesses, last %08X %s %08X\n",
 		bad ? "FAIL" : "PASS", std::min(k, limit), (unsigned long long)(cyc - start), double(cyc - start) / double(std::max<size_t>(k, 1)),
 		k ? pcs[std::min(k, limit) - 1] : 0, t.st_pc[0], t.st_count[0], t.st_exc[0], t.st_nexc[0], t.st_ndev, t.st_dev_a, t.st_dev_w ? "<-" : "->", t.st_dev_d);
+#ifdef MPEG_HPS_CHECK
+	{
+		// a build with MPEG_CTL and MPEG_HPS (-CFLAGS -DMPEG_HPS_CHECK): the block the MPEG unit shares with the ARM, at DDR3 0x30400000,
+		// as its reset leaves it through the bus: the header, the count, the line the ARM writes and the log clear
+		const uint32_t mb = 0x00400000u >> 3;
+		int nz = 0;
+		for (uint32_t i = 0; i < 4096; i++) if (ddr[mb + 0x200 + i]) nz++;
+		for (uint32_t i = 8; i < 12; i++) if (ddr[mb + i]) nz++;
+		bool ok = ddr[mb] == 0x4D324D5000010C12ull && nz == 0 && ddr[mb + 1] <= (cyc >> 20) && ddr[mb + 1] + 1 >= ((cyc - ldcyc) >> 20);
+		printf("MPEG block: header %016llX, count %llu after %llu clocks, %d words of the log and the ARM's line not clear: %s\n", (unsigned long long)ddr[mb],
+			(unsigned long long)ddr[mb + 1], (unsigned long long)cyc, nz, ok ? "as it should be" : "WRONG");
+		if (!ok) bad = true;
+	}
+#endif
+#ifdef MPEG_HPS_TEST
+	// A build with MPEG_CTL and MPEG_HPS, run on a test ROM (made outside this repo) with
+	// -n 0 -more N: the CPU gives the MPEG unit one picture after another (its data put in RAM here) and waits for each one's
+	// end-of-picture bit; this bench is the ARM's side, in the DDR3 block at 0x30400000. So the unit's log, ring, line read and hold
+	// go through the real register path, m2_bus and m2_boot. Checked: every log entry against the CPU's writes (seen at the
+	// register access itself) and the pictures' ends; each picture's bytes in the ring; the first two pictures let go at once (no
+	// "MPGD" yet); the later ones only after this bench has written their done word (3 ms after the end entry), and within a
+	// poll of it.
+	const uint32_t mt_mb = 0x00400000u >> 3;
+	const int MT_L = 3005, MT_TOT = 3016, MT_NP = 6;
+	auto mt_byte = [&](int pic, int j) -> uint8_t {
+		if (j < MT_L - 4) return uint8_t(1 + (uint32_t(pic * 7919 + j) * 2654435761u >> 16) % 255);
+		if (j < MT_L) return j == MT_L - 2 ? 1 : 0;          // 00 00 01 00: the start code that ends the picture
+		return uint8_t(0xa0 + j % 16);
+	};
+	for (int i = 0; i < MT_NP + 4; i++)
+		for (int j = 0; j < MT_TOT; j++)
+		{
+			uint32_t a = 0x01100000u + uint32_t(i) * 0x2000 + uint32_t(j);
+			ddr[a / 8] = (ddr[a / 8] & ~(0xffull << 8 * (a % 8))) | uint64_t(mt_byte(i, j)) << 8 * (a % 8);
+		}
+	struct mt_ent { uint32_t kind; uint64_t payload; };
+	std::deque<mt_ent> mt_exp;
+	uint32_t mt_nd = t.st_ndev, mt_nlog = 0, mt_pos = 0, mt_seq = 0, mt_hb = 0;
+	int mt_ends = 0, mt_done_pics = 0, mt_bad = 0;
+	bool mt_attached = false, mt_end_open = false;
+	uint64_t mt_end_clock = 0, mt_done_at = 0, mt_done_clock = 0, mt_once_max = 0, mt_held_min = ~0ull, mt_held_max = 0, mt_after_done_max = 0;
+	auto mt_clock = [&]() {
+		if (t.st_ndev != mt_nd)
+		{
+			mt_nd = t.st_ndev;
+			if (t.st_dev_w && (t.st_dev_a >> 16) == 0x0008)
+			{
+				mt_exp.push_back({ 0, uint64_t((t.st_dev_a >> 2) & 0xff) << 32 | t.st_dev_d });
+				if (t.st_dev_a == 0x00080004 && t.st_dev_d == 2)
+				{
+					mt_pos = (mt_pos + MT_L) & 0xffffff;
+					mt_exp.push_back({ 1, uint64_t(MT_L) << 24 | mt_pos });
+				}
+				if (t.st_dev_a == 0x0008000c && (t.st_dev_d & 2) && t.st_dev_d != 0xff)     // (not the program's clear of all the bits)
+				{
+					// the CPU has seen the end-of-picture bit
+					if (!mt_end_open) { printf("MPEG test: picture %d's end-of-picture bit before its end entry\n", mt_done_pics); mt_bad++; }
+					else if (!mt_attached)
+					{
+						mt_once_max = std::max(mt_once_max, cyc - mt_end_clock);
+						if (cyc - mt_end_clock > 3000) { printf("MPEG test: picture %d, no ARM side: let go after %llu clocks\n", mt_done_pics, (unsigned long long)(cyc - mt_end_clock)); mt_bad++; }
+					}
+					else if (!mt_done_clock) { printf("MPEG test: picture %d let go before its done word (%llu clocks after its end entry)\n", mt_done_pics, (unsigned long long)(cyc - mt_end_clock)); mt_bad++; }
+					else
+					{
+						mt_held_min = std::min(mt_held_min, cyc - mt_end_clock); mt_held_max = std::max(mt_held_max, cyc - mt_end_clock);
+						mt_after_done_max = std::max(mt_after_done_max, cyc - mt_done_clock);
+						if (cyc - mt_done_clock > 16384 + 4000) { printf("MPEG test: picture %d let go %llu clocks after its done word\n", mt_done_pics, (unsigned long long)(cyc - mt_done_clock)); mt_bad++; }
+					}
+					mt_end_open = false; mt_done_clock = 0;
+					mt_done_pics++;
+					// (from the third picture on an ARM side is there)
+					if (mt_done_pics == 2) { mt_attached = true; ddr[mt_mb + 8] = 0x4D50474400000000ull | ++mt_hb; }
+				}
+			}
+		}
+		if (mt_attached && cyc % 300000 == 0) ddr[mt_mb + 8] = 0x4D50474400000000ull | ++mt_hb;
+		for (uint64_t e; (e = ddr[mt_mb + 0x200 + (mt_nlog & 4095)]) >> 63 && ((e >> 48) & 0x1fff) == mt_nlog; mt_nlog++)
+		{
+			uint32_t kind = uint32_t(e >> 61) & 3;
+			uint64_t payload = e & 0xffffffffffffull;
+			if (mt_exp.empty() || mt_exp.front().kind != kind || mt_exp.front().payload != payload)
+			{
+				printf("MPEG test: entry %u is kind %u %012llX, expected %s %012llX\n", mt_nlog, kind, (unsigned long long)payload, mt_exp.empty() ? "none" : mt_exp.front().kind ? "kind 1" : "kind 0",
+					(unsigned long long)(mt_exp.empty() ? 0 : mt_exp.front().payload));
+				mt_bad++;
+			}
+			if (!mt_exp.empty()) mt_exp.pop_front();
+			if (kind == 1)
+			{
+				uint32_t pos = uint32_t(payload) & 0xffffff;
+				for (int i = 0; i < MT_L; i++)
+				{
+					uint32_t a = 0x10000u + ((pos - MT_L + i) & 0x3ffff);
+					if (uint8_t(ddr[mt_mb + a / 8] >> 8 * (a % 8)) != mt_byte(mt_ends, i)) { printf("MPEG test: picture %d's ring byte %d isn't its data\n", mt_ends, i); mt_bad++; break; }
+				}
+				mt_ends++; mt_seq = mt_nlog; mt_end_clock = cyc; mt_end_open = true;
+				if (mt_attached) mt_done_at = cyc + 200000;
+			}
+		}
+		if (mt_done_at && cyc >= mt_done_at) { ddr[mt_mb + 9] = 0x80000000ull | mt_seq; mt_done_clock = cyc; mt_done_at = 0; }
+	};
+#endif
 	if (!bad && more)
 	{
 		// on past the trace: where it goes
@@ -321,6 +424,9 @@ int main(int argc, char **argv)
 		for (uint64_t c = 0; c < more; c++)
 		{
 			clock();
+#ifdef MPEG_HPS_TEST
+			mt_clock();
+#endif
 			if (from && t.retire)
 			{
 				if (!fpc && (t.ipc_o == from || (t.retire2 && t.ipc0_o == from))) fpc = fopen("pcs.txt", "w");
@@ -345,6 +451,16 @@ int main(int argc, char **argv)
 					t.st_pc[0], t.st_count[0], t.st_nexc[0], t.st_exc[0], t.st_pc[1], t.st_count[1], t.st_nexc[1], t.st_exc[1], t.st_ndev, (unsigned long long)lists);
 		}
 	}
+#ifdef MPEG_HPS_TEST
+	{
+		bool ok = mt_bad == 0 && mt_done_pics >= MT_NP && ddr[mt_mb] == 0x4D324D5000010C12ull;
+		printf("MPEG test: %d pictures given and let go, %u log entries (%zu of the CPU's writes not in the log yet), header %016llX\n", mt_done_pics, mt_nlog, mt_exp.size(),
+			(unsigned long long)ddr[mt_mb]);
+		printf("MPEG test: with no ARM side let go within %llu clocks of the end entry; with one, %llu-%llu clocks after it (the done word comes 200000 after), at most %llu after the done word: %s\n",
+			(unsigned long long)mt_once_max, (unsigned long long)mt_held_min, (unsigned long long)mt_held_max, (unsigned long long)mt_after_done_max, ok ? "PASS" : "FAIL");
+		if (!ok) bad = true;
+	}
+#endif
 	if (fpc) fclose(fpc);
 	if (fata) fclose(fata);
 	return bad ? 1 : 0;
