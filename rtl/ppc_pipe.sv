@@ -40,6 +40,7 @@
 // run in X one access at a time with M empty (SEQ); divw in DIV. The instructions that change fetch translation
 // (mtmsr, mtsr, IBATs, HID0, esa / dsa, rfi, isync) and a store to an instruction already fetched refetch after them.
 // TGPR: r0-r3 are physical 32-35 while MSR[TGPR] (tsel), so taking a TLB-miss exception moves nothing.
+// The segment registers' words are in a small RAM in the logic (xr_mem), read unregistered in the clock that uses them.
 //
 // Bench: retire is a clock when an instruction (or exception) is done, in order (retire2: two, an access then the
 // instruction after it); the registers out are the
@@ -138,7 +139,13 @@ module ppc_pipe #(
 	logic [31:0] msr, fpscr;
 	logic [31:0] pc;                    // the next instruction in program order (after what X has taken)
 	logic [1:0]  fmode;                 // the float unit's rounding mode (see MTFSB0)
-	logic [31:0] sr [0:15];
+	// the segment registers: their words in a small RAM (xr_mem, in the logic's memory, read unregistered: X reads it as it
+	// read registers, in the same clock), written by mtsr / mtsrin and the bench (xr_we); their N bits, which the fetch's
+	// translation reads every clock, in registers too (sr_n)
+	(* ramstyle = "MLAB, no_rw_check" *) logic [31:0] xr_mem [0:15];
+	logic        xr_we;
+	logic [3:0]  xr_wa, xr_ra;
+	logic [31:0] xr_wd, xr_rd;
 	logic [31:0] dec;
 	logic [63:0] tb;
 	logic        reserved;
@@ -246,8 +253,7 @@ module ppc_pipe #(
 
 	// BAT / protection-only translation (MAME's ppccom_translate_address_internal for a 602); type 0 read, 1 write, 2 fetch
 	typedef struct packed { logic ok; logic prot; logic [31:0] pa; } tr_t;
-	logic [15:0] sr_n;                  // the SRs' N bits (Quartus 17 crashes reading sr[] in translate)
-	always_comb for (int i = 0; i < 16; i++) sr_n[i] = sr[i][28];
+	logic [15:0] sr_n;                  // the SRs' N bits, written with xr_mem (Quartus 17 crashed reading a 2-D array in translate)
 	function automatic tr_t translate(input logic [31:0] a, input logic [1:0] typ);
 		tr_t t;
 		logic transpriv, hit;
@@ -1123,6 +1129,30 @@ module ppc_pipe #(
 		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
 	end
 
+	// the segment registers (xr_mem). Written by X's mtsr / mtsrin as it takes them, or the bench's load (while rst, or held;
+	// the clock's block's dbg_write conditions); read by X's mfsr (op's SR) and mfsrin (rB's), and by M's address clock
+	// when it faults for a data TLB miss (dfault: the segment's VSID; X takes nothing then)
+	always_comb
+	begin
+		xr_we = 1'b0; xr_wa = xo == 10'h0d2 ? op[19:16] : rb_v[31:28]; xr_wd = rs_v;
+		if (rst)
+		begin
+			if (rst_q && dbg_we && dbg_idx >= 11'd80 && dbg_idx < 11'd96)
+			begin
+				xr_we = 1'b1; xr_wa = dbg_idx[3:0]; xr_wd = dbg_val[31:0];
+			end
+		end
+		else if (x_exec && opc == 6'h1f && (xo == 10'h0d2 || xo == 10'h0f2)) xr_we = 1'b1;              // MTSR, MTSRIN
+		else if (xstate == XS_RUN && !x_cons && hold_flush && dbg_we && dbg_idx >= 11'd80 && dbg_idx < 11'd96)
+		begin
+			xr_we = 1'b1; xr_wa = dbg_idx[3:0]; xr_wd = dbg_val[31:0];
+		end
+		xr_ra = a_flt ? a_va[31:28] : pd.r.ms == MS_SRIN ? rb_v[31:28] : op[19:16];
+	end
+	always_ff @(posedge clk) if (xr_we) xr_mem[xr_wa] <= xr_wd;
+	assign xr_rd = xr_mem[xr_ra];
+	always_ff @(posedge clk) if (xr_we) sr_n[xr_wa] <= xr_wd[28];
+
 	// X's GPR result, from units whose choices pd has (rdec_t): gw_v takes it with no decode in front, and CR0 its zero
 	function automatic logic [31:0] spr_rv(input logic [5:0] k);
 		case (k)
@@ -1161,8 +1191,7 @@ module ppc_pipe #(
 			MS_CR:    ms_v = get_cr();
 			MS_MSR:   ms_v = msr;
 			MS_SPR:   ms_v = spr_rv(pd.r.spr);
-			MS_SR:    ms_v = sr[op[19:16]];
-			default:  ms_v = sr[rb_v[31:28]];
+			default:  ms_v = xr_rd;                 // MS_SR, MS_SRIN
 		endcase
 		case (pd.r.rs)
 			R_ADD:   x_res = ad_s[31:0];
@@ -1533,7 +1562,7 @@ module ppc_pipe #(
 		end
 		else
 		begin
-			seg = sr[ea[31:28]][23:0];
+			seg = xr_rd[23:0];                                  // (xr_mem's at ea's SR: xr_ra)
 			hashbase = sprv[X_SDR1] & 32'hffff0000;
 			hashmask = {7'h0, sprv[X_SDR1][8:0], 16'hffff};
 			hash = {13'h0, seg[18:0]} ^ {16'h0, ea[27:12]};
@@ -1819,7 +1848,7 @@ module ppc_pipe #(
 		else if (dbg_idx == 70) tb[31:0] <= dbg_val[31:0];
 		else if (dbg_idx == 71) tb[63:32] <= dbg_val[31:0];
 		else if (dbg_idx >= 72 && dbg_idx < 76) wgp(tsel ? {4'b0000, dbg_idx[1:0]} : {4'b1000, dbg_idx[1:0]}, dbg_val[31:0]);
-		else if (dbg_idx >= 80 && dbg_idx < 96) sr[dbg_idx[3:0]] <= dbg_val[31:0];
+		else if (dbg_idx >= 80 && dbg_idx < 96) ;                                   // (the SRs: xr_we)
 		else if (dbg_idx >= 1024)
 		begin
 			int k;
@@ -2093,8 +2122,7 @@ module ppc_pipe #(
 				wg(rD, mfspr_v(sprn));
 				timer_q <= sprn == 10'd22 || sprn == 10'd268 || sprn == 10'd269;
 			end
-			10'h253: wg(rD, sr[op[19:16]]);                                                        // MFSR
-			10'h293: wg(rD, sr[b[31:28]]);                                                         // MFSRIN
+			10'h253, 10'h293: wg(rD, xr_rd);                                                       // MFSR, MFSRIN (xr_ra)
 			10'h173:                                                                               // MFTB
 				if (sprn == 10'd268 || sprn == 10'd269) begin wg(rD, mfspr_v(sprn)); timer_q <= 1'b1; end
 				else raise(EX_PROGRAM, 32'h80000);
@@ -2107,8 +2135,7 @@ module ppc_pipe #(
 				if (msr[17] != s[17]) tsel <= !tsel;
 			end
 			10'h1d3: mtspr(sprn, s);                                                               // MTSPR
-			10'h0d2: sr[op[19:16]] <= s;                                                           // MTSR
-			10'h0f2: sr[b[31:28]] <= s;                                                            // MTSRIN
+			10'h0d2, 10'h0f2: ;                                                                    // MTSR, MTSRIN (xr_we)
 			10'h200:                                                                               // MCRXR
 			begin
 				crf[op[25:23]] <= {xerso, xer[30:28]};
