@@ -1467,12 +1467,24 @@ module ppc_pipe #(
 		endcase
 		if (rst) gw_v_d = dbg_val[31:0];
 	end
-	ppc_regs #(.W(32), .AW(6), .NR(3)) gregs (
+	// (PPC_REGS_MLAB: both files in the logic's small memories, for block RAM; with PPC_NO_TLBMISS the GPR file is 32 deep, as no
+	// address has its top bit set)
+`ifdef PPC_NO_TLBMISS
+	localparam int GAW = 5;
+`else
+	localparam int GAW = 6;
+`endif
+`ifdef PPC_REGS_MLAB
+	localparam bit RMLAB = 1'b1;
+`else
+	localparam bit RMLAB = 1'b0;
+`endif
+	ppc_regs #(.W(32), .AW(GAW), .NR(3), .MLAB(RMLAB)) gregs (
 		.clk,
-		.we0(gw_en), .wa0(gw_r), .wd0(gw_v),
-		.we1(m_gw && !rst), .wa1(m_rd), .wd1(m_gv),
-		.ra_k({seq_rd ? seq_rs : pg(op[25:21]), pg(op[15:11]), pg(op[20:16])}),
-		.ra_n({seq_rd ? seq_rs : pg(op_nx[25:21]), pg(op_nx[15:11]), pg(op_nx[20:16])}), .keep(op_keep),
+		.we0(gw_en), .wa0(GAW'(gw_r)), .wd0(gw_v),
+		.we1(m_gw && !rst), .wa1(GAW'(m_rd)), .wd1(m_gv),
+		.ra_k({GAW'(seq_rd ? seq_rs : pg(op[25:21])), GAW'(pg(op[15:11])), GAW'(pg(op[20:16]))}),
+		.ra_n({GAW'(seq_rd ? seq_rs : pg(op_nx[25:21])), GAW'(pg(op_nx[15:11])), GAW'(pg(op_nx[20:16]))}), .keep(op_keep),
 		.rd({gr_s, gr_b, gr_a})
 	);
 	// the FPRs: the float units' (and the bench's) writes win over M's (never the same one in a clock)
@@ -1483,7 +1495,7 @@ module ppc_pipe #(
 		else if (!rst && fpu_busy && fpu_done) begin fu_we = 1'b1; fu_wa = fpu_rd; fu_wd = fpu_res; end
 		else if (dbg_we && dbg_idx >= 32 && dbg_idx < 64 && (rst ? rst_q : x_run && !x_cons && hold_flush)) fu_we = 1'b1;
 	end
-	ppc_regs #(.W(33), .AW(5), .NR(4)) fregs (
+	ppc_regs #(.W(33), .AW(5), .NR(4), .MLAB(RMLAB)) fregs (
 		.clk,
 		.we0(m_fw && !rst), .wa0(m_rd[4:0]), .wd0(m_fv),
 		.we1(fu_we), .wa1(fu_wa), .wd1(fu_wd),
