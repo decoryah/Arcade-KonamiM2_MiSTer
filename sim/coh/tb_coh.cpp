@@ -139,8 +139,8 @@ int main(int argc, char **argv)
 			d_next_we[c] = writer_of(w) == c && rng() % 2;
 			d_next_cross[c] = d_next_we[c] && rng() % 16 == 0 && (word_addr(w) & 4) && w + 1 < NWORDS && word_addr(w + 1) == word_addr(w) + 4 && writer_of(w + 1) == c;
 #ifdef PPC_DATA32
-			// (no 8-byte access with PPC_DATA32, and a 4-byte one across two words breaks the counts: a plain store instead,
-			// the random numbers drawn as before)
+			// (with PPC_DATA32 the only 8-byte stores are dcbz's, of zeros: this one's two counts can't be made, and a 4-byte
+			// store across the two words breaks them. A plain store instead, the random numbers drawn as before)
 			d_next_cross[c] = false;
 #endif
 			if (r < 12 && can) drq |= 1 << c;
