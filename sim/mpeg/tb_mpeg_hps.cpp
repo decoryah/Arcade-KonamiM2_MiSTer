@@ -11,7 +11,8 @@
 // - the pixels the daemon wrote into game RAM against the dump's (byte for byte for a full dump, the rows hashed for a slim one).
 // The daemon runs in real time and the unit in simulated clocks: the unit's waits are in its own clocks (printed in ms of 66.67 MHz).
 //
-//   tb_mpeg_hps FILE... [--no-daemon] [--kill-after N] [--slow N:MS] [--pictures N] [--seed N] [-v]
+//   tb_mpeg_hps FILE... [--no-daemon] [--kill-after N] [--slow N:MS] [--abort N] [--pictures N] [--seed N] [-v]
+//     --abort N: every Nth picture the driver stops the bitstream (CONFIG 0) as soon as the picture's end entry is written
 #include "Vm2_mpeg.h"
 #include "verilated.h"
 #include "m2mpeg_protocol.h"
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -224,17 +226,64 @@ static bool check_output(const picture_rec &r, uint64_t &bytes)
 }
 struct pending { uint32_t seq; std::vector<uint8_t> record; bool slim; };
 
+// A dump's records, read by a thread of its own: the daemon leaves a core whose count stands still for 200 ms of real time, and a
+// read of a large record from a slow disk can take that long, so the unit's clocks go on while the bench waits for a record
+struct reader
+{
+	struct rec { uint8_t h[8]; std::vector<uint8_t> payload; };
+	FILE *f;
+	std::mutex m;
+	std::deque<rec> q;
+	size_t bytes = 0;
+	bool eof = false;
+	std::atomic<bool> stop{false};
+	std::thread th;
+	explicit reader(FILE *file) : f(file)
+	{
+		th = std::thread([this] {
+			while (!stop)
+			{
+				rec r;
+				if (fread(r.h, 1, 8, f) != 8) break;
+				r.payload.resize(get32(r.h + 4));
+				if (fread(r.payload.data(), 1, r.payload.size(), f) != r.payload.size()) break;
+				while (!stop) { { std::lock_guard<std::mutex> l(m); if (bytes < (64u << 20)) break; } std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+				std::lock_guard<std::mutex> l(m);
+				bytes += r.payload.size();
+				q.push_back(std::move(r));
+			}
+			std::lock_guard<std::mutex> l(m);
+			eof = true;
+		});
+	}
+	~reader() { stop = true; if (th.joinable()) th.join(); }
+	// the next record (the unit's clocks going on meanwhile), or false at the file's end
+	bool next(uint8_t *h, std::vector<uint8_t> &payload)
+	{
+		while (true)
+		{
+			{
+				std::lock_guard<std::mutex> l(m);
+				if (!q.empty()) { memcpy(h, q.front().h, 8); payload = std::move(q.front().payload); bytes -= payload.size(); q.pop_front(); return true; }
+				if (eof) return false;
+			}
+			for (int i = 0; i < 200; i++) clock1();
+		}
+	}
+};
+
 int main(int argc, char **argv)
 {
 	std::vector<const char *> files;
 	bool daemon = true, verbose = false;
-	int kill_after = -1, slow_picture = -1, slow_ms = 0;
+	int kill_after = -1, slow_picture = -1, slow_ms = 0, abort_every = 0;
 	long max_pictures = -1;
 	for (int i = 1; i < argc; ++i)
 	{
 		if (!strcmp(argv[i], "--no-daemon")) daemon = false;
 		else if (!strcmp(argv[i], "--kill-after") && i + 1 < argc) kill_after = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--slow") && i + 1 < argc) { slow_picture = atoi(argv[++i]); const char *c = strchr(argv[i], ':'); slow_ms = c ? atoi(c + 1) : 0; }
+		else if (!strcmp(argv[i], "--abort") && i + 1 < argc) abort_every = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--pictures") && i + 1 < argc) max_pictures = atol(argv[++i]);
 		else if (!strcmp(argv[i], "--seed") && i + 1 < argc) rnd = uint32_t(atoi(argv[++i]));
 		else if (!strcmp(argv[i], "-v")) verbose = true;
@@ -284,6 +333,8 @@ int main(int argc, char **argv)
 	uint64_t held_sum = 0, held_max = 0, dead_held = 0, timeout_held = 0, once_max = 0;
 	uint32_t pos_total = 0;
 	long first_timeout = -1;
+	uint64_t aborted = 0, overtaken = 0;
+	uint32_t last_end = 0;
 	std::deque<pending> waiting;
 	auto verify = [&] (const pending &w) {
 		picture_rec r;
@@ -296,7 +347,13 @@ int main(int argc, char **argv)
 		const uint32_t d = ld32(block, OFF_DONE);
 		if (!(d & DONE_VALID)) return;
 		const uint32_t ds = d & SEQ_MASK;
-		while (!waiting.empty() && ((ds - waiting.front().seq) & SEQ_MASK) < LOG_ENTRIES) { verify(waiting.front()); waiting.pop_front(); }
+		// (a picture the daemon has gone past, after a late one: a later picture may be in its place in game RAM already, so it isn't
+		// compared; without a late picture each is compared when its own done comes)
+		while (!waiting.empty() && ((ds - waiting.front().seq) & SEQ_MASK) < LOG_ENTRIES)
+		{
+			if (waiting.front().seq == ds) verify(waiting.front()); else ++overtaken;
+			waiting.pop_front();
+		}
 	};
 	const auto t_start = std::chrono::steady_clock::now();
 	auto quit = [&] { stop = true; if (dthread.joinable()) dthread.join(); };
@@ -310,10 +367,9 @@ int main(int argc, char **argv)
 		uint64_t file_pictures = 0;
 		std::vector<uint8_t> payload;
 		uint8_t h[8];
-		while (fread(h, 1, 8, f) == 8 && bad == 0 && (max_pictures < 0 || long(pictures) < max_pictures))
+		reader rdr(f);
+		while (bad == 0 && (max_pictures < 0 || long(pictures) < max_pictures) && rdr.next(h, payload))
 		{
-			payload.resize(get32(h + 4));
-			if (fread(payload.data(), 1, payload.size(), f) != payload.size()) break;
 			if (!memcmp(h, "WREG", 4))
 			{
 				const uint32_t off = get32(&payload[8]);
@@ -329,7 +385,11 @@ int main(int argc, char **argv)
 				cur_slices.assign(r.slices, r.slices + r.slice_len);
 				std::vector<uint8_t> s(cur_slices);
 				for (int i = 0; i < 10; i++) s.push_back(uint8_t(rn()));
-				const uint32_t at = SBASE + 0x1000 + (rn() % 0x100000);
+				// (one picture in four starts in the 32-byte line the unit read last for the picture before, whose bytes are now others:
+				// the unit must read memory again, not use the line it has)
+				uint32_t at = SBASE + 0x1000 + (rn() % 0x100000);
+				if (last_end && rn() % 4 == 0) at = (last_end & ~31u) + rn() % 32;
+				last_end = at + r.slice_len + 1;
 				for (size_t i = 0; i < s.size(); i++) smem[(at - SBASE + i) & (smem.size() - 1)] = s[i];
 				pos_total = (pos_total + r.slice_len) & POS_MASK;
 				ring_total += r.slice_len;
@@ -352,7 +412,18 @@ int main(int argc, char **argv)
 				for (int guard = 0; guard < 100000 && !got && bad == 0; guard++)
 				{
 					uint64_t c0 = clocks;
-					while (!t->intr && clocks - c0 < 12000000) clock1();
+					const bool abort_this = abort_every > 0 && pictures % abort_every == uint64_t(abort_every - 1);
+					while (!t->intr && clocks - c0 < 12000000 && !(abort_this && end_seen)) clock1();
+					if (abort_this && end_seen && !t->intr)
+					{
+						// the driver stops the bitstream while the picture waits for the daemon: its interrupt must not come (the daemon
+						// still decodes it: its output's checked as the others')
+						wr(0x04, 0x00);
+						for (int i = 0; i < 300000; i++) { clock1(); if (rd(0x0c) & 0x02) { FAIL("picture %llu: the end-of-picture interrupt after the bitstream was stopped", (unsigned long long)pictures); break; } }
+						++aborted;
+						got = true;
+						break;
+					}
 					if (!t->intr) { FAIL("no interrupt (picture %llu, status %02x)", (unsigned long long)pictures, rd(0x0c)); break; }
 					const uint32_t st = rd(0x0c);
 					if (st & 0x02)
@@ -394,6 +465,7 @@ int main(int argc, char **argv)
 				}
 			}
 		}
+		rdr.stop = true; rdr.th.join();
 		fclose(f);
 		for (int k = 0; k < 8000 && !waiting.empty(); ++k) { settle(); for (int i = 0; i < 2000; i++) clock1(); if (!waiting.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
 		unverified += waiting.size(); waiting.clear();
@@ -407,19 +479,21 @@ int main(int argc, char **argv)
 
 	// what each way of running must show
 	if (!daemon && rel[0] != pictures) FAIL("no daemon: %llu of %llu pictures let go at once", (unsigned long long)rel[0], (unsigned long long)pictures);
-	if (daemon && kill_after < 0 && slow_picture < 0 && rel[1] != pictures) FAIL("%llu of %llu pictures waited for the daemon's done", (unsigned long long)rel[1], (unsigned long long)pictures);
+	if (daemon && kill_after < 0 && slow_picture < 0 && rel[1] + aborted != pictures) FAIL("%llu of %llu pictures waited for the daemon's done", (unsigned long long)rel[1], (unsigned long long)pictures);
 	if (daemon && kill_after >= 0 && long(pictures) > kill_after && (rel[2] != 1 || rel[0] != pictures - kill_after - 1 || ms_of(dead_held) < 45 || ms_of(dead_held) > 60))
 		FAIL("killed after %d: dead %llu (held %.1f ms), at once %llu", kill_after, (unsigned long long)rel[2], ms_of(dead_held), (unsigned long long)rel[0]);
 	// (the daemon sleeps in real time: the pictures after the late one may time out too, until it has caught up)
 	if (daemon && slow_picture >= 0 && long(pictures) > slow_picture && (rel[3] < 1 || first_timeout != slow_picture || ms_of(timeout_held) < 115 || ms_of(timeout_held) > 125 || dst.late < 1))
 		FAIL("slow picture %d: time-outs %llu (held %.1f ms)", slow_picture, (unsigned long long)rel[3], ms_of(timeout_held));
-	if (daemon && kill_after < 0 && (unverified || verified + no_output != pictures)) FAIL("%llu pictures' output not checked", (unsigned long long)unverified);
+	if (daemon && kill_after < 0 && (unverified || verified + no_output + overtaken != pictures || (overtaken && slow_picture < 0))) FAIL("%llu pictures' output not checked", (unsigned long long)unverified);
 
 	printf("the reset's clear and header: %llu clocks (%.2f ms)\n", (unsigned long long)reset_clocks, ms_of(reset_clocks));
 	printf("pictures %llu: output equal %llu (%llu bytes compared), differ %llu, not checked %llu, nothing to format %llu\n", (unsigned long long)pictures,
 		(unsigned long long)verified, (unsigned long long)bytes, (unsigned long long)failed, (unsigned long long)unverified, (unsigned long long)no_output);
 	printf("let go: at once %llu (within %llu clocks), done %llu, dead daemon %llu, time-out %llu\n", (unsigned long long)rel[0], (unsigned long long)once_max,
 		(unsigned long long)rel[1], (unsigned long long)rel[2], (unsigned long long)rel[3]);
+	if (abort_every) printf("the bitstream stopped while the picture waited: %llu pictures, no interrupt after\n", (unsigned long long)aborted);
+	if (overtaken) printf("not compared (the daemon had gone on to a later picture when the bench looked): %llu\n", (unsigned long long)overtaken);
 	if (rel[1]) printf("held for done: mean %.2f ms, max %.2f ms of the unit's clocks\n", ms_of(held_sum / rel[1]), ms_of(held_max));
 	if (rel[2]) printf("the dead daemon's picture was held %.1f ms\n", ms_of(dead_held));
 	if (rel[3]) printf("the late picture was held %.1f ms\n", ms_of(timeout_held));

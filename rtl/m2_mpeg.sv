@@ -312,6 +312,9 @@ module m2_mpeg
 				P_TAKE:
 				begin
 					if (cur_n == 32'h0 && nxt_n != 32'h0) begin cur_a <= nxt_a; cur_n <= nxt_n; nxt_n <= 32'h0; used <= 32'h0; end
+					// (what's been given now is read from memory: the line read before may be of an address whose bytes have changed
+					// since, a buffer used again or one that was still being filled)
+					lb_v <= 1'b0; w_v <= 1'b0;
 					ps <= P_RUN;
 				end
 				P_RUN:
