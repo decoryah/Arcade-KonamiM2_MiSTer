@@ -139,24 +139,29 @@ module ppc_pipe #(
 	logic [63:0] tb;
 	logic        reserved;
 
-	// the SPRs this core keeps, by MAME's number
+	// the SPRs this core keeps, by MAME's number. Not kept (read 0, writes ignored, as any other SPR number): EAR 282, 346,
+	// 1011 and 1013, which MAME keeps and a 602 doesn't have (user's manual 2.1: EAR not implemented). Their slots (11, 43,
+	// 46, 47) are constants, read through sprv_r: an entry only left unwritten keeps its flops (a variable-index read)
 	localparam int NSPR = 48;
 	logic [31:0] sprv [0:NSPR-1];
 	function automatic int spr_idx(input logic [9:0] n);
 		case (n)
 			10'd8: return 0;    10'd9: return 1;    10'd18: return 2;   10'd19: return 3;   10'd25: return 4;
 			10'd26: return 5;   10'd27: return 6;   10'd272: return 7;  10'd273: return 8;  10'd274: return 9;
-			10'd275: return 10; 10'd282: return 11; 10'd528: return 12; 10'd529: return 13; 10'd530: return 14;
+			10'd275: return 10; 10'd528: return 12; 10'd529: return 13; 10'd530: return 14;
 			10'd531: return 15; 10'd532: return 16; 10'd533: return 17; 10'd534: return 18; 10'd535: return 19;
 			10'd536: return 20; 10'd537: return 21; 10'd538: return 22; 10'd539: return 23; 10'd540: return 24;
 			10'd541: return 25; 10'd542: return 26; 10'd543: return 27; 10'd976: return 28; 10'd977: return 29;
 			10'd978: return 30; 10'd979: return 31; 10'd980: return 32; 10'd981: return 33; 10'd982: return 34;
 			10'd984: return 35; 10'd986: return 36; 10'd987: return 37; 10'd990: return 38; 10'd991: return 39;
-			10'd1008: return 40; 10'd1009: return 41; 10'd1010: return 42; 10'd1013: return 43; 10'd1021: return 44;
-			10'd1022: return 45; 10'd346: return 46; 10'd1011: return 47;
+			10'd1008: return 40; 10'd1009: return 41; 10'd1010: return 42; 10'd1021: return 44;
+			10'd1022: return 45;
 			default: return -1;
 		endcase
 	endfunction
+	localparam logic [NSPR-1:0] SPR_KEEP = ~((48'h1 << 11) | (48'h1 << 43) | (48'h1 << 46) | (48'h1 << 47));
+	logic [31:0] sprv_r [0:NSPR-1];
+	always_comb for (int i = 0; i < NSPR; i++) sprv_r[i] = SPR_KEEP[i] ? sprv[i] : 32'h0;
 	localparam int X_LR = 0, X_CTR = 1, X_DSISR = 2, X_DAR = 3, X_SDR1 = 4, X_SRR0 = 5, X_SRR1 = 6, X_IBAT = 12,
 		X_DBAT = 20, X_DMISS = 28, X_DCMP = 29, X_HASH1 = 30, X_HASH2 = 31, X_IBR = 36, X_ESASRR = 37, X_HID0 = 40;
 
@@ -280,7 +285,7 @@ module ppc_pipe #(
 			default:
 			begin
 				k = spr_idx(n);
-				return k >= 0 ? sprv[k] : 32'h0;
+				return k >= 0 ? sprv_r[k] : 32'h0;
 			end
 		endcase
 	endfunction
@@ -1120,7 +1125,7 @@ module ppc_pipe #(
 			6'd50: return dec;
 			6'd51: return tb[31:0];
 			6'd52: return {8'h0, tb[55:32]};
-			default: return k < 6'(NSPR) ? sprv[k] : 32'h0;
+			default: return k < 6'(NSPR) ? sprv_r[k] : 32'h0;
 		endcase
 	endfunction
 	logic [31:0] ad_b, lg_v, ms_v, x_res;

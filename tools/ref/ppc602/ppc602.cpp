@@ -310,6 +310,7 @@ uint32_t ppc602::mfspr(uint32_t n)
 		case SPR_TBU_R: timer_read = true; return uint32_t(timebase >> 32) & 0xffffff;
 		case 0: return 0;                                                                              // MQ, not on a 602
 	}
+	if (p602 && spr_gone(n)) return 0;
 	return spr[n];
 }
 
@@ -324,6 +325,7 @@ void ppc602::mtspr(uint32_t n, uint32_t v)
 		case SPR_TBU_W: timebase = (timebase & ~0x00000000ffffffffull) | (uint64_t(v) << 32); return;
 		case SPR_DMISS: case SPR_DCMP: case SPR_HASH1: case SPR_HASH2: case SPR_IMISS: case SPR_ICMP: return;
 	}
+	if (p602 && spr_gone(n)) return;
 	spr[n] = v;
 }
 

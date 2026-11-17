@@ -82,10 +82,16 @@ struct mbus : ppc602_bus
 };
 
 // ---- the instructions --------------------------------------------------------------------------------------------
-// SPRs the RTL keeps (rtl/ppc_core.sv spr_idx), and the ones it handles itself
+// SPRs the RTL keeps (rtl/ppc_core.sv spr_idx), and the ones it handles itself. The pipeline (PIPE) doesn't keep GONE's, the
+// SPRs a 602 doesn't have (they read 0, writes ignored: the reference's p602); the programs use them as before
 static const int KEPT[] = { 8, 9, 18, 19, 25, 26, 27, 272, 273, 274, 275, 282, 528, 529, 530, 531, 532, 533, 534, 535,
 	536, 537, 538, 539, 540, 541, 542, 543, 976, 977, 978, 979, 980, 981, 982, 984, 986, 987, 990, 991, 1008, 1009, 1010,
 	1013, 1021, 1022, 346, 1011 };
+#ifdef PIPE
+static const int GONE[] = { 282, 346, 1011, 1013 };
+#else
+static const int GONE[] = { -1 };
+#endif
 static const int MT_SPECIAL[] = { 1, 22, 284, 285, 287 };
 static const int MF_SPECIAL[] = { 0, 1, 22, 268, 269, 287 };
 static bool in(const int *l, size_t n, int v) { for (size_t i = 0; i < n; i++) if (l[i] == v) return true; return false; }
@@ -306,7 +312,7 @@ int main(int argc, char **argv)
 		}
 #ifdef PIPE
 		// the pipeline's FPRs are the 602's singles (rtl/ppc_fps.sv), and it takes the FP-unavailable exception
-		ref.sp = true; ref.fpu_exc = true; ref.sp_canon();
+		ref.sp = true; ref.fpu_exc = true; ref.p602 = true; ref.sp_canon();
 #endif
 		for (int i = 0; i < 4; i++) ref.tgpr[i] = uint32_t(rng());
 		ref.set_cr(uint32_t(rng()));
@@ -461,7 +467,7 @@ int main(int argc, char **argv)
 		load(69, m0.decrementer); load(70, uint32_t(m0.timebase)); load(71, uint32_t(m0.timebase >> 32));
 		for (int i = 0; i < 4; i++) load(72 + i, m0.tgpr[i]);
 		for (int i = 0; i < 16; i++) load(80 + i, m0.sr[i]);
-		for (int n : KEPT) load(1024 + n, m0.spr[n]);
+		for (int n : KEPT) if (!IN(GONE, n)) load(1024 + n, m0.spr[n]);
 		top.dbg_we = 0;
 		top.rst = 0;
 

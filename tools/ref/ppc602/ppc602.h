@@ -13,8 +13,8 @@
 //   * floats are x86 SSE's (MAME's x64 back end): denormals kept (no FTZ / DAZ), a NaN operand comes back quieted (the
 //     first if both), an invalid operation gives the default NaN 0xfff8000000000000;
 //   * fneg, fmr, fabs, fnabs, fctiw[z] and fsel leave CR1 alone even with Rc.
-// With sp and fpu_exc (sim/ppccore's pipeline bench) it follows the RTL's pipeline instead, which has the 602's single-
-// precision FPRs and its FP-unavailable exception.
+// With sp, fpu_exc and p602 (sim/ppccore's pipeline bench) it follows the RTL's pipeline instead, which has the 602's single-
+// precision FPRs, its FP-unavailable exception and (p602) more of the 602 where MAME differs.
 // MAME skips CR0 / XER[CA] updates no later instruction reads; this model always makes them (see the replay bench).
 // FPSCR is kept only as far as the move-to / move-from instructions and the rounding mode need.
 #pragma once
@@ -89,6 +89,10 @@ public:
 	// the unit's, fused, a NaN its own) and the FP-unavailable exception (fpu_exc: a float instruction with MSR[FP] clear)
 	bool sp = false;
 	bool fpu_exc = false;
+	// as the RTL's pipeline (rtl/ppc_pipe.sv) has them, where it follows the 602 and MAME doesn't (p602): EAR 282, 346, 1011
+	// and 1013, SPRs MAME keeps and a 602 doesn't have, read 0 and ignore writes
+	bool p602 = false;
+	static bool spr_gone(uint32_t n) { return n == SPR_EAR || n == 346 || n == 1011 || n == 1013; }
 	// as the old core (rtl/ppc_core.sv with rtl/ppc_fpu.sv, not in the build) and MAME 0.289 (whose captures sim/ppcreplay
 	// replays) have them: fsqrt(s) and an exact frsqrte (1 / sqrt), not the 602's (a program exception; its table). For the
 	// double forms (not with sp, the pipeline's)
