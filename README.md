@@ -72,7 +72,7 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
 | Evil Night (ver UBA, 1998) | `evilngt` | plays: light guns, up to three players |
 | Total Vice (ver EBA, 1997) | `totlvice` | plays: light guns, up to two players |
 | Hell Night (ver EAA, 1998) | `hellngt` | plays: light guns, up to three players, on the arcade monitor's 512 x 384; its own build (`KonamiM2HellNight`), needs the SDRAM board |
-| Battle Tryst (ver JAC, 1998) | `btltryst` | plays, close to full speed in a match; the MPEG intro is black; its own build (`KonamiM2Tryst`), needs the SDRAM board |
+| Battle Tryst (ver JAC, 1998) | `btltryst` | plays, close to full speed in a match; its movies with the ARM's decoder (below); its own build (`KonamiM2Tryst`), needs the SDRAM board |
 | Heat of Eleven '98 (ver EAA, 1998) | `heatof11` | plays; its own build (`KonamiM2Heat`), needs the SDRAM board |
 | Total Vice (ver JAD, AAB, UAC, 1997) | `totlvicj`, `totlvica`, `totlvicu` | not supported: not working in MAME 0.289 |
 
@@ -144,6 +144,57 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
    remembers it for that game and mounts it at each start. (The MRA also asks for it, but Main releases up to 20261010 don't act on
    that.) Without it the game runs without its music.
 
+## Battle Tryst's movies (MPEG)
+
+For its MPEG video, Battle Tryst's build is a hybrid, as NDS4MiSTer and DreamSTer are: the FPGA has the M2 MPEG unit's
+registers and passes each picture's data to a helper on the MiSTer's ARM, `m2mpegd`, which decodes it and writes the picture
+back into game RAM. Without `m2mpegd` running, the game plays normally but its movies (the intro and the attract's scenes)
+are black.
+
+### Install
+
+From the release, `m2mpegd_<date>.zip` holds two folders; copy both to the root of the SD card (`/media/fat`):
+
+| On the SD card | What |
+|---|---|
+| `m2mpegd/m2mpegd` | the decoder |
+| `m2mpegd/m2mpegd_service.sh` | starts and stops it |
+| `m2mpegd/m2_mem_wc-<kernel>.ko` | an optional kernel module for a faster picture copy, one per MiSTer kernel |
+| `Scripts/Battle_Tryst_MPEG.sh` | starts Battle Tryst with its movies |
+| `Scripts/m2mpegd_autostart.sh` | turns starting the decoder at boot on or off |
+
+The Battle Tryst MRA and RBF go where they always do (Install, above).
+
+### Playing
+
+- **From Scripts:** run `Battle_Tryst_MPEG`. It starts the decoder and loads Battle Tryst (the most recently copied
+  `Battle Tryst*.mra` in `_Arcade`; to always load one MRA, put its path in the script's `MRA=` line). The decoder quits by
+  itself when another core is loaded, so nothing is left running.
+- **Or at every boot:** run `m2mpegd_autostart` once. It adds a line to `/media/fat/linux/user-startup.sh` (a backup of the file
+  is kept as `user-startup.sh.bak_m2mpegd`), and then Battle Tryst's movies play however the game is loaded, from the Arcade
+  menu too. While another core runs, the decoder only looks once a second at which core is loaded. Run it again to turn it
+  off.
+
+The decoder's messages go to `/tmp/m2mpegd.log` (in RAM, nothing is written to the SD card).
+
+### How it works
+
+- Each picture is decoded on both ARM cores and copied into game RAM 22 ms after its data arrives. The game redraws the movie
+  from game RAM every frame, so a copy at a fixed point in the frame stays clear of that read; without the delay the movie
+  tears.
+- The kernel module maps game RAM write-combined, the same way NDS4MiSTer's `nds_mem_wc` does (the idea is from DreamSTer):
+  a picture's copy takes about 0.3-0.5 ms instead of 3.7. It's built for one kernel; `m2mpegd_service.sh` loads the one
+  that matches `uname -r`. With no match (a newer MiSTer kernel than the release knows), it says so in the log and the
+  decoder copies through `/dev/mem` as before: the movies still play.
+- `m2mpegd` is a plain MPEG-1 video decoder (ISO 11172-2): the core hands it each picture's data and the M2 unit's settings,
+  and it hands back the picture in the M2's pixel format, as the M2's own MPEG unit does. Nothing in it is specific to Battle
+  Tryst, so any M2-hardware core can use it. Its source, the module's source and the build scripts are in `hps/m2mpegd/`.
+
+### Tested
+
+On a MiSTerPi (kernel 5.15.1) and a DE10-Nano (6.18.38), both with the SDRAM board: the intro and attract movies looped,
+watched for tears and sound, none seen. The DE10-Nano ran the decoder overnight: 27,404 pictures, none late, no errors.
+
 ## Controls and OSD
 
 **Tobe! Polystars:** a joystick, Shoot, Bomb, Start and Coin, for two players. The default pad layout: B shoots, A bombs, Start,
@@ -209,8 +260,6 @@ delete it to have the MRA's settings again. Evil Night's blood is GAME OPTIONS' 
 - **In MAME:** MAME 0.289 marks Battle Tryst and Heat of Eleven '98 as preliminary. Its Heat of Eleven runs the attract mode; its
   Battle Tryst stops at the MPEG intro, which the core gets past. Total Vice's JAD, AAB and UAC sets are marked not working, and
   aren't supported.
-- **MPEG:** the 3DO M2's MPEG video decoder isn't in the core. Battle Tryst's build has the MPEG unit's control, so the game gets
-  past its MPEG intro, but the intro shows black. MAME has only an empty stand-in for the unit; no other game is known to use it.
 - **CRT Adjust:** not yet.
 
 ## What is verified
@@ -246,6 +295,7 @@ The plan and how the machine is built are in [docs/design.md](docs/design.md); w
 | `sim/` | Verilator benches, run from WSL; `sim/run_all.sh` runs them all, one PASS / FAIL line each |
 | `tools/` | the disc files' maker (`m2disc.py`, with `cdimage.py` and `cdfix.py`), MAME capture scripts (`tools/lua/`), the reports, the reference models (`tools/ref/`) |
 | `mra/`, `releases/`, `dist/` | MRAs, the tested RBFs with their fitter / timing summaries, release notes and zips |
+| `hps/m2mpegd/` | the MPEG decoder for Battle Tryst's movies, on the MiSTer's ARM (`m2mpegd`), its scripts and kernel module |
 | `sys/` | the MiSTer framework |
 
 The benches expect the owner's layout: this repository at `/mnt/c/repos/konamim2-mister/mister` and, next to it, `work/` with what is
@@ -285,7 +335,7 @@ or from a given frame, for `sim/ppcreplay`; how to run it is at the top of the s
 * The owner's Slap Shot core: the light guns (`rtl/m2_guns.sv`, after the owner's Seta 2 core and ppriest's `gx_guns.sv`).
 * tallendorf: the single-precision float units and the FP-unavailable exception, triangle engine and DSP fixes and speed-ups,
   Hell Night's, Battle Tryst's and Heat of Eleven's builds (the Z buffer in the SDRAM, based on the owner's Gaelco 3D core; the
-  arcade monitor's raster; the CD streaming; the MPEG unit's control; compressed texture loads), the fix for CPU 2's decrementer
+  arcade monitor's raster; the CD streaming; the MPEG unit's control and its decoder on the ARM; compressed texture loads), the fix for CPU 2's decrementer
   freeze, the CPU cache size option, `tools/build.py`, `tools/cdimage.py`'s older CHDs.
 * The owner's Gaelco 3D core: the platform layer, the base of the Z buffer in the SDRAM (`rtl/m2_zmem.sv`), the way each block is
   checked, the benches and the release packaging.
