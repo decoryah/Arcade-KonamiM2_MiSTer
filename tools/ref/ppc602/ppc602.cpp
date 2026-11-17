@@ -346,11 +346,7 @@ void ppc602::exec(uint32_t op)
 		bool fd = (p >= 0x32 && p <= 0x37 && p != 0x34 && p != 0x35) || (p == 0x1f && (x == 0x257 || x == 0x277 || x == 0x2d7 ||
 			x == 0x2f7));
 		bool str = p == 0x1f && (x == 0x255 || x == 0x215 || x == 0x2d5 || x == 0x295);
-		if ((no_fpdouble && fd) || (no_string && str))
-		{
-			if (emul_prog) raise(EX_PROGRAM, 0x80000);
-			raise(EX_EMUL);
-		}
+		if ((no_fpdouble && fd) || (no_string && str)) emul();
 		if (no_trap && (p == 0x03 || (p == 0x1f && x == 0x004))) raise(EX_PROGRAM, 0x80000);
 	}
 	switch (op >> 26)
@@ -982,6 +978,12 @@ double rsqrte602(double in)
 // 0x7fc00000), fnmadd's negated, its exact zero too (the unit negates the sum before its round: its zero is the sum's negated)
 void ppc602::sp_a(uint32_t op)
 {
+	// (p602: opcode 63's double arithmetic a 602 emulates)
+	if (p602 && (op >> 26) == 0x3f)
+		switch ((op >> 1) & 0x1f)
+		{
+			case 0x15: case 0x14: case 0x19: case 0x12: case 0x1d: case 0x1c: case 0x1f: case 0x1e: emul();
+		}
 	uint32_t a = fs(RA), b = fs(RB), c = fs(RC_);
 	volatile float fa = bitsf(a), fb = bitsf(b), fc = bitsf(c);
 	uint32_t v, nan = SDNAN;
@@ -1050,6 +1052,7 @@ void ppc602::sp_x(uint32_t op)
 		case 0x00c: setfs(RD, snanb(b) ? squiet(b) : b); fp_cr1(op); return;                          // FRSP
 		case 0x00e: case 0x00f:                                                                        // FCTIW, FCTIWZ
 		{
+			if (p602 && sw == 0x00e) emul();                                                           // (p602: fctiw a 602 emulates)
 			float v = bitsf(b);
 			uint32_t w = 0x80000000u;
 			if (!std::isnan(v) && !std::isinf(v))

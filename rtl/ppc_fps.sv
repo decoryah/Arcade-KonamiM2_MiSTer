@@ -5,7 +5,7 @@
 //   ppc_fps_it   the iterative unit: divide and fres, two bits a clock
 //   ppc_fps_ctl  a CPU's part of the control: its FPRs' counts (a result leaves the pipeline's last stage, ev, for the next
 //                op's operands, and is registered, wv, for the FPRs)
-// The double forms do what the single forms do: the real chip traps them to software (0x1600), which this core doesn't.
+// The double arithmetic and fctiw never come here: the real chip traps them to software (0x1600), and so does rtl/ppc_pipe.sv.
 `default_nettype none
 module ppc_fps_ctl (
 	input  logic        clk,

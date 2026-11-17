@@ -90,7 +90,8 @@ public:
 	bool sp = false;
 	bool fpu_exc = false;
 	// as the RTL's pipeline (rtl/ppc_pipe.sv) has them, where it follows the 602 and MAME doesn't (p602): EAR 282, 346, 1011
-	// and 1013, SPRs MAME keeps and a 602 doesn't have, read 0 and ignore writes
+	// and 1013, SPRs MAME keeps and a 602 doesn't have, read 0 and ignore writes; opcode 63's double arithmetic (fadd, fsub,
+	// fmul, fdiv, fmadd, fmsub, fnmadd, fnmsub) and fctiw take the emulation trap (EX_EMUL, 0x1600), as on a 602 (with sp)
 	bool p602 = false;
 	static bool spr_gone(uint32_t n) { return n == SPR_EAR || n == 346 || n == 1011 || n == 1013; }
 	// a build's options (rtl/ppc_pipe.sv's PPC_NO_*): the lfd / stfd family (no_fpdouble) and the strings (no_string) take the
@@ -175,4 +176,6 @@ private:
 
 	uint32_t next_pc = 0;
 	[[noreturn]] void raise(int ex, uint32_t param = 0) { throw exc{ ex, param }; }
+	// what a 602 emulates: its emulation trap (or with emul_prog the illegal-instruction program exception)
+	[[noreturn]] void emul() { if (emul_prog) raise(EX_PROGRAM, 0x80000); raise(EX_EMUL); }
 };

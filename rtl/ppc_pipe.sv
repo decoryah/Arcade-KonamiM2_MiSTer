@@ -5,6 +5,8 @@
 //                     every one, on purpose (a 602 runs stfd, and lfd of an exact normal single, itself: KonamiM2.qsf says why)
 //   PPC_NO_STRING     lswi, lswx, stswi, stswx: 0x1600
 //   PPC_NO_TRAP       tw, twi: 0x700
+// Never in: the double arithmetic of opcode 63 (fadd, fsub, fmul, fdiv, fmadd, fmsub, fnmadd, fnmsub) and fctiw: 0x1600, as a
+// 602 (its frsp, fctiwz, fsel, frsqrte, fcmpu / fcmpo, the moves and the FPSCR instructions are in)
 // PowerPC 602 as MAME 0.289 runs it, pipelined: the same instruction semantics as rtl/ppc_core.sv (checked against the
 // reference model, tools/ref/ppc602, by sim/ppccore and sim/ppcreplay), an instruction a clock when nothing stalls.
 //
@@ -175,9 +177,7 @@ module ppc_pipe #(
 	// what the instructions a 602 emulates take when the core leaves them out: its emulation trap (0x1600), as a 602 (EX_PROGRAM
 	// here: the illegal-instruction program exception, which the core took for them before EX_CUT)
 	localparam logic [4:0] EX_CUT = EX_EMUL;
-	// verilator lint_off UNUSEDPARAM
-	localparam logic [31:0] EX_CUT_P = EX_CUT == EX_PROGRAM ? 32'h80000 : 32'h0;   // (its SRR1 bits; used with PPC_NO_*)
-	// verilator lint_on UNUSEDPARAM
+	localparam logic [31:0] EX_CUT_P = EX_CUT == EX_PROGRAM ? 32'h80000 : 32'h0;   // (its SRR1 bits)
 
 	// a GPR's physical register
 	function automatic logic [5:0] pg(input logic [4:0] r);
@@ -312,17 +312,15 @@ module ppc_pipe #(
 				5'h1f: d.op = F_NMADDS; 5'h1e: d.op = F_NMSUBS;
 				default: d.go = 1'b0;
 			endcase
+		// (opcode 63: frsqrte, frsp and fctiwz; its double arithmetic and fctiw a 602 emulates: opfp's EX_CUT. No fsqrt: illegal)
 		else if (o[31:26] == 6'h3f && o[5])
 			case (o[5:1])
-				5'h15: d.op = F_ADD; 5'h14: d.op = F_SUB; 5'h19: d.op = F_MUL; 5'h12: d.op = F_DIV;
-				5'h1a: d.op = F_RSQRTE; 5'h1d: d.op = F_MADD; 5'h1c: d.op = F_MSUB;    // (no fsqrt: illegal)
-				5'h1f: d.op = F_NMADD; 5'h1e: d.op = F_NMSUB;
+				5'h1a: d.op = F_RSQRTE;
 				default: d.go = 1'b0;
 			endcase
 		else if (o[31:26] == 6'h3f)
 			case (o[10:1])
 				10'h00c: d.op = F_RSP;
-				10'h00e: d.op = F_CTIW;
 				10'h00f: d.op = F_CTIWZ;
 				default: d.go = 1'b0;
 			endcase
@@ -2180,15 +2178,17 @@ module ppc_pipe #(
 		fb = fx(rB, 2'd1, fr_b);
 		if (xf.go)
 		begin
-			// out to a float unit (fpp_issue, fpu_start); with Rc, but for fctiw[z], CR1 is FPSCR's top (MAME), which
+			// out to a float unit (fpp_issue, fpu_start); with Rc, but for fctiwz, CR1 is FPSCR's top (MAME), which
 			// they don't change
-			if (rc && xf.op != F_CTIW && xf.op != F_CTIWZ) crf[1] <= fpscr[31:28];
+			if (rc && xf.op != F_CTIWZ) crf[1] <= fpscr[31:28];
 		end
 		else if (opc == 6'h3b) raise(EX_PROGRAM, 32'h80000);
 		else if (xo[4])
 			case (op[5:1])
 				// FSEL: c if a >= 0.0 (not NaN, and positive or a zero), else b; no CR1 even with Rc (MAME)
 				5'h17: fmov(!snan(fa[31:0]) && (!fa[31] || fa[30:0] == 31'h0) ? fx(frC, 2'd2, fr_c) : fb);
+				// FADD, FSUB, FMUL, FDIV, FMADD, FMSUB, FNMADD, FNMSUB: a 602 emulates them (user's manual 4.5.18, 6.8)
+				5'h15, 5'h14, 5'h19, 5'h12, 5'h1d, 5'h1c, 5'h1f, 5'h1e: raise(EX_CUT, EX_CUT_P);
 				default: raise(EX_PROGRAM, 32'h80000);
 			endcase
 		else
@@ -2198,6 +2198,7 @@ module ppc_pipe #(
 					crf[op[25:23]] <= fcmp_r;
 					fpscr[15:12] <= fcmp_r;
 				end
+				10'h00e: raise(EX_CUT, EX_CUT_P);                                                // FCTIW: a 602 emulates it
 				// these leave CR1 alone even with Rc (MAME)
 				10'h028: fmov(fb ^ 33'h080000000);                                          // FNEG
 				10'h048: fmov(fb);                                                                 // FMR
