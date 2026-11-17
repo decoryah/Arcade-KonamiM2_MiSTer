@@ -722,6 +722,7 @@ void ppc602::op1f(uint32_t op)
 		// cache, TLB, sync: no effect in MAME (dcbz aside)
 		case 0x036: case 0x056: case 0x0f6: case 0x116: case 0x256: case 0x356: case 0x1d6: case 0x236: case 0x3d6:
 		case 0x132: case 0x172: case 0x3d2: case 0x3f2:
+			if (p602 && ((op >> 1) & 0x3ff) == 0x172) break;                                        // (p602: tlbia illegal, as on a 602)
 			return;
 		case 0x3f6:                                                                                    // DCBZ
 		{

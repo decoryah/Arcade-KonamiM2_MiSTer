@@ -2076,8 +2076,8 @@ module ppc_pipe #(
 				if (cnt != 0) seq_start(Q_STSW, xo == 10'h2d5 ? raz : raz + b, 4'd1);
 			end
 `endif
-			// cache, TLB, sync: nothing in MAME
-			10'h036, 10'h056, 10'h0f6, 10'h116, 10'h256, 10'h356, 10'h1d6, 10'h236, 10'h3d6, 10'h132, 10'h172,
+			// cache, TLB, sync: nothing in MAME (tlbia, 0x172, MAME's too, is illegal on a 602: user's manual table B-1)
+			10'h036, 10'h056, 10'h0f6, 10'h116, 10'h256, 10'h356, 10'h1d6, 10'h236, 10'h3d6, 10'h132,
 			10'h3d2, 10'h3f2: ;
 			10'h3f6:                                                                               // DCBZ
 			begin
