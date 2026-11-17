@@ -203,6 +203,8 @@ module m2_te (
 	logic        zw_stall, zr_stall, cr_stall, cw_stall;
 	logic        c_flush, cc_flushed, c_fdone, zc_flushed, z_fdone;
 	logic        c_req, m_owned;
+	logic        cs_n, cd_n;            // the lines the color cache is told of ahead (below, with the walk): to read, to write
+	logic [27:5] cs_na, cd_na;
 	logic        cm_rd, cm_we;
 	logic [31:3] cm_a;
 	logic [63:0] cm_wd;
@@ -322,7 +324,7 @@ module m2_te (
 `endif
 	te_cache cc (.clk, .rst, .sink_in(cc_sinks), .m_sink(cc_sink), .sink_wait, .r_n(c_rn), .r_na(c_ra[27:1]), .r_ns32(c_rs32), .r_adv(pe), .q(c_q), .r_stall(cr_stall),
 		.w_n(c_wn), .w_na(c_wa[27:1]), .w_ns32(db_dctl[0]), .w_nfour(fc_q[74]), .w_adv(pe), .w_wait(c_wwait && cr_stall), .wd(c_wd), .be(c_wbe), .w_stall(cw_stall),
-		.flush(c_flush), .flushed(cc_flushed), .m_req(c_req), .m_gnt(m_owned),
+		.flush(c_flush), .flushed(cc_flushed), .s_n(cs_n), .s_na(cs_na), .d_n(cd_n), .d_na(cd_na), .m_req(c_req), .m_gnt(m_owned),
 		.m_rd(cm_rd), .m_we(cm_we), .m_a(cm_a), .m_wd(cm_wd), .m_be(cm_be), .m_busy, .m_ready, .m_dout);
 
 	// the port goes to one of them until it's finished. A write-back can outlast the pixels, so the list's fetches and a texture load take turns with them
@@ -395,7 +397,9 @@ module m2_te (
 	wire         ms_pop = ms_take && (ms_skip != 2'd0 || mm_src[2] || ms_two);
 	wire [4:0]   ms_rn = ms_rp + 5'(ms_pop);
 	logic [63:0] ms_q;
-	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && m_ready), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
+	// (a word that comes while the color cache has the port is the cache's: a line it asked for ahead of pixels that have since gone)
+	wire         ms_in = m_ready && !m_owned;
+	te_ram #(.W(64), .AW(4)) ms_f (.clk, .we(st == T_MM && ms_in), .wa(ms_wp[3:0]), .wd(m_dout), .re(1'b1), .ra(ms_rn[3:0]), .rd(ms_q));
 	wire [31:0]  ms_raw = mm_src[2] ? ms_q[63:32] : ms_q[31:0];
 	// a compressed load's destination texel: colour (an index, or three literal components), alpha, SSB, as the texture memory holds them
 	wire  [5:0]  cx_dcb = tm_exp[10] ? (tm_exp[12] ? 6'(tm_exp[3:0]) * 6'd3 : 6'(tm_exp[3:0])) : 6'd0;
@@ -883,6 +887,24 @@ module m2_te (
 	wire         t_look = tm_addr[13] && !m_dtext;
 	wire         blen = db_user[6] && !m_dblend;
 	wire         sren = db_user[5] && blen;
+	// The color cache hears of a pixel's source line as the walker hands the pixel in, some twenty stages before the read (T2): once for each
+	// line a triangle's pixels come to. (The real chip asks memory for each block its addresses enter, from the span walker: Bulldog ASIC
+	// Specifications Rev 1.1, section 6.10.1.1.)
+	logic [27:5] cs_last;
+	logic        cs_v;
+	assign       cs_n = v0_ok && sren && !(cs_v && s_addr[27:5] == cs_last);
+	assign       cs_na = s_addr[27:5];
+	always_ff @(posedge clk)
+		if (rst || !w_on) cs_v <= 1'b0;
+		else if (cs_n) begin cs_v <= 1'b1; cs_last <= s_addr[27:5]; end
+	// and of the line it will write (if it's drawn: the Z test and the discards come later), so the line in its place can go back to memory first
+	logic [27:5] cd_last;
+	logic        cd_v;
+	assign       cd_n = v0_ok && db_super[0] && !(cd_v && d_addr[27:5] == cd_last);
+	assign       cd_na = d_addr[27:5];
+	always_ff @(posedge clk)
+		if (rst || !w_on) cd_v <= 1'b0;
+		else if (cd_n) begin cd_v <= 1'b1; cd_last <= d_addr[27:5]; end
 	wire  [3:0]  d_mask = db_user[3:0];
 
 	// the walker's pixel
@@ -1580,7 +1602,7 @@ module m2_te (
 				begin
 					ms_wpd <= ms_wp;
 					ms_rp <= ms_rn;
-					if (m_ready) ms_wp <= ms_wp + 5'd1;
+					if (ms_in) ms_wp <= ms_wp + 5'd1;
 					if (ms_rd && !m_busy)
 					begin
 						ms_a <= ms_a + 27'd1;
@@ -2369,10 +2391,15 @@ module m2_te (
 	// verilator lint_on UNUSEDSIGNAL
 endmodule
 
-// a write-back cache, direct mapped, 128 lines of 32 bytes, one each for Z and the colours. One read and one write a clock, the answer or
-// a stall in the clock after the address (in *_n); a stalled port's address stays. A write allocates without reading: each byte has a bit
-// for whether it's been written, and a line goes back as those alone; a read of a line that's only been written sends them, then fills it.
-// A write goes as soon as it hits, in case the read waiting for the same line index would take it away; it's done with then
+// The colours' write-back cache, direct mapped, 128 lines of 32 bytes. One read and one write a clock, the answer or a stall in the clock
+// after the address (in *_n); a stalled port's address stays. A write allocates without reading: each byte has a bit for whether it's
+// been written, and a line goes back as those alone; a read of a line that's only been written sends them, then fills it. A write goes as
+// soon as it hits, in case the read waiting for the same line index would take it away; it's done with then.
+// The walker says which lines the pixels it hands in will read and write (s_n, d_n), some twenty stages before they do. A line to be read
+// is fetched then, up to two on their way from memory at once, and only the places they are to fill wait meanwhile; the line in the
+// place of one to be written goes back to memory before the writes come. (The real chip has no cache: it asks memory for each 32-byte
+// block the span walker's addresses enter, through FIFOs ahead of the blend: Bulldog ASIC Specifications Rev 1.1, section 6.10.1.1.) What the cache holds and
+// answers is the same whenever a line is fetched or written back: only the clocks change.
 module te_cache (
 	input  logic        clk,
 	input  logic        rst,
@@ -2401,6 +2428,11 @@ module te_cache (
 	input  logic        flush,
 	output logic        flushed,
 
+	input  logic        s_n,            // a line the pixels handed in will read, as the walker has it: wanted here before they come
+	input  logic [27:5] s_na,
+	input  logic        d_n,            // and a line they will write: what's in its place, if dirty, goes back to memory before they come
+	input  logic [27:5] d_na,
+
 	output logic        m_req,          // it wants the memory port until this falls
 	input  logic        m_gnt,
 	output logic        m_rd,
@@ -2412,12 +2444,11 @@ module te_cache (
 	input  logic        m_ready,
 	input  logic [63:0] m_dout
 );
-	typedef enum logic [3:0] { C_INIT, C_IDLE, C_EVW, C_FILL, C_FILLW, C_REARM, C_FWALK, C_FLOOK, C_FEND } cst_t;
+	typedef enum logic [3:0] { C_INIT, C_IDLE, C_EVW, C_FILL, C_REARM, C_FWALK, C_FLOOK, C_FEND } cst_t;
 	cst_t        st;
 	logic [6:0]  walk;
 	logic        walking;               // the eviction's the flush's
 	logic        fill;                  // what comes after the eviction: a fill, or the line just cleared
-	logic [1:0]  n;
 	logic [22:0] l_a;                   // [27:5]
 
 	logic        r_v, w_v, w_done, r_s32, w_s32, w_go, w_four;
@@ -2446,9 +2477,61 @@ module te_cache (
 		t3_f <= t_we && t_wa == t3_ra;
 		t_wr <= t_wd;
 	end
-	wire  [50:0] t1_q = t1_f ? t_wr : t1_m;
-	wire  [50:0] t2_q = t2_f ? t_wr : t2_m;
-	wire  [50:0] t3_q = t3_f ? t_wr : t3_m;
+	// A line that has gone back to memory since its tag was written is clean, with no bytes written: the write-back marks it so (cln) in
+	// place of writing its tag (the tags' one write port is a pixel's write's every clock one goes). Each look at the tags sees a marked
+	// line that way (c*_q: the mark as the tags were read, with what was marked and unmarked that clock); any write of a tag unmarks it
+	logic [127:0] cln;
+	logic        c1_q, c2_q, c3_q, c4_q;
+	function automatic logic [50:0] t_cl(input logic c, input logic [50:0] t);
+		return c ? {32'h0, t[18:17], 1'b0, t[15:0]} : t;
+	endfunction
+	// verilator lint_off UNUSEDSIGNAL
+	// (the filled bit matters to the hits, which take it from the RAMs' words, and to a write's and a wanted line's look)
+	wire  [50:0] t1_q = t_cl(c1_q, t1_f ? t_wr : t1_m);
+	wire  [50:0] t3_q = t_cl(c3_q, t3_f ? t_wr : t3_m);
+	// verilator lint_on UNUSEDSIGNAL
+	wire  [50:0] t2_q = t_cl(c2_q, t2_f ? t_wr : t2_m);
+	// The lines wanted ahead (s_n: the walker's, about twenty stages before their pixels' reads), four waiting; one more is dropped, and its
+	// pixel then misses as it would have. The first's tag is looked up in a copy of the tags of its own; a flush forgets them
+	logic [22:0] sw [0:3];
+	logic [1:0]  sw_wp, sw_rp;
+	logic [2:0]  sw_cnt;
+	logic        sw_pop, t4_ok, t4_f;
+	logic [50:0] t4_m;
+	wire         sw_push = s_n && !sw_cnt[2];
+	wire  [22:0] sw_h = sw[sw_rp];
+	wire  [1:0]  sw_rn = sw_rp + 2'(sw_pop);
+	wire  [6:0]  t4_ra = sw[sw_rn][6:0];
+	ppc_ram #(.W(51), .AW(7)) tags4 (.clk, .we(t_we), .wa(t_wa), .wd(t_wd), .ra(t4_ra), .rd(t4_m));
+	always_ff @(posedge clk)
+		if (rst || flush) begin sw_wp <= 2'd0; sw_rp <= 2'd0; sw_cnt <= 3'd0; t4_ok <= 1'b0; t4_f <= 1'b0; end
+		else
+		begin
+			if (sw_push) begin sw[sw_wp] <= s_na; sw_wp <= sw_wp + 2'd1; end
+			sw_rp <= sw_rn;
+			sw_cnt <= sw_cnt + 3'(sw_push) - 3'(sw_pop);
+			t4_ok <= sw_cnt != 3'(sw_pop);          // (the line the tags are read for was there this clock: one just put in waits a clock)
+			t4_f <= t_we && t_wa == t4_ra;
+		end
+	wire  [50:0] t4_q = t_cl(c4_q, t4_f ? t_wr : t4_m);
+	wire  [6:0]  s_i = sw_h[6:0];
+	wire  [15:0] s_t = sw_h[22:7];
+	// the lines the pixels will write (d_n), likewise four waiting: for the write-back
+	logic [22:0] dw [0:3];
+	logic [1:0]  dw_wp, dw_rp;
+	logic [2:0]  dw_cnt;
+	logic        dw_pop;
+	wire         dw_push = d_n && !dw_cnt[2];
+	wire  [22:0] dw_h = dw[dw_rp];
+	wire  [6:0]  d_i = dw_h[6:0];
+	always_ff @(posedge clk)
+		if (rst || flush) begin dw_wp <= 2'd0; dw_rp <= 2'd0; dw_cnt <= 3'd0; end
+		else
+		begin
+			if (dw_push) begin dw[dw_wp] <= d_na; dw_wp <= dw_wp + 2'd1; end
+			if (dw_pop) dw_rp <= dw_rp + 2'd1;
+			dw_cnt <= dw_cnt + 3'(dw_push) - 3'(dw_pop);
+		end
 	wire  [15:0] r_t = r_a[27:12], w_t = w_a[27:12];
 	// (each port's compares on the RAM's word and on the word just written, the choice after them: the RAM's word is late,
 	// and its hit goes on to the stalls and everything they hold)
@@ -2456,19 +2539,36 @@ module te_cache (
 	wire         w_hit = t2_f ? t_wr[18] && t_wr[15:0] == w_t : t2_m[18] && t2_m[15:0] == w_t;
 	wire         idle = st == C_IDLE;
 
-	// the write-back: a dirty line goes to memory from its own read of the data while the pixels go on. It's the line after the one
-	// in use, the way the pixels are going; or what a miss or a flush asks for, which then waits
+	// the write-back: a dirty line goes to memory from its own read of the data while the pixels go on. It's the line in the place of one
+	// the pixels will write (the walker's, d_n: so their writes find the place clean), unless that's the line itself; or what a miss, a
+	// wanted line's fetch or a flush asks for, which then waits
 	typedef enum logic [2:0] { B_IDLE, B_LOOK, B_RD, B_WR, B_TAG } bst_t;
 	bst_t        b_st;
-	logic [6:0]  b_i, b_ti, b_last;
-	logic        b_pend, b_inv, b_f;
-	logic [15:0] b_t;
+	logic [6:0]  b_i;
+	logic        b_inv;                 // a flush's: the line's to be no line at all after
+	logic [15:0] b_t, b_wt;
 	logic [31:0] b_mask;
 	logic [1:0]  b_n;
 	wire         b_busy = b_st != B_IDLE;
-	wire         b_tw = b_st == B_TAG;
+	logic        fb_v;                  // (a fill's word is being written: below)
+	wire         b_tw = b_st == B_TAG && !fb_v;     // (a flush's line's tag written: after a fill's, should one be under way)
 	wire         b_go = b_st == B_WR;
-	// a queue of such lines, 16 of them, so that memory being busy holds up no pixel. A fill waits for it to empty: what it reads may be in it
+	// (its last word gone to the queue, the line's marked clean: but a flush's line, which is to be no line at all, has its tag written)
+	wire         b_cl = b_go && b_n == 2'd3 && !b_inv;
+	always_ff @(posedge clk)
+	begin
+		if (rst) cln <= 128'h0;
+		else
+		begin
+			if (b_cl) cln[b_i] <= 1'b1;
+			if (t_we) cln[t_wa] <= 1'b0;
+		end
+		c1_q <= (cln[t1_ra] || (b_cl && b_i == t1_ra)) && !(t_we && t_wa == t1_ra);
+		c2_q <= (cln[t2_ra] || (b_cl && b_i == t2_ra)) && !(t_we && t_wa == t2_ra);
+		c3_q <= (cln[t3_ra] || (b_cl && b_i == t3_ra)) && !(t_we && t_wa == t3_ra);
+		c4_q <= (cln[t4_ra] || (b_cl && b_i == t4_ra)) && !(t_we && t_wa == t4_ra);
+	end
+	// a queue of such lines, 16 of them, so that memory being busy holds up no pixel (a fill's read waits for its own line in it: below)
 	typedef enum logic [1:0] { Q_IDLE, Q_LOOK, Q_WR } qst_t;
 	qst_t        q_st;
 	logic [3:0]  q_wp, q_rp;
@@ -2483,38 +2583,82 @@ module te_cache (
 	wire  [31:0] q_mask = q_m[31:0];
 	wire  [7:0]  q_be = q_n == 2'd0 ? q_mask[7:0] : q_n == 2'd1 ? q_mask[15:8] : q_n == 2'd2 ? q_mask[23:16] : q_mask[31:24];
 	logic        q_sink;
-	wire         q_go = q_st == Q_WR && (q_sink ? !sink_wait : q_be == 8'h0 || (m_gnt && !m_busy));
+	// A fill's read waits only while its own line is in the queue (what it reads may be in it), not for the queue to empty: each waiting
+	// line's address is kept beside the queue, compared with the fill's a clock before its read may go (no line of the fill's address can
+	// be put in meanwhile: it isn't in the cache). The read goes before the queue's next word
+	logic [22:0] qa [0:15];
+	logic [15:0] qv;
+	logic        q_hit, fl2, f_rd;
+	logic [15:0] q_eq;
+	always_comb for (int k = 0; k < 16; k++) q_eq[k] = qv[k] && qa[k] == l_a;
+	always_ff @(posedge clk) begin q_hit <= |q_eq; fl2 <= st == C_FILL; end
+	wire         q_go = q_st == Q_WR && (q_sink ? !sink_wait : q_be == 8'h0 || (m_gnt && !m_busy && !f_rd));
 	wire         q_end = q_go && q_n == 2'd3;
 	wire         q_push = b_go && b_n == 2'd3;
 	te_ram #(.W(64), .AW(6)) q_data (.clk, .we(b_go), .wa({q_wp, b_n}), .wd(d2_q), .re(1'b1), .ra({q_rp, q_n + 2'(q_go)}), .rd(q_d));
 	te_ram #(.W(55), .AW(4)) q_meta (.clk, .we(q_push), .wa(q_wp), .wd({b_t, b_i, b_mask}), .re(1'b1), .ra(q_rp), .rd(q_m));
 	// (a write takes a line that nothing needs at once: a clean one's just replaced)
-	wire         w_clean = t2_f ? !(t_wr[18] && t_wr[16]) : !(t2_m[18] && t2_m[16]);
-	// A fetch (a line going out for it, the read, its words coming) stops only the line it's for: the others' reads and writes go on.
-	// A flush's walk and the reset's stop them all (the walk has the read port's tags)
-	wire         x_v = (st == C_EVW && !walking) || st == C_FILL || st == C_FILLW || st == C_REARM;
-	wire  [6:0]  x_i = (st == C_EVW || !fill) ? b_i : l_a[6:0];
+	wire         w_clean = (t2_f ? !(t_wr[18] && t_wr[16]) : !(t2_m[18] && t2_m[16])) || c2_q;
+	// A fetch stops only the line it's for: the others' reads and writes go on. A flush's walk and the reset's stop them all (the walk has
+	// the read port's tags). Up to three places are a fetch's at once: the one being got ready (the line in it going out, its read
+	// waiting to go: x_i), and two whose reads have gone (p_i: until the clock after their last word and their tag are written). So a
+	// line's read doesn't wait for the line before it to come from memory
+	wire         x_v = (st == C_EVW && !walking) || st == C_FILL || st == C_REARM;
+	logic [6:0]  x_i;                   // (set as the fetch starts)
+	logic [1:0]  p_v, p_r;              // a place whose line's read has gone; its last word's written (it's free the clock after)
+	logic [6:0]  p_i [0:1];
+	function automatic logic influx(input logic [6:0] i);
+		return (x_v && i == x_i) || (p_v[0] && i == p_i[0]) || (p_v[1] && i == p_i[1]);
+	endfunction
 	wire         walkst = st == C_INIT || st == C_FWALK || st == C_FLOOK || st == C_FEND || (st == C_EVW && walking);
-	wire         f_beat = st == C_FILLW && m_ready && m_gnt;     // a word of the fill: the write ports are its
-	wire         w_ok = (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i) && !walkst && !(x_v && w_a[11:5] == x_i) && !f_beat;
-	assign r_stall = r_v && !(r_hit && !walkst && !(x_v && r_a[11:5] == x_i));
+	// The reads that have gone, in their order (two at most): memory's words are the first's until it has its four. A line's words are
+	// kept as they come (fbuf) and written all at once with its tag the clock after the fourth (fb_v: so what holds a pixel's write is
+	// a register, not memory's ready): the write ports are the fill's for that one clock
+	logic [22:0] iq [0:1];
+	logic [1:0]  iq_cnt, rn;
+	logic [22:0] fb_a;
+	logic [63:0] fbuf [0:3];
+	wire         rx = m_ready && m_gnt && iq_cnt != 2'd0;
+	wire         iq_pop = rx && rn == 2'd3;
+	wire         iq_push = f_rd && !m_busy;
+	always_ff @(posedge clk)
+		if (rst) begin fb_v <= 1'b0; iq_cnt <= 2'd0; rn <= 2'd0; p_v <= 2'b00; p_r <= 2'b00; end
+		else
+		begin
+			fb_v <= iq_pop;
+			if (rx) begin fbuf[rn] <= m_dout; fb_a <= iq[0]; rn <= rn + 2'd1; end
+			if (iq_pop) iq[0] <= iq[1];
+			if (iq_push) iq[iq_cnt[0] ^ iq_pop] <= l_a;      // (after the first if it stays, in its place if it goes)
+			iq_cnt <= iq_cnt + 2'(iq_push) - 2'(iq_pop);
+			for (int k = 0; k < 2; k++)
+				if (p_r[k]) begin p_v[k] <= 1'b0; p_r[k] <= 1'b0; end
+				else if (p_v[k] && fb_v && fb_a[6:0] == p_i[k]) p_r[k] <= 1'b1;
+			if (iq_push)
+			begin
+				if (!p_v[0]) begin p_v[0] <= 1'b1; p_i[0] <= l_a[6:0]; end
+				else begin p_v[1] <= 1'b1; p_i[1] <= l_a[6:0]; end
+			end
+		end
+	wire         w_ok = (w_hit || w_clean) && !w_wait && !b_tw && !(b_busy && w_a[11:5] == b_i) && !walkst && !influx(w_a[11:5]) && !fb_v;
+	assign r_stall = r_v && !(r_hit && !walkst && !influx(r_a[11:5]));
 	assign       w_stall = w_v && !w_done && !w_ok;
 	assign       w_go = w_v && !w_done && w_ok;
 
-	// the data, the bytes of a word
-	logic        d_we;
+	// The data: a line is one word of RAM, its 32 bytes enabled one by one, in two copies (the pixels' reads, the write-back's). So a
+	// fill's four words are one write, and the write port is the pixels' again the clock after. A read gets a byte's old value in the
+	// clock it's written (te_lram8): a pixel reads its bytes of a line in the clock another pixel writes its own
+	logic        d_we, d_line;
 	logic [7:0]  d_be;
-	logic [8:0]  d_wa, d_ra, d2_ra;
+	logic [8:0]  d_wa;                  // (the line, the word in it)
+	logic [6:0]  d_ra;
 	logic [63:0] d_wd, d_q, d2_q;
-	genvar i;
-	generate
-	for (i = 0; i < 8; i++)
-	begin : g_b
-		ppc_ram #(.W(8), .AW(9)) b (.clk, .we(d_we && d_be[i]), .wa(d_wa), .wd(d_wd[8 * i +: 8]), .ra(d_ra), .rd(d_q[8 * i +: 8]));
-		ppc_ram #(.W(8), .AW(9)) b2 (.clk, .we(d_we && d_be[i]), .wa(d_wa), .wd(d_wd[8 * i +: 8]), .ra(d2_ra), .rd(d2_q[8 * i +: 8]));
-	end
-	endgenerate
-
+	logic [255:0] dl_q, dl2_q;
+	wire  [31:0] dl_be = !d_we ? 32'h0 : d_line ? 32'hffff_ffff : 32'(d_be) << {d_wa[1:0], 3'b000};
+	wire  [255:0] dl_wd = d_line ? {fbuf[3], fbuf[2], fbuf[1], fbuf[0]} : {4{d_wd}};
+	te_lram8 b (.clk, .be(dl_be), .wa(d_wa[8:2]), .wd(dl_wd), .ra(d_ra), .rd(dl_q));
+	te_lram8 b2 (.clk, .be(dl_be), .wa(d_wa[8:2]), .wd(dl_wd), .ra(b_i), .rd(dl2_q));
+	assign d_q = dl_q[64 * r_a[4:3] +: 64];
+	assign d2_q = dl2_q[64 * b_n +: 64];
 
 	// the answer to a read, from the 64
 	wire  [31:0] q32 = r_a[2] ? d_q[63:32] : d_q[31:0];
@@ -2537,11 +2681,12 @@ module te_cache (
 		end
 	wire  [7:0]  w_be = w_four ? 8'hff : w_a[2] ? {wbe, 4'h0} : {4'h0, wbe};
 
-	assign m_req = st == C_FILL || st == C_FILLW || (q_st != Q_IDLE && !(q_st == Q_WR && q_sink));
-	assign m_rd = st == C_FILL && q_e && m_gnt;
-	assign m_we = q_st == Q_WR && m_gnt && q_be != 8'h0 && !q_sink;
+	assign m_req = st == C_FILL || iq_cnt != 2'd0 || (q_st != Q_IDLE && !(q_st == Q_WR && q_sink));
+	assign f_rd = st == C_FILL && fl2 && !q_hit && m_gnt && !(p_v[0] && p_v[1]);
+	assign m_rd = f_rd;
+	assign m_we = q_st == Q_WR && m_gnt && q_be != 8'h0 && !q_sink && !f_rd;
 	assign m_sink = q_st == Q_WR && q_sink;
-	assign m_a = q_st != Q_IDLE ? {4'h4, q_t, q_i, q_n} : {4'h4, l_a, 2'b00};
+	assign m_a = q_st != Q_IDLE && !f_rd ? {4'h4, q_t, q_i, q_n} : {4'h4, l_a, 2'b00};
 	assign m_wd = q_d;
 	assign m_be = q_be;
 
@@ -2550,22 +2695,17 @@ module te_cache (
 		// reads
 		t1_ra = r_adv ? r_na[11:5] : r_a[11:5];
 		t2_ra = w_adv ? w_na[11:5] : w_a[11:5];
-		t3_ra = b_st == B_IDLE ? b_ti : b_i;
-		d_ra = r_adv ? r_na[11:3] : r_a[11:3];
-		d2_ra = {b_i, b_n + 2'(b_go)};
+		t3_ra = b_st == B_IDLE ? d_i : b_i;
+		d_ra = r_adv ? r_na[11:5] : r_a[11:5];
 		case (st)
 			C_FWALK, C_FLOOK: t1_ra = walk;
 			default: ;
 		endcase
 		// writes
-		t_we = 1'b0; t_wa = l_a[6:0]; t_wd = {32'h0, 1'b1, fill, 1'b0, l_a[22:7]};
-		d_we = 1'b0; d_be = 8'hff; d_wa = {l_a[6:0], n}; d_wd = m_dout;
+		t_we = 1'b0; t_wa = fb_a[6:0]; t_wd = {32'h0, 1'b1, 1'b1, 1'b0, fb_a[22:7]};
+		d_we = 1'b0; d_line = 1'b0; d_be = 8'hff; d_wa = {fb_a[6:0], 2'b00}; d_wd = 64'h0;
 		if (st == C_INIT) begin t_we = 1'b1; t_wa = walk; t_wd = 51'h0; end
-		else if (f_beat)
-		begin
-			d_we = 1'b1;
-			if (n == 2'd3) t_we = 1'b1;
-		end
+		else if (fb_v) begin d_we = 1'b1; d_line = 1'b1; t_we = 1'b1; end
 		else if (st == C_FLOOK)
 		begin
 			if (!(t1_q[18] && t1_q[16])) begin t_we = 1'b1; t_wa = walk; t_wd = 51'h0; end
@@ -2578,43 +2718,66 @@ module te_cache (
 			d_be = w_be;
 			t_we = 1'b1; t_wa = w_a[11:5]; t_wd = {(w_hit ? t2_q[50:19] : 32'h0) | (32'(w_be) << {w_a[4:3], 3'b000}), 1'b1, w_hit && t2_q[17], 1'b1, w_t};
 		end
-		if (b_tw) begin t_we = 1'b1; t_wa = b_i; t_wd = b_inv ? 51'h0 : {32'h0, 1'b1, b_f, 1'b0, b_t}; end
+		if (b_tw) begin t_we = 1'b1; t_wa = b_i; t_wd = 51'h0; end     // (a flush's line: no line any more)
 	end
 
 	wire         w_miss = w_v && !w_done && !w_hit && !w_clean;
 	wire         r_miss = r_v && !r_hit;
 
-	// the line the pixels are on, the read ahead of the write
-	wire         lead_v = r_v || (w_v && !w_done);
-	wire  [6:0]  lead_i = r_v ? r_a[11:5] : w_a[11:5];
-	wire         lead_back = lead_i == b_last - 7'd1;
 	logic        flush_p;
+	// A fetch starts from the idle state: for a write's miss (the line in its place goes out, no more), a read's miss, or the first wanted
+	// line when no miss waits to start and no write goes to its place this clock (the tag just read wouldn't have it). If the line in the
+	// fetch's place is dirty it goes out first, and for that the write-back must be free; if not, the write-back need only not be at that
+	// place. A place that's already a fetch's waits (a miss: its line may be the one coming) or is passed over (a wanted line: it's
+	// coming, or the place is another's), as is a wanted line that's here, or whose place a waiting read or write is using for another
+	// line (fetching it would take that line from under its pixels).
+	wire         r_infl = influx(r_a[11:5]), w_infl = influx(w_a[11:5]), s_infl = influx(s_i);
+	wire         r_wait = r_miss && !r_infl, w_wait_m = w_miss && !w_infl;       // a miss with a fetch (a line's going out) still to start
+	wire         r_dirty = t1_q[18] && t1_q[16], s_dirty = t4_q[18] && t4_q[16];
+	wire         r_can = r_dirty ? !b_busy : !(b_busy && b_i == r_a[11:5]);
+	wire         s_can = s_dirty ? !b_busy : !(b_busy && b_i == s_i);
+	wire         fl_w = flush || flush_p;
+	wire         w_start = idle && !fl_w && w_wait_m && !b_busy;
+	wire         r_start = idle && !fl_w && !w_wait_m && r_wait && !w_go && r_can;
+	wire         s_have = t4_q[18] && t4_q[17] && t4_q[15:0] == s_t;
+	wire         s_alias = (r_v && r_a[11:5] == s_i && r_t != s_t) || (w_v && !w_done && w_a[11:5] == s_i && w_t != s_t);
+	wire         s_now = sw_cnt != 3'd0 && t4_ok && idle && !fl_w && !w_wait_m && !r_wait && !(w_go && w_a[11:5] == s_i)
+		&& (s_have || s_alias || s_infl || s_can);
+	wire         s_go = s_now && !s_have && !s_alias && !s_infl;
+	assign       sw_pop = s_now;
+	// The write-back's own starts, when no fetch has it (a fetch's line going out, a flush's walk) and none starts this clock:
+	// - a write's miss while a fetch waits to send its read: the line in the write's place goes out meanwhile, not after;
+	// - else the first line the pixels will write, if no miss waits to start (its fetch would then wait for this), while the cache is
+	//   idle or a fetch waits to send its read. Not a fetch's place.
+	wire         c_start = w_start || r_start || s_go;
+	wire         b_free = b_st == B_IDLE && !fl_w && !c_start;
+	wire         bw_now = b_free && st == C_FILL && w_wait_m;
+	wire         d_now = b_free && (idle || st == C_FILL) && dw_cnt != 3'd0 && !w_wait_m && !r_wait && !influx(d_i);
+	assign       dw_pop = d_now;
 
 	always_ff @(posedge clk)
 	begin
 		flushed <= 1'b0;
-		if (rst) begin st <= C_INIT; walk <= 7'd0; walking <= 1'b0; b_st <= B_IDLE; b_pend <= 1'b0; b_n <= 2'd0; flush_p <= 1'b0; q_st <= Q_IDLE; q_wp <= 4'd0; q_rp <= 4'd0; q_cnt <= 5'd0; q_n <= 2'd0; end
+		if (rst) begin st <= C_INIT; walk <= 7'd0; walking <= 1'b0; b_st <= B_IDLE; b_n <= 2'd0; flush_p <= 1'b0; q_st <= Q_IDLE; q_wp <= 4'd0; q_rp <= 4'd0; q_cnt <= 5'd0; q_n <= 2'd0; qv <= 16'h0; end
 		else
 		begin
 			if (flush) flush_p <= 1'b1;     // (it's a clock long, and a write-back may be under way)
-			if (lead_v && lead_i != b_last)
-			begin
-				b_last <= lead_i;
-				b_ti <= lead_back ? lead_i - 7'd1 : lead_i + 7'd1;
-				b_pend <= 1'b1;
-			end
 			case (b_st)
 				B_IDLE:
-					if (b_pend && idle && !flush && !flush_p && !w_miss && !r_miss)
+					if (bw_now)
 					begin
-						b_i <= b_ti;
-						b_pend <= lead_v && lead_i != b_last;
+						b_i <= w_a[11:5]; b_t <= t2_q[15:0]; b_mask <= t2_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
+						b_st <= B_RD;
+					end
+					else if (d_now)
+					begin
+						b_i <= d_i; b_wt <= dw_h[22:7];
 						b_st <= B_LOOK;
 					end
 				B_LOOK:
-					if (t3_q[18] && t3_q[16])
+					if (t3_q[18] && t3_q[16] && t3_q[15:0] != b_wt)
 					begin
-						b_t <= t3_q[15:0]; b_f <= t3_q[17]; b_mask <= t3_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
+						b_t <= t3_q[15:0]; b_mask <= t3_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
 						b_st <= B_RD;
 					end
 					else b_st <= B_IDLE;
@@ -2623,12 +2786,17 @@ module te_cache (
 					if (b_go)
 					begin
 						b_n <= b_n + 2'd1;
-						if (b_n == 2'd3) b_st <= B_TAG;
+						if (b_n == 2'd3)
+						begin
+							if (b_inv) b_st <= B_TAG;
+							else begin b_st <= B_IDLE; b_n <= 2'd0; end
+						end
 					end
-				B_TAG: begin b_st <= B_IDLE; b_n <= 2'd0; end
+				B_TAG: if (!fb_v) begin b_st <= B_IDLE; b_n <= 2'd0; end
 				default: b_st <= B_IDLE;
 			endcase
-			if (q_push) q_wp <= q_wp + 4'd1;
+			if (q_push) begin q_wp <= q_wp + 4'd1; qa[q_wp] <= {b_t, b_i}; qv[q_wp] <= 1'b1; end
+			if (q_end) qv[q_rp] <= 1'b0;
 			q_cnt <= q_cnt + 5'(q_push) - 5'(q_end);
 			case (q_st)
 				Q_IDLE: if (!q_e) q_st <= Q_LOOK;
@@ -2647,27 +2815,39 @@ module te_cache (
 					if (walk == 7'h7f) st <= C_IDLE;
 				end
 				C_IDLE:
-					if (!b_busy)
+					if (fl_w)
 					begin
-						if (flush || flush_p) begin flush_p <= 1'b0; walk <= 7'd0; walking <= 1'b1; st <= C_FWALK; end
-						else if (w_miss)
+						// (a flush waits for the write-back and for the lines still coming)
+						if (!b_busy && iq_cnt == 2'd0 && p_v == 2'b00) begin flush_p <= 1'b0; walk <= 7'd0; walking <= 1'b1; st <= C_FWALK; end
+					end
+					else if (w_start)
+					begin
+						fill <= 1'b0; x_i <= w_a[11:5];
+						b_i <= w_a[11:5]; b_t <= t2_q[15:0]; b_mask <= t2_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
+						b_st <= B_RD;
+						st <= C_EVW;
+					end
+					else if (r_start)             // (not with a write this clock: it isn't in the bytes the tag has yet)
+					begin
+						l_a <= r_a[27:5]; fill <= 1'b1; x_i <= r_a[11:5];
+						if (r_dirty)
 						begin
-							fill <= 1'b0;
-							b_i <= w_a[11:5]; b_t <= t2_q[15:0]; b_f <= t2_q[17]; b_mask <= t2_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
+							b_i <= r_a[11:5]; b_t <= t1_q[15:0]; b_mask <= t1_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
 							b_st <= B_RD;
 							st <= C_EVW;
 						end
-						else if (r_miss && !w_go)   // (a write this clock isn't in the bytes the tag has yet)
+						else st <= C_FILL;
+					end
+					else if (s_go)
+					begin
+						l_a <= sw_h; fill <= 1'b1; x_i <= s_i;
+						if (s_dirty)
 						begin
-							l_a <= r_a[27:5]; fill <= 1'b1;
-							if (t1_q[18] && t1_q[16])
-							begin
-								b_i <= r_a[11:5]; b_t <= t1_q[15:0]; b_f <= t1_q[17]; b_mask <= t1_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
-								b_st <= B_RD;
-								st <= C_EVW;
-							end
-							else st <= C_FILL;
+							b_i <= s_i; b_t <= t4_q[15:0]; b_mask <= t4_q[50:19]; b_inv <= 1'b0; b_n <= 2'd0;
+							b_st <= B_RD;
+							st <= C_EVW;
 						end
+						else st <= C_FILL;
 					end
 				C_EVW:
 					if (!b_busy)
@@ -2680,19 +2860,13 @@ module te_cache (
 						else st <= fill ? C_FILL : C_REARM;
 					end
 				C_FILL:
-					if (q_e && m_gnt && !m_busy) begin n <= 2'd0; st <= C_FILLW; end
-				C_FILLW:
-					if (m_ready && m_gnt)
-					begin
-						n <= n + 2'd1;
-						if (n == 2'd3) st <= C_REARM;
-					end
-				C_REARM: st <= C_IDLE;          // (a clock for the RAMs, on the waiting ports' addresses)
+					if (f_rd && !m_busy) st <= C_IDLE;      // (the read's gone: its words are taken as they come, while the next line's got ready)
+				C_REARM: st <= C_IDLE;          // (after a line's gone out for a write: a clock for the RAMs, on the waiting ports' addresses)
 				C_FWALK: st <= C_FLOOK;
 				C_FLOOK:
 					if (t1_q[18] && t1_q[16])
 					begin
-						b_i <= walk; b_t <= t1_q[15:0]; b_f <= t1_q[17]; b_mask <= t1_q[50:19]; b_inv <= 1'b1; b_n <= 2'd0;
+						b_i <= walk; b_t <= t1_q[15:0]; b_mask <= t1_q[50:19]; b_inv <= 1'b1; b_n <= 2'd0;
 						b_st <= B_RD;
 						st <= C_EVW;
 					end
@@ -2941,6 +3115,34 @@ module te_lram #(
 		.width_byteena_a(32), .byte_size(8), .address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
 		.read_during_write_mode_mixed_ports("DONT_CARE"), .power_up_uninitialized("TRUE")
 	) ram (.clock0(clk), .wren_a(|le), .byteena_a(be), .address_a(wa), .data_a(wd), .address_b(ra), .q_b(rd));
+`endif
+endmodule
+
+// 128 lines of 256 bits, written by bytes, read a clock after the address: the colour cache's data. A line read in the clock some of its
+// bytes are written gives the old ones ("OLD_DATA": the bytes that aren't written must be right, and with "DONT_CARE" nothing says so)
+module te_lram8 #(
+	parameter int AW = 7
+) (
+	input  logic         clk,
+	input  logic [31:0]  be,
+	input  logic [AW-1:0] wa,
+	input  logic [255:0] wd,
+	input  logic [AW-1:0] ra,
+	output logic [255:0] rd
+);
+`ifdef VERILATOR
+	logic [255:0] mem [0:(1 << AW) - 1];
+	always_ff @(posedge clk)
+	begin
+		for (int i = 0; i < 32; i++) if (be[i]) mem[wa][8 * i +: 8] <= wd[8 * i +: 8];
+		rd <= mem[ra];
+	end
+`else
+	altsyncram #(
+		.operation_mode("DUAL_PORT"), .width_a(256), .widthad_a(AW), .numwords_a(1 << AW), .width_b(256), .widthad_b(AW), .numwords_b(1 << AW),
+		.width_byteena_a(32), .byte_size(8), .address_reg_b("CLOCK0"), .outdata_reg_b("UNREGISTERED"), .ram_block_type("M10K"),
+		.read_during_write_mode_mixed_ports("OLD_DATA"), .power_up_uninitialized("FALSE")
+	) ram (.clock0(clk), .wren_a(|be), .byteena_a(be), .address_a(wa), .data_a(wd), .address_b(ra), .q_b(rd));
 `endif
 endmodule
 
