@@ -139,12 +139,12 @@ module ppc_pipe #(
 	logic [31:0] msr, fpscr;
 	logic [31:0] pc;                    // the next instruction in program order (after what X has taken)
 	logic [1:0]  fmode;                 // the float unit's rounding mode (see MTFSB0)
-	// the segment registers: their words in a small RAM (xr_mem, in the logic's memory, read unregistered: X reads it as it
-	// read registers, in the same clock), written by mtsr / mtsrin and the bench (xr_we); their N bits, which the fetch's
-	// translation reads every clock, in registers too (sr_n)
-	(* ramstyle = "MLAB, no_rw_check" *) logic [31:0] xr_mem [0:15];
+	// the segment registers: their words in a small RAM (xr_mem 0-15, in the logic's memory, read unregistered: X reads it
+	// as it read registers, in the same clock), written by mtsr / mtsrin and the bench (xr_we); their N bits, which the
+	// fetch's translation reads every clock, in registers too (sr_n). xr_mem 16-29: the SPRs only software reads (xr_spr)
+	(* ramstyle = "MLAB, no_rw_check" *) logic [31:0] xr_mem [0:31];
 	logic        xr_we;
-	logic [3:0]  xr_wa, xr_ra;
+	logic [4:0]  xr_wa, xr_ra;
 	logic [31:0] xr_wd, xr_rd;
 	logic [31:0] dec;
 	logic [63:0] tb;
@@ -152,7 +152,18 @@ module ppc_pipe #(
 
 	// the SPRs this core keeps, by MAME's number. Not kept (read 0, writes ignored, as any other SPR number): EAR 282, 346,
 	// 1011 and 1013, which MAME keeps and a 602 doesn't have (user's manual 2.1: EAR not implemented). Their slots (11, 43,
-	// 46, 47) are constants, read through sprv_r: an entry only left unwritten keeps its flops (a variable-index read)
+	// 46, 47) are constants, read through sprv_r: an entry only left unwritten keeps its flops (a variable-index read).
+	// Those nothing but mfspr reads and nothing but mtspr (or the bench) writes are in xr_mem, not sprv (their slots
+	// constants too): SPRG0-3, IMISS, ICMP (mtspr leaves both alone, as MAME), RPA, TCR, SEBR, SER, HID1, IABR, SP, LT
+	function automatic logic [4:0] xr_spr(input logic [9:0] n);    // the SPR's xr_mem entry, or 0
+		case (n)
+			10'd272: return 5'd16;  10'd273: return 5'd17;  10'd274: return 5'd18;  10'd275: return 5'd19;
+			10'd980: return 5'd20;  10'd981: return 5'd21;  10'd982: return 5'd22;  10'd984: return 5'd23;
+			10'd990: return 5'd24;  10'd991: return 5'd25;  10'd1009: return 5'd26; 10'd1010: return 5'd27;
+			10'd1021: return 5'd28; 10'd1022: return 5'd29;
+			default: return 5'd0;
+		endcase
+	endfunction
 	localparam int NSPR = 48;
 	logic [31:0] sprv [0:NSPR-1];
 	function automatic int spr_idx(input logic [9:0] n);
@@ -170,7 +181,8 @@ module ppc_pipe #(
 			default: return -1;
 		endcase
 	endfunction
-	localparam logic [NSPR-1:0] SPR_KEEP = ~((48'h1 << 11) | (48'h1 << 43) | (48'h1 << 46) | (48'h1 << 47));
+	localparam logic [NSPR-1:0] SPR_KEEP = ~((48'h1 << 11) | (48'h1 << 43) | (48'h1 << 46) | (48'h1 << 47) |   // (not kept)
+		(48'hf << 7) | (48'hf << 32) | (48'h3 << 38) | (48'h3 << 41) | (48'h3 << 44));                     // (xr_mem's)
 	logic [31:0] sprv_r [0:NSPR-1];
 	always_comb for (int i = 0; i < NSPR; i++) sprv_r[i] = SPR_KEEP[i] ? sprv[i] : 32'h0;
 	localparam int X_LR = 0, X_CTR = 1, X_DSISR = 2, X_DAR = 3, X_SDR1 = 4, X_SRR0 = 5, X_SRR1 = 6, X_IBAT = 12,
@@ -298,6 +310,7 @@ module ppc_pipe #(
 			10'd269: return {8'h0, tb[55:32]};
 			default:
 			begin
+				if (xr_spr(n) != 5'd0) return xr_rd;      // (xr_ra: X's mfspr's)
 				k = spr_idx(n);
 				return k >= 0 ? sprv_r[k] : 32'h0;
 			end
@@ -680,6 +693,7 @@ module ppc_pipe #(
 	localparam logic [2:0] AB_SIMM = 3'd0, AB_SHI = 3'd1, AB_RB = 3'd2, AB_ZERO = 3'd3, AB_ONES = 3'd4;
 	localparam logic [1:0] AC_0 = 2'd0, AC_1 = 2'd1, AC_CA = 2'd2;
 	localparam logic [1:0] LB_RB = 2'd0, LB_UIMM = 2'd1, LB_UHI = 2'd2;
+	// (MS_SR: xr_mem's entry spr[4:0], an SR's for mfsr or an SPR's for mfspr (xr_spr); MS_SRIN: rB's SR)
 	localparam logic [2:0] MS_CLZ = 3'd0, MS_EXTSB = 3'd1, MS_EXTSH = 3'd2, MS_CR = 3'd3, MS_MSR = 3'd4, MS_SPR = 3'd5,
 		MS_SR = 3'd6, MS_SRIN = 3'd7;
 	localparam logic [2:0] FM_B = 3'd0, FM_SEL = 3'd1, FM_NEG = 3'd2, FM_NABS = 3'd3, FM_ABS = 3'd4, FM_FFS = 3'd5;
@@ -747,8 +761,13 @@ module ppc_pipe #(
 					10'h39a: begin d.rs = R_MISC; d.ms = MS_EXTSH; end
 					10'h013: begin d.rs = R_MISC; d.ms = MS_CR; end                                   // MFCR
 					10'h053: begin d.rs = R_MISC; d.ms = MS_MSR; end                                  // MFMSR
-					10'h153, 10'h173: begin d.rs = R_MISC; d.ms = MS_SPR; end                         // MFSPR, MFTB
-					10'h253: begin d.rs = R_MISC; d.ms = MS_SR; end                                   // MFSR
+					10'h153:                                                                          // MFSPR
+					begin
+						d.rs = R_MISC; d.ms = MS_SPR;
+						if (xr_spr({o[15:11], o[20:16]}) != 5'd0) begin d.ms = MS_SR; d.spr = {1'b0, xr_spr({o[15:11], o[20:16]})}; end
+					end
+					10'h173: begin d.rs = R_MISC; d.ms = MS_SPR; end                                  // MFTB
+					10'h253: begin d.rs = R_MISC; d.ms = MS_SR; d.spr = {2'b00, o[19:16]}; end         // MFSR
 					10'h293: begin d.rs = R_MISC; d.ms = MS_SRIN; end                                 // MFSRIN
 					default: ;
 				endcase
@@ -1129,29 +1148,27 @@ module ppc_pipe #(
 		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
 	end
 
-	// the segment registers (xr_mem). Written by X's mtsr / mtsrin as it takes them, or the bench's load (while rst, or held;
-	// the clock's block's dbg_write conditions); read by X's mfsr (op's SR) and mfsrin (rB's), and by M's address clock
-	// when it faults for a data TLB miss (dfault: the segment's VSID; X takes nothing then)
+	// the segment registers and the SPRs only software reads (xr_mem). Written by X's mtsr / mtsrin / mtspr as it takes them
+	// (an mtspr of IMISS or ICMP does nothing, as MAME's), or the bench's load (while rst, or held; the clock's block's
+	// dbg_write conditions); read by X's mfsr (op's SR) and mfspr (its entry: both pd.r.spr's) and mfsrin (rB's SR), and by
+	// M's address clock when it faults for a data TLB miss (dfault: the segment's VSID; X takes nothing then)
+	wire  [4:0] xr_x = xr_spr(sprn), xr_d = dbg_idx >= 11'd1024 ? xr_spr(dbg_idx[9:0]) : {1'b0, dbg_idx[3:0]};
+	wire        xr_dw = dbg_we && ((dbg_idx >= 11'd80 && dbg_idx < 11'd96) || (dbg_idx >= 11'd1024 && xr_d != 5'd0));
 	always_comb
 	begin
-		xr_we = 1'b0; xr_wa = xo == 10'h0d2 ? op[19:16] : rb_v[31:28]; xr_wd = rs_v;
+		xr_we = 1'b0; xr_wa = xo == 10'h1d3 ? xr_x : xo == 10'h0d2 ? {1'b0, op[19:16]} : {1'b0, rb_v[31:28]}; xr_wd = rs_v;
 		if (rst)
 		begin
-			if (rst_q && dbg_we && dbg_idx >= 11'd80 && dbg_idx < 11'd96)
-			begin
-				xr_we = 1'b1; xr_wa = dbg_idx[3:0]; xr_wd = dbg_val[31:0];
-			end
+			if (rst_q && xr_dw) begin xr_we = 1'b1; xr_wa = xr_d; xr_wd = dbg_val[31:0]; end
 		end
-		else if (x_exec && opc == 6'h1f && (xo == 10'h0d2 || xo == 10'h0f2)) xr_we = 1'b1;              // MTSR, MTSRIN
-		else if (xstate == XS_RUN && !x_cons && hold_flush && dbg_we && dbg_idx >= 11'd80 && dbg_idx < 11'd96)
-		begin
-			xr_we = 1'b1; xr_wa = dbg_idx[3:0]; xr_wd = dbg_val[31:0];
-		end
-		xr_ra = a_flt ? a_va[31:28] : pd.r.ms == MS_SRIN ? rb_v[31:28] : op[19:16];
+		else if (x_exec && opc == 6'h1f && (xo == 10'h0d2 || xo == 10'h0f2 ||                             // MTSR, MTSRIN
+			(xo == 10'h1d3 && xr_x != 5'd0 && sprn != 10'd980 && sprn != 10'd981))) xr_we = 1'b1;    // MTSPR
+		else if (xstate == XS_RUN && !x_cons && hold_flush && xr_dw) begin xr_we = 1'b1; xr_wa = xr_d; xr_wd = dbg_val[31:0]; end
+		xr_ra = a_flt ? {1'b0, a_va[31:28]} : pd.r.ms == MS_SRIN ? {1'b0, rb_v[31:28]} : pd.r.spr[4:0];
 	end
 	always_ff @(posedge clk) if (xr_we) xr_mem[xr_wa] <= xr_wd;
 	assign xr_rd = xr_mem[xr_ra];
-	always_ff @(posedge clk) if (xr_we) sr_n[xr_wa] <= xr_wd[28];
+	always_ff @(posedge clk) if (xr_we && !xr_wa[4]) sr_n[xr_wa[3:0]] <= xr_wd[28];
 
 	// X's GPR result, from units whose choices pd has (rdec_t): gw_v takes it with no decode in front, and CR0 its zero
 	function automatic logic [31:0] spr_rv(input logic [5:0] k);
