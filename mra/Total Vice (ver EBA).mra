@@ -6,7 +6,7 @@
     <manufacturer>Konami</manufacturer>
     <rbf>KonamiM2</rbf>
     <!-- Select (Service): 2P Start while the OSD's Service mode is on, which the test menu needs to open an item -->
-    <buttons names="Trigger,Reload,Select (Service),Start,Coin" default="B,A,X,Start,Select" />
+    <buttons names="Trigger,Reload,Select (Service),Start,Coin,Pause,Step" default="B,A,X,Start,Select,R,L" />
     <!-- the board's two DIP switches, as MAME's P2 (the rest unused) -->
     <switches default="FE" base="16">
         <dip bits="0" name="Sound Output" ids="Stereo,Mono" values="0,1"/>

@@ -76,6 +76,12 @@ module m2_boot #(
 	// the CPUs' caches' size, each side (rtl/ppc_cache.sv's size: 0 PPC_CACHE_KB, 1 half, 2 a quarter, 3 an eighth), taken at reset
 	input  logic [1:0]  cache_size,
 
+	// the pause (KonamiM2.sv, for screenshots): pause holds the machine (both CPUs at their next instruction, their DEC and TB, the
+	// DSP's, the CD audio's and the YMZ280B's samples, so the sound stops); what's started (a TE list, a DMA, the CD's reads) finishes
+	// and waits, and the picture stays. step (a clock, while paused) runs the machine to the next frame's start
+	input  logic        pause,
+	input  logic        step,
+
 	// the CD's audio: a raw image of the disc on the SD card
 	input  logic        cd_mounted,
 	output logic [31:0] sd_lba,
@@ -159,10 +165,14 @@ module m2_boot #(
 	ppc_fpu_pkg::fp_req_t fp_req [0:N-1];
 	ppc_fpu_pkg::fp_res_t fp_res;
 
+	// the pause: held unless a step is running (to the next frame's start: below, with vdu_frame)
+	logic stepping;
+	wire hold = pause && !stepping;
+
 	// DEC and TB
 	logic [2:0] tick_n;
 	always_ff @(posedge clk) tick_n <= rst || tick_n == 3'(TICK - 1) ? 3'd0 : tick_n + 3'd1;
-	wire dec_tick = tick_n == 3'(TICK - 1);
+	wire dec_tick = tick_n == 3'(TICK - 1) && !hold;
 
 	ppc_fpx #(.TWO(1'b1)) fpx (.clk, .rst, .req0(fp_req[0]), .req1(fp_req[1]), .res(fp_res));
 
@@ -192,7 +202,7 @@ module m2_boot #(
 			.timer_read_o(), .pc_o(), .gpr_o(), .fpr_o(),
 			.cr_o(), .lr_o(), .ctr_o(), .xer_o(), .msr_o(), .srr0_o(), .srr1_o(), .fpscr_o(), .gpr_pend_o(), .fpr_pend_o(),
 			.perf_o(c_perf[g]), .perf_pc_o(),
-			.dbg_hold(1'b0), .dbg_idle(), .dbg_we(1'b0), .dbg_idx(11'd0), .dbg_val(64'd0), .dbg_int(2'd0),
+			.dbg_hold(hold), .dbg_idle(), .dbg_we(1'b0), .dbg_idx(11'd0), .dbg_val(64'd0), .dbg_int(2'd0),
 			.fp_req(fp_req[g]), .fp_res
 		);
 		// verilator lint_on PINCONNECTEMPTY
@@ -294,8 +304,9 @@ module m2_boot #(
 	assign m_g = g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
 	wire [27:3] ld_ddr = ld_ymz ? {6'b011000, ld_a[21:3]} : ld_cd ? {ld_a[25] ? 3'b010 : 3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
 	// verilator lint_off UNUSEDSIGNAL
-	logic        vdu_frame, vdu_flip;   // (for M2_FPS)
+	logic        vdu_frame, vdu_flip;   // (vdu_frame: the pause's step; both for M2_FPS)
 	// verilator lint_on UNUSEDSIGNAL
+	always_ff @(posedge clk) stepping <= rst || !pause ? 1'b0 : step ? 1'b1 : vdu_frame ? 1'b0 : stepping;
 `ifdef M2_FPS
 	// a debug build's frame rate (rtl/m2_fps.sv): its writes go in the clocks nothing else uses DDR3
 	logic        fps_wr;
@@ -498,8 +509,10 @@ module m2_boot #(
 	// 44.1 kHz, from 66.67 MHz
 	logic [10:0] dac_n;
 	logic [15:0] dac_l, dac_r;
-	wire         dac_tick = dac_n == 11'd1511;
-	always_ff @(posedge clk) dac_n <= rst || dac_tick ? 11'd0 : dac_n + 11'd1;
+	// (none while the pause holds: the DSP, the CD audio and the YMZ280B wait)
+	wire         dac_tick = dac_n == 11'd1511 && !hold;
+	wire         dac_half = dac_n == 11'd755 && !hold;
+	always_ff @(posedge clk) dac_n <= rst || dac_tick ? 11'd0 : hold ? dac_n : dac_n + 11'd1;
 	m2_dspp dsp
 	(
 		.clk, .rst,
@@ -565,7 +578,7 @@ module m2_boot #(
 	wire         ymz_rd = u_req && !u_we && u_ymz;
 	m2_ymz280b ymz
 	(
-		.clk, .rst, .tick(dac_n == 11'd755 || dac_tick),
+		.clk, .rst, .tick(dac_half || dac_tick),
 		.sel_we(ymz_wr && (u_size == 4'd4 || !u_pa[1])), .sel_d(u_size == 4'd4 ? u_wdata[31:24] : u_size == 4'd2 ? u_wdata[15:8] : u_wdata[7:0]),
 		.dat_we(ymz_wr && (u_size == 4'd4 || u_pa[1])), .dat_d(u_size == 4'd1 ? u_wdata[7:0] : u_wdata[15:8]),
 		.ext_rd(ymz_rd && !u_pa[1]), .st_rd(ymz_rd && (u_pa[1] || u_size == 4'd4)), .ext_q(ymz_ext), .st_q(ymz_st),
