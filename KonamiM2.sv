@@ -93,8 +93,10 @@ localparam CONF_STR = {
 	"H1O[36:35],P1 Stick,Auto,Aim,D-pad;",
 	"H1O[38:37],P2 Stick,Auto,Aim,D-pad;",
 	"H2O[40:39],P3 Stick,Auto,Aim,D-pad;",
-	"H1O[42:41],Mouse,Player 1,Player 2,Player 3,Off;",
+	"H1O[50:48],Mouse,P1 trigger,P1 aim+trigger,P2 trigger,P2 aim+trigger,P3 trigger,P3 aim+trigger,Off;",  // ("trigger": the buttons only, a Sinden's)
 	"H1O[45:43],Crosshair,Off,Player 1,Player 2,Player 3,P1+P2,All;",
+	"H1O[47:46],Sinden border,16 px,24 px,8 px,Off;",  // (a white border round the picture for a Sinden gun's camera: rtl/m2_guns.sv)
+	"H1O[52:51],Off-screen edge,4 px,2 px,8 px,10 px;",  // (a gun this near the left, right or top edge is off the screen: reloads)
 	"H1-;",
 	"O[3],Service mode,Off,On;",
 	"O[8],Pause when OSD is open,Off,On;",  // (and P1's Pause button; while paused, Step runs a frame: below)
@@ -349,9 +351,10 @@ wire  [8:0] gun_y_o [0:2];
 m2_guns u_guns
 (
 	.clk(clk_sys), .rst(core_rst | ~gun_game), .vblank(vblank),
-	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[42:41]), .off_fire(board[2]), .arc(board[4]),
+	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[50:48]), .edge_sel(status[52:51]), .off_fire(board[2]), .arc(board[4]),
 	.gun_x(gun_x_o), .gun_y(gun_y_o), .p5(gun_p5),
-	.show(gun_show), .hpos(hpos), .vpos(vpos), .rgb_in(rgb_game), .rgb_out(rgb)
+	.show(gun_show), .border(gun_game ? status[47:46] : 2'd3),  // (3: no border; only the gun games have one)
+	.hpos(hpos), .vpos(vpos), .rgb_in(rgb_game), .rgb_out(rgb)
 );
 `else
 // (NO_GUN_BOARD: no guns, in a build that isn't for the gun games: Heat of Eleven's, Battle Tryst's)
