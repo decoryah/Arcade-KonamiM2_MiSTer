@@ -265,6 +265,11 @@ module m2_boot #(
 	logic        mpg_m_busy, mpg_m_ready;   // (not used in a build without MPEG_CTL)
 	// verilator lint_on UNUSEDSIGNAL
 	logic [31:3] mpg_m_a;
+`ifdef MPEG_HPS
+	logic        mpg_m_we, mpg_hold;
+	logic [63:0] mpg_m_wd;
+	logic [7:0]  mpg_m_be;
+`endif
 	logic        te_m_rd, te_m_we, te_m_busy, te_m_ready, te_busy;
 	logic [23:0] v_rgb;
 	logic [31:3] te_m_a;
@@ -291,6 +296,9 @@ module m2_boot #(
 		.dsp_rd(dsp_m_rd), .dsp_a(dsp_m_a), .dsp_busy(dsp_m_busy), .dsp_ready(dsp_m_ready),
 		.ymz_rd(ymz_m_rd), .ymz_a(ymz_m_a), .ymz_busy(ymz_m_busy), .ymz_ready(ymz_m_ready),
 		.mpg_rd(mpg_m_rd), .mpg_a(mpg_m_a), .mpg_busy(mpg_m_busy), .mpg_ready(mpg_m_ready),
+`ifdef MPEG_HPS
+		.mpg_we(mpg_m_we), .mpg_wd(mpg_m_wd), .mpg_be(mpg_m_be),
+`endif
 		.vdu_rd(vdu_m_rd), .vdu_four(vdu_m_four), .vdu_a(vdu_m_a), .vdu_busy(vdu_m_busy), .vdu_ready(vdu_m_ready),
 		.te_rd(te_m_rd), .te_we(te_m_we), .te_a(te_m_a), .te_wd(te_m_wd), .te_be(te_m_be), .te_busy(te_m_busy), .te_ready(te_m_ready),
 		.ddr_busy, .ddr_dout_ready,
@@ -301,7 +309,15 @@ module m2_boot #(
 	map_t        m_g;
 	// verilator lint_on UNUSEDSIGNAL
 	// (the CD image's address is the drive's own: no CPU sees it)
+`ifdef MPEG_HPS
+	// (and the block the MPEG unit shares with the ARM's decoder, MPEG_HPS: 512 KB at DDR3 0x30400000, after the ROM, before a debug
+	// build's rings at 0x30800000; the unit's own addresses for it, 0x58000000 +, are no CPU's either)
+	localparam logic [27:19] MPEG_BASE = 9'h008;
+	assign m_g = g_a[31:27] == 5'b01011 ? map_t'({1'b1, 1'b1, MPEG_BASE, g_a[18:3], 3'b000}) :
+		g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
+`else
 	assign m_g = g_a[31:27] == 5'b01010 ? map_t'({1'b1, 1'b1, g_a[26] ? 3'b011 : g_a[25] ? 3'b010 : 3'b001, g_a[24:3], 3'b000}) : map({g_a, 3'b000});
+`endif
 	wire [27:3] ld_ddr = ld_ymz ? {6'b011000, ld_a[21:3]} : ld_cd ? {ld_a[25] ? 3'b010 : 3'b001, ld_a[24:3]} : {7'h0, ld_a[20:3]};
 	// verilator lint_off UNUSEDSIGNAL
 	logic        vdu_frame, vdu_flip;   // (vdu_frame: the pause's step; both for M2_FPS)
@@ -364,7 +380,11 @@ module m2_boot #(
 
 	// ---- the registers: one CPU's access at a time: the choice, the access, the answer, a clock each ----------------------
 	logic [N-1:0] u_pend;
+`ifdef MPEG_HPS
+	wire         n_req = u_pend != 2'b00 && !mpg_hold;      // (the MPEG unit's log of its register writes has room)
+`else
 	wire         n_req = u_pend != 2'b00;
+`endif
 	wire         n_s = !u_pend[0];
 	logic        u_req, u_s, a_req, a_s, a_we;
 	logic [31:0] u_pa;
@@ -498,6 +518,9 @@ module m2_boot #(
 	(
 		.clk, .rst,
 		.a(u_pa[9:2]), .we(u_req && u_we && u_mpg), .wd(u_wdata[31:0]), .rd(mpg_rd), .intr(mpg_int),
+`ifdef MPEG_HPS
+		.m_we(mpg_m_we), .m_wd(mpg_m_wd), .m_be(mpg_m_be), .hold(mpg_hold),
+`endif
 		.m_rd(mpg_m_rd), .m_a(mpg_m_a), .m_busy(mpg_m_busy), .m_ready(mpg_m_ready), .m_dout(ddr_dout)
 	);
 `else
