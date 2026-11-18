@@ -206,17 +206,28 @@ memory: the title screen comes at about frame 1000 in simulation, 540 in MAME.
 
 ## The Triangle Engine
 
-`rtl/m2_te.sv`: the list, the setup in single precision in the order of MAME's C, the walk, then a pipeline, a pixel a clock, four for a textured
-one, as TRAM has one port. Its stages are listed in the source. Z and the colours have a write-back cache each (`te_cache`, 128 lines of 32 bytes,
-one read and one write a clock), whose writes allocate without reading: each byte has a bit for whether it's been written, so a frame that's only
-written costs no reads. Everything stalls together on a miss.
+`rtl/m2_te.sv`: the list, the setup in single precision in the order of MAME's C, the walk, then a pipeline, a pixel a clock, two for one that
+needs four texels (two fetch units, each with its copy of TRAM). Its stages are listed in the source. The colours have a write-back cache
+(`te_cache`, 128 lines of 32 bytes, one read and one write a clock), whose writes allocate without reading: each byte has a bit for whether
+it's been written, so a frame that's only written costs no reads. The Z buffer is block RAM, or with `Z_SDRAM` the SDRAM through a cache of
+its own (`te_zc`, `m2_zmem`).
+
+The real chip has no cache: its Destination Blender asks memory for every 32-byte block the span walker's addresses enter, through FIFOs
+ahead of the blend (Bulldog ASIC Specifications Rev 1.1, The 3DO Company 1995, section 6.10.1.1 "Address Calculation and Requests").
+`te_cache` does the like: the walker tells it the line each pixel will read and the line it
+will write as it hands the pixel in, about twenty stages before the read. A line to be read is fetched then, up to two on their way from
+memory at once, and only the places they will fill wait meanwhile; the line in the place of one to be written is written back first (the
+write-back marks it clean in a vector of its own, so it doesn't take the tags' write port from the pixels' writes); a fill waits only for
+its own line in the write-back queue; a line's four words are written in one clock (its data is a 256-bit RAM with byte enables). None of
+this changes what the cache holds or answers, only when: `sim/te` prints a hash of all of RAM after each list, which must not change.
+`sim/te/run_cc.sh` (`tb_cc.cpp`) runs `te_cache` alone on random spans against a plain memory.
 
 `sim/te` checks it: `work/lua/te_dump.lua` dumps MAME's RAM and registers before successive lists, the bench runs a list, and compares each byte
 written with the next dump. All the attract mode's lists dumped so far are the same to the byte (and with memory three times slower).
 
 MAME runs three lists a frame in attract mode: 0.13, 0.65 and 0.94 M clocks at 66.67 MHz, with memory answering in 12 clocks: about 1.7 M against
 the frame's 1.12 M. In simulation the whole machine runs 1.5 lists a frame, half of MAME's rate. If the game turns out slow for this, two or four TRAM ports are what's left to gain. The pixel-at-a-time machine it
-replaced took 9 M. The compressed texture load isn't there: no list seen uses it.
+replaced took 9 M. (The compressed texture load came later, with `TE_COMPRESSED`: Battle Tryst's lists use it.)
 
 ## Timing references
 

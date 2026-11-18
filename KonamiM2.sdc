@@ -21,4 +21,16 @@ if { [get_collection_size [get_ports -nowarn {SDRAM_CLK}]] > 0 && [get_collectio
     set_multicycle_path -from [get_clocks {SDRAM_CLK}] -to $mem_clk -hold  -end 2
 }
 
+# The fitter only: extra setup margin on the two clocks the
+# fits miss on (HDMI and the memory clock), so the fitter places their paths with room; the sign-off (quartus_sta) sees the
+# real constraints
+if {[info exists ::quartus(nameofexecutable)] && $::quartus(nameofexecutable) eq "quartus_fit"} {
+    set hdmi_clk [get_clocks -nowarn {pll_hdmi|pll_hdmi_inst|altera_pll_i|cyclonev_pll|counter[0].output_counter|divclk}]
+    if { [get_collection_size $hdmi_clk] > 0 } { set_clock_uncertainty -setup -add -from $hdmi_clk -to $hdmi_clk 0.25 }
+    if { [get_collection_size $mem_clk] > 0 } { set_clock_uncertainty -setup -add -from $mem_clk -to $mem_clk 0.15 }
+    # (the machine clock too: with only the two above, the fits missed on it by 0.003-0.033 ns)
+    set sys_clk [get_clocks -nowarn {emu|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk}]
+    if { [get_collection_size $sys_clk] > 0 } { set_clock_uncertainty -setup -add -from $sys_clk -to $sys_clk 0.10 }
+}
+
 # ppc_pipe's stfs: the conversion to a single, stable for two clocks and waited for
