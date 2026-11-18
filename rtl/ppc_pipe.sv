@@ -1,8 +1,22 @@
-// Instructions a build can leave out (a qsf VERILOG_MACRO), for room; left out, they take the program exception (illegal
-// instruction), as anything not decoded does. None is in the code the M2 emulator compiles for Battle Tryst (scratch census_apply.py):
-//   PPC_NO_FPDOUBLE   lfd, lfdu, lfdx, lfdux, stfd, stfdu, stfdx, stfdux (and the conversions between single and double)
-//   PPC_NO_STRING     lswi, lswx, stswi, stswx
-//   PPC_NO_TRAP       tw, twi
+// Instructions a build can leave out (a qsf VERILOG_MACRO), for room. None is in the code the M2 emulator compiles for any title
+// (the M2 emulator's census). Left out, those a 602 emulates take its emulation trap (0x1600, EX_CUT), the others the program
+// exception (illegal instruction), as anything not decoded does:
+//   PPC_NO_FPDOUBLE   lfd, lfdu, lfdx, lfdux, stfd, stfdu, stfdx, stfdux (and the conversions between single and double): 0x1600,
+//                     every one, on purpose (a 602 runs stfd, and lfd of an exact normal single, itself: KonamiM2.qsf says why)
+//   PPC_NO_STRING     lswi, lswx, stswi, stswx: 0x1600
+//   PPC_NO_TRAP       tw, twi: 0x700
+// Never in: the double arithmetic of opcode 63 (fadd, fsub, fmul, fdiv, fmadd, fmsub, fnmadd, fnmsub) and fctiw: 0x1600, as a
+// 602 (its frsp, fctiwz, fsel, frsqrte, fcmpu / fcmpo, the moves and the FPSCR instructions are in)
+// And a build can leave out the TLB-miss machinery (PPC_NO_TLBMISS): the core has no TLB, so that logic could never run in the
+// core (the M2 emulator estimates them at 0.19-0.53 % of CPU 1's clocks at most in the arcade games: KonamiM2.qsf). Then: no TLB-miss
+// exceptions (0x1000, 0x1100, 0x1200); an access no BAT maps with HID0[PO] clear and translation on takes DSI (DSISR 0x40000000,
+// "not found", | 0x02000000 for a store) or for a fetch ISI (SRR1 0x40000000), as a PowerPC whose page-table search fails;
+// DMISS, DCMP, HASH1 and HASH2 read 0 (mtspr of them did nothing already, as MAME's); no TGPRs: MSR[TGPR] is a bit with no
+// effect (no exception sets it now; rfi and every exception clear it), r0-r3 always the GPR file's 0-3, which has 32 entries
+// in use, not 36; the bench's loads of the TGPRs (72-75) do nothing
+// And with PPC_NO_FPDOUBLE, the data path to the cache can be 32 bits (PPC_DATA32; rtl/ppc_cache.sv has the rest): no load is
+// wider than 4 bytes then and no store but dcbz's four 8-byte stores of zeros, so d_wdata's upper half is 0 and d_rdata's
+// isn't read
 // PowerPC 602 as MAME 0.289 runs it, pipelined: the same instruction semantics as rtl/ppc_core.sv (checked against the
 // reference model, tools/ref/ppc602, by sim/ppccore and sim/ppcreplay), an instruction a clock when nothing stalls.
 //
@@ -35,7 +49,8 @@
 // two are out; the float units not free for the op. Multi-access instructions (lmw, stmw, lsw, stsw, dcbz, stwcx.)
 // run in X one access at a time with M empty (SEQ); divw in DIV. The instructions that change fetch translation
 // (mtmsr, mtsr, IBATs, HID0, esa / dsa, rfi, isync) and a store to an instruction already fetched refetch after them.
-// TGPR: r0-r3 are physical 32-35 while MSR[TGPR] (tsel), so taking a TLB-miss exception moves nothing.
+// TGPR: r0-r3 are physical 32-35 while MSR[TGPR] (tsel), so taking a TLB-miss exception moves nothing (not with PPC_NO_TLBMISS).
+// The segment registers' words are in a small RAM in the logic (xr_mem), read unregistered in the clock that uses them.
 //
 // Bench: retire is a clock when an instruction (or exception) is done, in order (retire2: two, an access then the
 // instruction after it); the registers out are the
@@ -125,8 +140,10 @@ module ppc_pipe #(
 
 	// ---- architectural state ------------------------------------------------------------------------------------------
 	// (the GPRs and FPRs: ppc_regs below; these copies are the bench's)
-	logic [31:0] gpr [0:35];            // r0-r31, then the TGPRs' other bank (32-35)
+	logic [31:0] gpr [0:35];            // r0-r31, then the TGPRs' other bank (32-35; never written with PPC_NO_TLBMISS)
+`ifndef PPC_NO_TLBMISS
 	logic        tsel;                  // r0-r3 are 32-35 (MSR[TGPR] as the core has followed it)
+`endif
 	logic [32:0] fpr [0:31];            // (the bench's copies; bit 32: the value's an integer, see rtl/ppc_fps.sv)
 	logic [3:0]  crf [0:7];
 	logic [30:0] xer;                   // OV, CA, byte count (SO, bit 31, is xerso)
@@ -134,29 +151,63 @@ module ppc_pipe #(
 	logic [31:0] msr, fpscr;
 	logic [31:0] pc;                    // the next instruction in program order (after what X has taken)
 	logic [1:0]  fmode;                 // the float unit's rounding mode (see MTFSB0)
-	logic [31:0] sr [0:15];
+	// the segment registers: their words in a small RAM (xr_mem 0-15, in the logic's memory, read unregistered: X reads it
+	// as it read registers, in the same clock), written by mtsr / mtsrin and the bench (xr_we); their N bits, which the
+	// fetch's translation reads every clock, in registers too (sr_n). xr_mem 16-29: the SPRs only software reads (xr_spr)
+	(* ramstyle = "MLAB, no_rw_check" *) logic [31:0] xr_mem [0:31];
+	logic        xr_we;
+	logic [4:0]  xr_wa, xr_ra;
+	logic [31:0] xr_wd, xr_rd;
 	logic [31:0] dec;
 	logic [63:0] tb;
 	logic        reserved;
 
-	// the SPRs this core keeps, by MAME's number
+	// the SPRs this core keeps, by MAME's number. Not kept (read 0, writes ignored, as any other SPR number): EAR 282, 346,
+	// 1011 and 1013, which MAME keeps and a 602 doesn't have (user's manual 2.1: EAR not implemented). Their slots (11, 43,
+	// 46, 47) are constants, read through sprv_r: an entry only left unwritten keeps its flops (a variable-index read).
+	// Those nothing but mfspr reads and nothing but mtspr (or the bench) writes are in xr_mem, not sprv (their slots
+	// constants too): SPRG0-3, IMISS, ICMP (mtspr leaves both alone, as MAME), RPA, TCR, SEBR, SER, HID1, IABR, SP, LT
+	function automatic logic [4:0] xr_spr(input logic [9:0] n);    // the SPR's xr_mem entry, or 0
+		case (n)
+			10'd272: return 5'd16;  10'd273: return 5'd17;  10'd274: return 5'd18;  10'd275: return 5'd19;
+			10'd980: return 5'd20;  10'd981: return 5'd21;  10'd982: return 5'd22;  10'd984: return 5'd23;
+			10'd990: return 5'd24;  10'd991: return 5'd25;  10'd1009: return 5'd26; 10'd1010: return 5'd27;
+			10'd1021: return 5'd28; 10'd1022: return 5'd29;
+			default: return 5'd0;
+		endcase
+	endfunction
 	localparam int NSPR = 48;
 	logic [31:0] sprv [0:NSPR-1];
 	function automatic int spr_idx(input logic [9:0] n);
 		case (n)
 			10'd8: return 0;    10'd9: return 1;    10'd18: return 2;   10'd19: return 3;   10'd25: return 4;
 			10'd26: return 5;   10'd27: return 6;   10'd272: return 7;  10'd273: return 8;  10'd274: return 9;
-			10'd275: return 10; 10'd282: return 11; 10'd528: return 12; 10'd529: return 13; 10'd530: return 14;
+			10'd275: return 10; 10'd528: return 12; 10'd529: return 13; 10'd530: return 14;
 			10'd531: return 15; 10'd532: return 16; 10'd533: return 17; 10'd534: return 18; 10'd535: return 19;
 			10'd536: return 20; 10'd537: return 21; 10'd538: return 22; 10'd539: return 23; 10'd540: return 24;
 			10'd541: return 25; 10'd542: return 26; 10'd543: return 27; 10'd976: return 28; 10'd977: return 29;
 			10'd978: return 30; 10'd979: return 31; 10'd980: return 32; 10'd981: return 33; 10'd982: return 34;
 			10'd984: return 35; 10'd986: return 36; 10'd987: return 37; 10'd990: return 38; 10'd991: return 39;
-			10'd1008: return 40; 10'd1009: return 41; 10'd1010: return 42; 10'd1013: return 43; 10'd1021: return 44;
-			10'd1022: return 45; 10'd346: return 46; 10'd1011: return 47;
+			10'd1008: return 40; 10'd1009: return 41; 10'd1010: return 42; 10'd1021: return 44;
+			10'd1022: return 45;
 			default: return -1;
 		endcase
 	endfunction
+`ifdef PPC_NO_TLBMISS
+	// (and DMISS, DCMP, HASH1, HASH2, 28-31: read 0, as only a TLB miss wrote them)
+	localparam logic [NSPR-1:0] SPR_KEEP = ~((48'h1 << 11) | (48'h1 << 43) | (48'h1 << 46) | (48'h1 << 47) |   // (not kept)
+		(48'hf << 7) | (48'hf << 32) | (48'h3 << 38) | (48'h3 << 41) | (48'h3 << 44) |                      // (xr_mem's)
+		(48'hf << 28));                                                                                    // (TLB miss's)
+`else
+	localparam logic [NSPR-1:0] SPR_KEEP = ~((48'h1 << 11) | (48'h1 << 43) | (48'h1 << 46) | (48'h1 << 47) |   // (not kept)
+		(48'hf << 7) | (48'hf << 32) | (48'h3 << 38) | (48'h3 << 41) | (48'h3 << 44));                     // (xr_mem's)
+`endif
+	logic [31:0] sprv_r [0:NSPR-1];
+	always_comb for (int i = 0; i < NSPR; i++) sprv_r[i] = SPR_KEEP[i] ? sprv[i] : 32'h0;
+`ifdef PPC_NO_TLBMISS
+	// (X_SDR1, X_DMISS-X_HASH2 and the TLB-miss EX_ codes unused then)
+	// verilator lint_off UNUSEDPARAM
+`endif
 	localparam int X_LR = 0, X_CTR = 1, X_DSISR = 2, X_DAR = 3, X_SDR1 = 4, X_SRR0 = 5, X_SRR1 = 6, X_IBAT = 12,
 		X_DBAT = 20, X_DMISS = 28, X_DCMP = 29, X_HASH1 = 30, X_HASH2 = 31, X_IBR = 36, X_ESASRR = 37, X_HID0 = 40;
 
@@ -164,11 +215,22 @@ module ppc_pipe #(
 		MSR_TGPR = 32'h00020000, MSR_EE = 32'h00008000, MSR_PR = 32'h00004000, MSR_IP = 32'h00000040,
 		MSR_IR = 32'h00000020, MSR_DR = 32'h00000010, MSR_LE = 32'h00000001;
 	localparam logic [4:0] EX_DSI = 3, EX_ISI = 4, EX_EI = 5, EX_PROGRAM = 7, EX_FPU = 8, EX_DECREMENT = 9, EX_SYSCALL = 12,
-		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18;
+		EX_ITLBMISS = 16, EX_DTLBMISSL = 17, EX_DTLBMISSS = 18, EX_EMUL = 22;
+`ifdef PPC_NO_TLBMISS
+	// verilator lint_on UNUSEDPARAM
+`endif
+	// what the instructions a 602 emulates take when the core leaves them out: its emulation trap (0x1600), as a 602 (EX_PROGRAM
+	// here: the illegal-instruction program exception, which the core took for them before EX_CUT)
+	localparam logic [4:0] EX_CUT = EX_EMUL;
+	localparam logic [31:0] EX_CUT_P = EX_CUT == EX_PROGRAM ? 32'h80000 : 32'h0;   // (its SRR1 bits)
 
 	// a GPR's physical register
 	function automatic logic [5:0] pg(input logic [4:0] r);
+`ifdef PPC_NO_TLBMISS
+		return {1'b0, r};                   // (no TGPRs: the top bit of every GPR address is 0, the file's 32-63 unused)
+`else
 		return r < 5'd4 && tsel ? {4'b1000, r[1:0]} : {1'b0, r};
+`endif
 	endfunction
 
 	function automatic logic [31:0] get_cr();
@@ -233,8 +295,7 @@ module ppc_pipe #(
 
 	// BAT / protection-only translation (MAME's ppccom_translate_address_internal for a 602); type 0 read, 1 write, 2 fetch
 	typedef struct packed { logic ok; logic prot; logic [31:0] pa; } tr_t;
-	logic [15:0] sr_n;                  // the SRs' N bits (Quartus 17 crashes reading sr[] in translate)
-	always_comb for (int i = 0; i < 16; i++) sr_n[i] = sr[i][28];
+	logic [15:0] sr_n;                  // the SRs' N bits, written with xr_mem (Quartus 17 crashed reading a 2-D array in translate)
 	function automatic tr_t translate(input logic [31:0] a, input logic [1:0] typ);
 		tr_t t;
 		logic transpriv, hit;
@@ -279,8 +340,9 @@ module ppc_pipe #(
 			10'd269: return {8'h0, tb[55:32]};
 			default:
 			begin
+				if (xr_spr(n) != 5'd0) return xr_rd;      // (xr_ra: X's mfspr's)
 				k = spr_idx(n);
-				return k >= 0 ? sprv[k] : 32'h0;
+				return k >= 0 ? sprv_r[k] : 32'h0;
 			end
 		endcase
 	endfunction
@@ -299,17 +361,15 @@ module ppc_pipe #(
 				5'h1f: d.op = F_NMADDS; 5'h1e: d.op = F_NMSUBS;
 				default: d.go = 1'b0;
 			endcase
+		// (opcode 63: frsqrte, frsp and fctiwz; its double arithmetic and fctiw a 602 emulates: opfp's EX_CUT. No fsqrt: illegal)
 		else if (o[31:26] == 6'h3f && o[5])
 			case (o[5:1])
-				5'h15: d.op = F_ADD; 5'h14: d.op = F_SUB; 5'h19: d.op = F_MUL; 5'h12: d.op = F_DIV;
-				5'h1a: d.op = F_RSQRTE; 5'h1d: d.op = F_MADD; 5'h1c: d.op = F_MSUB;    // (no fsqrt: illegal)
-				5'h1f: d.op = F_NMADD; 5'h1e: d.op = F_NMSUB;
+				5'h1a: d.op = F_RSQRTE;
 				default: d.go = 1'b0;
 			endcase
 		else if (o[31:26] == 6'h3f)
 			case (o[10:1])
 				10'h00c: d.op = F_RSP;
-				10'h00e: d.op = F_CTIW;
 				10'h00f: d.op = F_CTIWZ;
 				default: d.go = 1'b0;
 			endcase
@@ -335,7 +395,7 @@ module ppc_pipe #(
 	logic [31:0] fo_va, fpc;            // fpc: the next address to fetch
 	logic        xv, sv;                // X and the skid hold an instruction
 	logic [31:0] ipc, op, spc, sins;
-	logic [1:0]  xflt, sflt;            // the fetch faulted: 1 TLB miss, 2 ISI
+	logic [1:0]  xflt, sflt;            // the fetch faulted: 1 TLB miss (PPC_NO_TLBMISS: ISI, not found), 2 ISI
 	logic        xpred, spred;          // fetched on as a taken branch (to its target)
 
 	// exception entry (EXC)
@@ -357,7 +417,14 @@ module ppc_pipe #(
 	logic        a_tok, a_tprot;
 	logic [3:0]  a_size;
 	logic [2:0]  a_cw;                  // (X's: the words after a_va's its store reaches, for a_cov)
+`ifdef PPC_DATA32
+`ifndef PPC_NO_FPDOUBLE
+	PPC_DATA32_needs_PPC_NO_FPDOUBLE stop ();   // (lfd and stfd are 8-byte accesses)
+`endif
+	logic [31:0] a_wdata;
+`else
 	logic [63:0] a_wdata;
+`endif
 	logic [5:0]  a_ra;
 
 	// M: the access out (the older, which d_valid answers)
@@ -392,7 +459,13 @@ module ppc_pipe #(
 	logic [6:0]  sq_count;
 	logic [4:0]  sq_reg, sq_ra;
 	logic [1:0]  sq_byte;
+`ifdef PPC_DATA32
+	// verilator lint_off UNUSEDSIGNAL
+	logic [63:0] sq_wdata;              // (its low word)
+	// verilator lint_on UNUSEDSIGNAL
+`else
 	logic [63:0] sq_wdata;
+`endif
 	logic        sq_out;
 	wire         sq_wr = sq_kind == Q_STMW || sq_kind == Q_STSW || sq_kind == Q_DCBZ || sq_kind == Q_STWCX;
 
@@ -663,6 +736,7 @@ module ppc_pipe #(
 	localparam logic [2:0] AB_SIMM = 3'd0, AB_SHI = 3'd1, AB_RB = 3'd2, AB_ZERO = 3'd3, AB_ONES = 3'd4;
 	localparam logic [1:0] AC_0 = 2'd0, AC_1 = 2'd1, AC_CA = 2'd2;
 	localparam logic [1:0] LB_RB = 2'd0, LB_UIMM = 2'd1, LB_UHI = 2'd2;
+	// (MS_SR: xr_mem's entry spr[4:0], an SR's for mfsr or an SPR's for mfspr (xr_spr); MS_SRIN: rB's SR)
 	localparam logic [2:0] MS_CLZ = 3'd0, MS_EXTSB = 3'd1, MS_EXTSH = 3'd2, MS_CR = 3'd3, MS_MSR = 3'd4, MS_SPR = 3'd5,
 		MS_SR = 3'd6, MS_SRIN = 3'd7;
 	localparam logic [2:0] FM_B = 3'd0, FM_SEL = 3'd1, FM_NEG = 3'd2, FM_NABS = 3'd3, FM_ABS = 3'd4, FM_FFS = 3'd5;
@@ -730,8 +804,13 @@ module ppc_pipe #(
 					10'h39a: begin d.rs = R_MISC; d.ms = MS_EXTSH; end
 					10'h013: begin d.rs = R_MISC; d.ms = MS_CR; end                                   // MFCR
 					10'h053: begin d.rs = R_MISC; d.ms = MS_MSR; end                                  // MFMSR
-					10'h153, 10'h173: begin d.rs = R_MISC; d.ms = MS_SPR; end                         // MFSPR, MFTB
-					10'h253: begin d.rs = R_MISC; d.ms = MS_SR; end                                   // MFSR
+					10'h153:                                                                          // MFSPR
+					begin
+						d.rs = R_MISC; d.ms = MS_SPR;
+						if (xr_spr({o[15:11], o[20:16]}) != 5'd0) begin d.ms = MS_SR; d.spr = {1'b0, xr_spr({o[15:11], o[20:16]})}; end
+					end
+					10'h173: begin d.rs = R_MISC; d.ms = MS_SPR; end                                  // MFTB
+					10'h253: begin d.rs = R_MISC; d.ms = MS_SR; d.spr = {2'b00, o[19:16]}; end         // MFSR
 					10'h293: begin d.rs = R_MISC; d.ms = MS_SRIN; end                                 // MFSRIN
 					default: ;
 				endcase
@@ -876,7 +955,13 @@ module ppc_pipe #(
 	mkind_t      xm_kind;
 	logic [31:0] xm_ea;
 	logic [3:0]  xm_size;
+`ifdef PPC_DATA32
+	// verilator lint_off UNUSEDSIGNAL
+	logic [63:0] xm_wdata;              // (its low word)
+	// verilator lint_on UNUSEDSIGNAL
+`else
 	logic [63:0] xm_wdata;
+`endif
 	always_comb
 	begin
 		logic [31:0] ix, iu;            // indexed: rA|0 + rB, and the update form's rA + rB
@@ -1109,8 +1194,39 @@ module ppc_pipe #(
 		// (where the adder's own LUTs take the choice)
 		d_va = (xstate == XS_SEQ ? sq_ea : pd.ea_z ? 32'h0 : ra_v) + (xstate == XS_SEQ ? 32'h0 : pd.m.idx ? rb_v : simm);
 		d_kill = a_flt;
+`ifdef PPC_DATA32
+		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = {32'h0, a_wdata};
+`else
 		d_pa = a_pa; d_we = a_we; d_size = a_size; d_wdata = a_wdata;
+`endif
 	end
+
+	// the segment registers and the SPRs only software reads (xr_mem). Written by X's mtsr / mtsrin / mtspr as it takes them
+	// (an mtspr of IMISS or ICMP does nothing, as MAME's), or the bench's load (while rst, or held; the clock's block's
+	// dbg_write conditions); read by X's mfsr (op's SR) and mfspr (its entry: both pd.r.spr's) and mfsrin (rB's SR), and by
+	// M's address clock when it faults for a data TLB miss (dfault: the segment's VSID; X takes nothing then; not with
+	// PPC_NO_TLBMISS)
+	wire  [4:0] xr_x = xr_spr(sprn), xr_d = dbg_idx >= 11'd1024 ? xr_spr(dbg_idx[9:0]) : {1'b0, dbg_idx[3:0]};
+	wire        xr_dw = dbg_we && ((dbg_idx >= 11'd80 && dbg_idx < 11'd96) || (dbg_idx >= 11'd1024 && xr_d != 5'd0));
+	always_comb
+	begin
+		xr_we = 1'b0; xr_wa = xo == 10'h1d3 ? xr_x : xo == 10'h0d2 ? {1'b0, op[19:16]} : {1'b0, rb_v[31:28]}; xr_wd = rs_v;
+		if (rst)
+		begin
+			if (rst_q && xr_dw) begin xr_we = 1'b1; xr_wa = xr_d; xr_wd = dbg_val[31:0]; end
+		end
+		else if (x_exec && opc == 6'h1f && (xo == 10'h0d2 || xo == 10'h0f2 ||                             // MTSR, MTSRIN
+			(xo == 10'h1d3 && xr_x != 5'd0 && sprn != 10'd980 && sprn != 10'd981))) xr_we = 1'b1;    // MTSPR
+		else if (xstate == XS_RUN && !x_cons && hold_flush && xr_dw) begin xr_we = 1'b1; xr_wa = xr_d; xr_wd = dbg_val[31:0]; end
+`ifdef PPC_NO_TLBMISS
+		xr_ra = pd.r.ms == MS_SRIN ? {1'b0, rb_v[31:28]} : pd.r.spr[4:0];      // (no data TLB miss to read a VSID for)
+`else
+		xr_ra = a_flt ? {1'b0, a_va[31:28]} : pd.r.ms == MS_SRIN ? {1'b0, rb_v[31:28]} : pd.r.spr[4:0];
+`endif
+	end
+	always_ff @(posedge clk) if (xr_we) xr_mem[xr_wa] <= xr_wd;
+	assign xr_rd = xr_mem[xr_ra];
+	always_ff @(posedge clk) if (xr_we && !xr_wa[4]) sr_n[xr_wa[3:0]] <= xr_wd[28];
 
 	// X's GPR result, from units whose choices pd has (rdec_t): gw_v takes it with no decode in front, and CR0 its zero
 	function automatic logic [31:0] spr_rv(input logic [5:0] k);
@@ -1120,7 +1236,7 @@ module ppc_pipe #(
 			6'd50: return dec;
 			6'd51: return tb[31:0];
 			6'd52: return {8'h0, tb[55:32]};
-			default: return k < 6'(NSPR) ? sprv[k] : 32'h0;
+			default: return k < 6'(NSPR) ? sprv_r[k] : 32'h0;
 		endcase
 	endfunction
 	logic [31:0] ad_b, lg_v, ms_v, x_res;
@@ -1150,8 +1266,7 @@ module ppc_pipe #(
 			MS_CR:    ms_v = get_cr();
 			MS_MSR:   ms_v = msr;
 			MS_SPR:   ms_v = spr_rv(pd.r.spr);
-			MS_SR:    ms_v = sr[op[19:16]];
-			default:  ms_v = sr[rb_v[31:28]];
+			default:  ms_v = xr_rd;                 // MS_SR, MS_SRIN
 		endcase
 		case (pd.r.rs)
 			R_ADD:   x_res = ad_s[31:0];
@@ -1378,12 +1493,28 @@ module ppc_pipe #(
 		endcase
 		if (rst) gw_v_d = dbg_val[31:0];
 	end
-	ppc_regs #(.W(32), .AW(6), .NR(3)) gregs (
+	// (PPC_REGS_MLAB: both files in the logic's small memories, for block RAM; with PPC_NO_TLBMISS the GPR file is 32 deep, as no
+	// address has its top bit set)
+`ifdef PPC_NO_TLBMISS
+	localparam int GAW = 5;
+`else
+	localparam int GAW = 6;
+`endif
+`ifdef PPC_REGS_MLAB
+`ifndef PPC_REGS_BRAM
+	localparam bit RMLAB = 1'b1;               // (PPC_REGS_BRAM: a build that keeps them in block RAM anyway)
+`else
+	localparam bit RMLAB = 1'b0;
+`endif
+`else
+	localparam bit RMLAB = 1'b0;
+`endif
+	ppc_regs #(.W(32), .AW(GAW), .NR(3), .MLAB(RMLAB)) gregs (
 		.clk,
-		.we0(gw_en), .wa0(gw_r), .wd0(gw_v),
-		.we1(m_gw && !rst), .wa1(m_rd), .wd1(m_gv),
-		.ra_k({seq_rd ? seq_rs : pg(op[25:21]), pg(op[15:11]), pg(op[20:16])}),
-		.ra_n({seq_rd ? seq_rs : pg(op_nx[25:21]), pg(op_nx[15:11]), pg(op_nx[20:16])}), .keep(op_keep),
+		.we0(gw_en), .wa0(GAW'(gw_r)), .wd0(gw_v),
+		.we1(m_gw && !rst), .wa1(GAW'(m_rd)), .wd1(m_gv),
+		.ra_k({GAW'(seq_rd ? seq_rs : pg(op[25:21])), GAW'(pg(op[15:11])), GAW'(pg(op[20:16]))}),
+		.ra_n({GAW'(seq_rd ? seq_rs : pg(op_nx[25:21])), GAW'(pg(op_nx[15:11])), GAW'(pg(op_nx[20:16]))}), .keep(op_keep),
 		.rd({gr_s, gr_b, gr_a})
 	);
 	// the FPRs: the float units' (and the bench's) writes win over M's (never the same one in a clock)
@@ -1394,7 +1525,7 @@ module ppc_pipe #(
 		else if (!rst && fpu_busy && fpu_done) begin fu_we = 1'b1; fu_wa = fpu_rd; fu_wd = fpu_res; end
 		else if (dbg_we && dbg_idx >= 32 && dbg_idx < 64 && (rst ? rst_q : x_run && !x_cons && hold_flush)) fu_we = 1'b1;
 	end
-	ppc_regs #(.W(33), .AW(5), .NR(4)) fregs (
+	ppc_regs #(.W(33), .AW(5), .NR(4), .MLAB(RMLAB)) fregs (
 		.clk,
 		.we0(m_fw && !rst), .wa0(m_rd[4:0]), .wd0(m_fv),
 		.we1(fu_we), .wa1(fu_wa), .wd1(fu_wd),
@@ -1511,6 +1642,14 @@ module ppc_pipe #(
 		xstate <= XS_EXC;
 	endtask
 
+`ifdef PPC_NO_TLBMISS
+	// a data access that doesn't translate: DSI, protected (DSISR 0x08000000) or, for no BAT with HID0[PO] clear, not found
+	// (0x40000000: no TLB-miss exception, see the header)
+	task automatic dfault(input logic [31:0] ea, input logic wr, input logic prot);
+		sprv[X_DSISR] <= (prot ? 32'h08000000 : 32'h40000000) | (wr ? 32'h02000000 : 32'h0);
+		raise(EX_DSI, ea);
+	endtask
+`else
 	// a data access that doesn't translate: DSI, or a data TLB miss (with DMISS, DCMP, HASH1 / HASH2 for the handler)
 	task automatic dfault(input logic [31:0] ea, input logic wr, input logic prot);
 		logic [23:0] seg;
@@ -1522,7 +1661,7 @@ module ppc_pipe #(
 		end
 		else
 		begin
-			seg = sr[ea[31:28]][23:0];
+			seg = xr_rd[23:0];                                  // (xr_mem's at ea's SR: xr_ra)
 			hashbase = sprv[X_SDR1] & 32'hffff0000;
 			hashmask = {7'h0, sprv[X_SDR1][8:0], 16'hffff};
 			hash = {13'h0, seg[18:0]} ^ {16'h0, ea[27:12]};
@@ -1533,6 +1672,7 @@ module ppc_pipe #(
 			raise(wr ? EX_DTLBMISSS : EX_DTLBMISSL, ea);
 		end
 	endtask
+`endif
 
 	always_ff @(posedge clk)
 	begin
@@ -1567,7 +1707,9 @@ module ppc_pipe #(
 				pc <= 32'hfff00100;
 				msr <= MSR_IP;
 				dec <= 32'hffffffff;            // (MAME's: its first time through zero is a whole count away)
+`ifndef PPC_NO_TLBMISS
 				tsel <= 1'b0;
+`endif
 				sprv[X_IBR] <= 32'h0;
 				sprv[X_ESASRR] <= 32'h0;
 				sprv[X_HID0] <= 32'h1;
@@ -1598,12 +1740,20 @@ module ppc_pipe #(
 				a_pa <= dt_id ? d_va : dts.pa; a_tok <= dck[1]; a_tprot <= dck[0];
 				if (xstate == XS_SEQ)
 				begin
+`ifdef PPC_DATA32
+					a_we <= sq_wr; a_size <= sq_size; a_wdata <= sq_wdata[31:0]; a_upd <= 1'b0;
+`else
 					a_we <= sq_wr; a_size <= sq_size; a_wdata <= sq_wdata; a_upd <= 1'b0;
+`endif
 					a_ipc <= mc_ipc;
 				end
 				else
 				begin
+`ifdef PPC_DATA32
+					a_we <= xm_we; a_size <= xm_size; a_wdata <= xm_wdata[31:0]; a_upd <= xm_upd;
+`else
 					a_we <= xm_we; a_size <= xm_size; a_wdata <= xm_wdata; a_upd <= xm_upd;
+`endif
 					a_cw <= cov_w(d_va[1:0], xm_size);
 					a_ipc <= ipc; a_op <= op; a_ra <= pg(rA); a_rav <= ra_v;
 				end
@@ -1670,7 +1820,11 @@ module ppc_pipe #(
 							raise(int_q ? EX_EI : EX_DECREMENT, 32'h0);
 							if (!int_q) dec_irq <= 1'b0;
 						end
+`ifdef PPC_NO_TLBMISS
+						else if (xflt != 2'd0) raise(EX_ISI, xflt == 2'd2 ? 32'h08000000 : 32'h40000000);   // (a miss: not found)
+`else
 						else if (xflt != 2'd0) raise(xflt == 2'd2 ? EX_ISI : EX_ITLBMISS, xflt == 2'd2 ? 32'h08000000 : 32'h0);
+`endif
 						else if (x_fpoff) raise(EX_FPU, 32'h0);
 						else exec();
 					end
@@ -1745,13 +1899,19 @@ module ppc_pipe #(
 				begin
 					logic [31:0] srr1, m, andmask, ormask;
 					logic tlb;
+`ifdef PPC_NO_TLBMISS
+					tlb = 1'b0;                     // (no TLB-miss exceptions: TGPR cleared by every exception)
+`else
 					tlb = exc == EX_ITLBMISS || exc == EX_DTLBMISSL || exc == EX_DTLBMISSS;
+`endif
 					if (exc == EX_DSI) sprv[X_DAR] <= exc_param;
 					sprv[X_SRR0] <= exc == EX_SYSCALL ? exc_ipc + 32'd4 : exc_ipc;
 					srr1 = msr & 32'h87c0ffff;
 					if (exc == EX_ISI || exc == EX_PROGRAM) srr1 = srr1 | exc_param;
+`ifndef PPC_NO_TLBMISS
 					if (exc == EX_ITLBMISS) srr1 = srr1 | 32'h00040000;
 					else if (exc == EX_DTLBMISSL) srr1 = srr1 | 32'h00010000;
+`endif
 					if (tlb) srr1 = {crf[0], srr1[27:0]};
 					sprv[X_SRR1] <= srr1;
 					andmask = 32'h00040000 | 32'h00008000 | 32'h00004000 | 32'h00002000 | 32'h00000800 | 32'h00000400 |
@@ -1761,7 +1921,9 @@ module ppc_pipe #(
 					m = (msr & ~andmask) | ormask;
 					m[0] = m[16];
 					msr <= m;
+`ifndef PPC_NO_TLBMISS
 					if (msr[17] != m[17]) tsel <= !tsel;
+`endif
 					pc <= vec;
 					ret_x <= 1'b1;
 					ret_ipc <= exc_ipc;
@@ -1807,8 +1969,12 @@ module ppc_pipe #(
 		else if (dbg_idx == 69) dec <= dbg_val[31:0];
 		else if (dbg_idx == 70) tb[31:0] <= dbg_val[31:0];
 		else if (dbg_idx == 71) tb[63:32] <= dbg_val[31:0];
+`ifdef PPC_NO_TLBMISS
+		else if (dbg_idx >= 72 && dbg_idx < 76) ;                                   // (no TGPRs)
+`else
 		else if (dbg_idx >= 72 && dbg_idx < 76) wgp(tsel ? {4'b0000, dbg_idx[1:0]} : {4'b1000, dbg_idx[1:0]}, dbg_val[31:0]);
-		else if (dbg_idx >= 80 && dbg_idx < 96) sr[dbg_idx[3:0]] <= dbg_val[31:0];
+`endif
+		else if (dbg_idx >= 80 && dbg_idx < 96) ;                                   // (the SRs: xr_we)
 		else if (dbg_idx >= 1024)
 		begin
 			int k;
@@ -1868,6 +2034,9 @@ module ppc_pipe #(
 				6'h2e: begin sq_count <= 7'd32 - {2'b0, rD}; sq_reg <= rD; seq_start(Q_LMW, raz + simm, 4'd4); end
 				6'h2f: begin sq_count <= 7'd32 - {2'b0, rD}; sq_reg <= rD; sq_wdata <= {32'h0, rs_v}; seq_start(Q_STMW, raz + simm, 4'd4); end
 				6'h3b, 6'h3f: opfp();
+`ifdef PPC_NO_FPDOUBLE
+				6'h32, 6'h33, 6'h36, 6'h37: raise(EX_CUT, EX_CUT_P);                                  // LFD, LFDU, STFD, STFDU
+`endif
 				default: raise(EX_PROGRAM, 32'h80000);
 			endcase
 	endtask
@@ -1935,7 +2104,9 @@ module ppc_pipe #(
 			10'h032:                                                                               // RFI
 			begin
 				msr <= ((msr & ~32'h87c0ffff) | (sprv[X_SRR1] & 32'h87c0ffff)) & ~MSR_TGPR;
+`ifndef PPC_NO_TLBMISS
 				if (msr[17]) tsel <= !tsel;
+`endif
 			end
 			10'h096: ;                                                                             // ISYNC
 			default: raise(EX_PROGRAM, 32'h80000);
@@ -2037,6 +2208,11 @@ module ppc_pipe #(
 				sq_reg <= rD;
 				if (cnt != 0) seq_start(Q_LSW, xo == 10'h255 ? raz : raz + b, 4'd1);
 			end
+`else
+			10'h255, 10'h215, 10'h2d5, 10'h295: raise(EX_CUT, EX_CUT_P);                         // LSWI, LSWX, STSWI, STSWX
+`endif
+`ifdef PPC_NO_FPDOUBLE
+			10'h257, 10'h277, 10'h2d7, 10'h2f7: raise(EX_CUT, EX_CUT_P);                         // LFDX, LFDUX, STFDX, STFDUX
 `endif
 			10'h096:                                                                               // STWCX.
 			begin
@@ -2057,8 +2233,8 @@ module ppc_pipe #(
 				if (cnt != 0) seq_start(Q_STSW, xo == 10'h2d5 ? raz : raz + b, 4'd1);
 			end
 `endif
-			// cache, TLB, sync: nothing in MAME
-			10'h036, 10'h056, 10'h0f6, 10'h116, 10'h256, 10'h356, 10'h1d6, 10'h236, 10'h3d6, 10'h132, 10'h172,
+			// cache, TLB, sync: nothing in MAME (tlbia, 0x172, MAME's too, is illegal on a 602: user's manual table B-1)
+			10'h036, 10'h056, 10'h0f6, 10'h116, 10'h256, 10'h356, 10'h1d6, 10'h236, 10'h3d6, 10'h132,
 			10'h3d2, 10'h3f2: ;
 			10'h3f6:                                                                               // DCBZ
 			begin
@@ -2074,8 +2250,7 @@ module ppc_pipe #(
 				wg(rD, mfspr_v(sprn));
 				timer_q <= sprn == 10'd22 || sprn == 10'd268 || sprn == 10'd269;
 			end
-			10'h253: wg(rD, sr[op[19:16]]);                                                        // MFSR
-			10'h293: wg(rD, sr[b[31:28]]);                                                         // MFSRIN
+			10'h253, 10'h293: wg(rD, xr_rd);                                                       // MFSR, MFSRIN (xr_ra)
 			10'h173:                                                                               // MFTB
 				if (sprn == 10'd268 || sprn == 10'd269) begin wg(rD, mfspr_v(sprn)); timer_q <= 1'b1; end
 				else raise(EX_PROGRAM, 32'h80000);
@@ -2085,11 +2260,12 @@ module ppc_pipe #(
 			10'h092:                                                                               // MTMSR
 			begin
 				msr <= s;
+`ifndef PPC_NO_TLBMISS
 				if (msr[17] != s[17]) tsel <= !tsel;
+`endif
 			end
 			10'h1d3: mtspr(sprn, s);                                                               // MTSPR
-			10'h0d2: sr[op[19:16]] <= s;                                                           // MTSR
-			10'h0f2: sr[b[31:28]] <= s;                                                            // MTSRIN
+			10'h0d2, 10'h0f2: ;                                                                    // MTSR, MTSRIN (xr_we)
 			10'h200:                                                                               // MCRXR
 			begin
 				crf[op[25:23]] <= {xerso, xer[30:28]};
@@ -2159,15 +2335,17 @@ module ppc_pipe #(
 		fb = fx(rB, 2'd1, fr_b);
 		if (xf.go)
 		begin
-			// out to a float unit (fpp_issue, fpu_start); with Rc, but for fctiw[z], CR1 is FPSCR's top (MAME), which
+			// out to a float unit (fpp_issue, fpu_start); with Rc, but for fctiwz, CR1 is FPSCR's top (MAME), which
 			// they don't change
-			if (rc && xf.op != F_CTIW && xf.op != F_CTIWZ) crf[1] <= fpscr[31:28];
+			if (rc && xf.op != F_CTIWZ) crf[1] <= fpscr[31:28];
 		end
 		else if (opc == 6'h3b) raise(EX_PROGRAM, 32'h80000);
 		else if (xo[4])
 			case (op[5:1])
 				// FSEL: c if a >= 0.0 (not NaN, and positive or a zero), else b; no CR1 even with Rc (MAME)
 				5'h17: fmov(!snan(fa[31:0]) && (!fa[31] || fa[30:0] == 31'h0) ? fx(frC, 2'd2, fr_c) : fb);
+				// FADD, FSUB, FMUL, FDIV, FMADD, FMSUB, FNMADD, FNMSUB: a 602 emulates them (user's manual 4.5.18, 6.8)
+				5'h15, 5'h14, 5'h19, 5'h12, 5'h1d, 5'h1c, 5'h1f, 5'h1e: raise(EX_CUT, EX_CUT_P);
 				default: raise(EX_PROGRAM, 32'h80000);
 			endcase
 		else
@@ -2177,6 +2355,7 @@ module ppc_pipe #(
 					crf[op[25:23]] <= fcmp_r;
 					fpscr[15:12] <= fcmp_r;
 				end
+				10'h00e: raise(EX_CUT, EX_CUT_P);                                                // FCTIW: a 602 emulates it
 				// these leave CR1 alone even with Rc (MAME)
 				10'h028: fmov(fb ^ 33'h080000000);                                          // FNEG
 				10'h048: fmov(fb);                                                                 // FMR

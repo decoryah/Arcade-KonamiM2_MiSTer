@@ -12,9 +12,11 @@ if [ -n "$RTL" ]; then
 	if [ -n "$PIPE" ]; then TOP=ppc_pipe; BR=~/build_m2/ppcreplay_pipe; DEF=-DPIPE; G=-GFP_EXC=0; else TOP=ppc_core; BR=~/build_m2/ppcreplay_rtl; DEF=; fi
 	mkdir -p $BR
 	export PATH=~/tools/oss-cad-suite/bin:$PATH
+	# DEFS="PPC_DATA32 ...": build options, in the RTL and in the bench (the model then makes the accesses the RTL makes)
+	VD=; CD=; for d in $DEFS; do VD="$VD +define+$d"; CD="$CD -D$d"; done
 	if [ -z "$NOBUILD" ]; then
-	verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTH --top-module $TOP $G -Mdir $BR -o tb_ppcreplay \
-	  -CFLAGS "-O2 -std=c++17 -ffp-contract=off -frounding-math -DWITH_RTL $DEF" \
+	verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTH --top-module $TOP $G $VD -Mdir $BR -o tb_ppcreplay \
+	  -CFLAGS "-O2 -std=c++17 -ffp-contract=off -frounding-math -DWITH_RTL $DEF$CD" \
 	  $R/rtl/ppc_fpu_pkg.sv $R/rtl/ppc_fpu.sv $R/rtl/ppc_fps.sv $R/rtl/ppc_fpx.sv $R/rtl/ppc_regs.sv $R/rtl/$TOP.sv $R/sim/ppcreplay/tb_ppcreplay.cpp $R/tools/ref/ppc602/ppc602.cpp \
 	  > $BR/build.log 2>&1 || { grep -E "%Error|error:" $BR/build.log | head -40; exit 1; }
 	fi

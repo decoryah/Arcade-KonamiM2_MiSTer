@@ -6,7 +6,8 @@
 module ppc_regs #(
 	parameter int W = 32,               // bits an entry
 	parameter int AW = 6,               // address bits
-	parameter int NR = 3                // read ports
+	parameter int NR = 3,               // read ports
+	parameter bit MLAB = 1'b0           // the banks in the logic's small memories (MLAB), not block RAM (ppc_ram_s)
 ) (
 	input  logic                   clk,
 	input  logic                   we0,
@@ -34,19 +35,20 @@ module ppc_regs #(
 		logic [AW-1:0] ra;
 		logic sel;
 		assign ra = keep ? ra_k[i] : ra_n[i];
-		ppc_ram_s #(.W(W), .AW(AW)) b0 (.clk, .we(we0), .wa(wa0), .wd(wd0), .ra, .rd(q0));
-		ppc_ram_s #(.W(W), .AW(AW)) b1 (.clk, .we(we1), .wa(wa1), .wd(wd1), .ra, .rd(q1));
+		ppc_ram_s #(.W(W), .AW(AW), .MLAB(MLAB)) b0 (.clk, .we(we0), .wa(wa0), .wd(wd0), .ra, .rd(q0));
+		ppc_ram_s #(.W(W), .AW(AW), .MLAB(MLAB)) b1 (.clk, .we(we1), .wa(wa1), .wd(wd1), .ra, .rd(q1));
 		always_ff @(posedge clk) sel <= keep ? lvt[ra_k[i]] : lvt[ra_n[i]];
 		assign rd[i] = sel ? q1 : q0;
 	end
 	endgenerate
 endmodule
 
-// A small memory: ppc_ram, or with SMALL_MEMS the logic's small memories. Those leave block RAM for a big Z buffer (Heat of Eleven's build)
-// and cost logic for their output registers, so the default stays in block RAM.
+// A small memory: ppc_ram, or with SMALL_MEMS (every small memory) or MLAB (this one) the logic's small memories. Those leave block RAM
+// for other uses and cost logic for their output registers, so the default stays in block RAM.
 module ppc_ram_s #(
 	parameter int W = 32,
-	parameter int AW = 5
+	parameter int AW = 5,
+	parameter bit MLAB = 1'b0
 ) (
 	input  logic          clk,
 	input  logic          we,
@@ -56,15 +58,25 @@ module ppc_ram_s #(
 	output logic [W-1:0]  rd
 );
 `ifdef SMALL_MEMS
-	(* ramstyle = "MLAB, no_rw_check" *) logic [W-1:0] mem [0:(1 << AW) - 1];
-	always_ff @(posedge clk)
-	begin
-		if (we) mem[wa] <= wd;
-		rd <= mem[ra];
-	end
+	localparam bit SM = 1'b1;
 `else
-	ppc_ram #(.W(W), .AW(AW)) m (.clk, .we, .wa, .wd, .ra, .rd);
+	localparam bit SM = MLAB;
 `endif
+	generate
+	if (SM)
+	begin : g_mlab
+		(* ramstyle = "MLAB, no_rw_check" *) logic [W-1:0] lram [0:(1 << AW) - 1];
+		always_ff @(posedge clk)
+		begin
+			if (we) lram[wa] <= wd;
+			rd <= lram[ra];
+		end
+	end
+	else
+	begin : g_bram
+		ppc_ram #(.W(W), .AW(AW)) m (.clk, .we, .wa, .wd, .ra, .rd);
+	end
+	endgenerate
 endmodule
 
 // one bank's copy: a simple dual-port RAM, the read registered

@@ -74,6 +74,7 @@ void ppc602::set_cr(uint32_t v)
 
 void ppc602::swap_tgpr()
 {
+	if (no_tlbmiss) return;
 	for (int i = 0; i < 4; i++)
 	{
 		uint32_t t = r[i];
@@ -132,9 +133,11 @@ uint32_t ppc602::ea_phys(uint32_t ea, int type)
 	{
 		if (dsisr & DSISR_PROTECTED)
 			raise(EX_ISI, 0x08000000);
+		if (no_tlbmiss)
+			raise(EX_ISI, DSISR_NOT_FOUND);
 		raise(EX_ITLBMISS);
 	}
-	if (dsisr & DSISR_PROTECTED)
+	if ((dsisr & DSISR_PROTECTED) || no_tlbmiss)
 	{
 		spr[SPR_DSISR] = dsisr;
 		raise(EX_DSI, ea);
@@ -310,6 +313,8 @@ uint32_t ppc602::mfspr(uint32_t n)
 		case SPR_TBU_R: timer_read = true; return uint32_t(timebase >> 32) & 0xffffff;
 		case 0: return 0;                                                                              // MQ, not on a 602
 	}
+	if (p602 && spr_gone(n)) return 0;
+	if (no_tlbmiss && n >= SPR_DMISS && n <= SPR_HASH2) return 0;
 	return spr[n];
 }
 
@@ -324,6 +329,7 @@ void ppc602::mtspr(uint32_t n, uint32_t v)
 		case SPR_TBU_W: timebase = (timebase & ~0x00000000ffffffffull) | (uint64_t(v) << 32); return;
 		case SPR_DMISS: case SPR_DCMP: case SPR_HASH1: case SPR_HASH2: case SPR_IMISS: case SPR_ICMP: return;
 	}
+	if (p602 && spr_gone(n)) return;
 	spr[n] = v;
 }
 
@@ -337,6 +343,15 @@ void ppc602::exec(uint32_t op)
 		if (p == 0x3b || p == 0x3f || (p >= 0x30 && p <= 0x37) || (p == 0x1f && (x == 0x217 || x == 0x237 || x == 0x257 ||
 			x == 0x277 || x == 0x297 || x == 0x2b7 || x == 0x2d7 || x == 0x2f7 || x == 0x3d7)))
 			raise(EX_FPU);
+	}
+	if (no_fpdouble || no_string || no_trap)
+	{
+		uint32_t p = op >> 26, x = (op >> 1) & 0x3ff;
+		bool fd = (p >= 0x32 && p <= 0x37 && p != 0x34 && p != 0x35) || (p == 0x1f && (x == 0x257 || x == 0x277 || x == 0x2d7 ||
+			x == 0x2f7));
+		bool str = p == 0x1f && (x == 0x255 || x == 0x215 || x == 0x2d5 || x == 0x295);
+		if ((no_fpdouble && fd) || (no_string && str)) emul();
+		if (no_trap && (p == 0x03 || (p == 0x1f && x == 0x004))) raise(EX_PROGRAM, 0x80000);
 	}
 	switch (op >> 26)
 	{
@@ -711,6 +726,7 @@ void ppc602::op1f(uint32_t op)
 		// cache, TLB, sync: no effect in MAME (dcbz aside)
 		case 0x036: case 0x056: case 0x0f6: case 0x116: case 0x256: case 0x356: case 0x1d6: case 0x236: case 0x3d6:
 		case 0x132: case 0x172: case 0x3d2: case 0x3f2:
+			if (p602 && ((op >> 1) & 0x3ff) == 0x172) break;                                        // (p602: tlbia illegal, as on a 602)
 			return;
 		case 0x3f6:                                                                                    // DCBZ
 		{
@@ -967,6 +983,12 @@ double rsqrte602(double in)
 // 0x7fc00000), fnmadd's negated, its exact zero too (the unit negates the sum before its round: its zero is the sum's negated)
 void ppc602::sp_a(uint32_t op)
 {
+	// (p602: opcode 63's double arithmetic a 602 emulates)
+	if (p602 && (op >> 26) == 0x3f)
+		switch ((op >> 1) & 0x1f)
+		{
+			case 0x15: case 0x14: case 0x19: case 0x12: case 0x1d: case 0x1c: case 0x1f: case 0x1e: emul();
+		}
 	uint32_t a = fs(RA), b = fs(RB), c = fs(RC_);
 	volatile float fa = bitsf(a), fb = bitsf(b), fc = bitsf(c);
 	uint32_t v, nan = SDNAN;
@@ -1035,6 +1057,7 @@ void ppc602::sp_x(uint32_t op)
 		case 0x00c: setfs(RD, snanb(b) ? squiet(b) : b); fp_cr1(op); return;                          // FRSP
 		case 0x00e: case 0x00f:                                                                        // FCTIW, FCTIWZ
 		{
+			if (p602 && sw == 0x00e) emul();                                                           // (p602: fctiw a 602 emulates)
 			float v = bitsf(b);
 			uint32_t w = 0x80000000u;
 			if (!std::isnan(v) && !std::isinf(v))
