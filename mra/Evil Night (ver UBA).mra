@@ -33,13 +33,14 @@
         <patch offset="0x10">09 CA F6 35</patch>
         <patch offset="0x1c">00 14</patch>
     </rom>
-    <!-- the EEPROM, with the guns' calibration and the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
-    <nvram index="2" size="128"/>
 
     <rom index="3" zip="evilngt.zip" md5="none">
         <part name="m48t58y.9n"/>
         <part>03</part>
     </rom>
+    <!-- the EEPROM (the guns' calibration, the service menu's settings) and the M48T58's 8 KB: Main saves them in one file
+         (nvram/) and loads it, after both, in place of the set's 93c46.7k and m48t58y.9n -->
+    <nvram index="2" size="8320"/>
     <rom index="4" zip="evilngt.zip" md5="none" address="0x36000000">
         <part name="810a03.16h" crc="05112d3a"/>
     </rom>

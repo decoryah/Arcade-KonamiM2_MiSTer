@@ -29,7 +29,8 @@ module m2_boot #(
 
 	// the download: bytes from 0, one a clock at most; ld_wait holds the next. ld_sel: 0 the boot ROM, 1 the CD image, 2 the EEPROM, 4 the YMZ280B's samples,
 	// 3 the M48T58's 8 KB then a byte for the board (bit 0: RAM 2 x 8 MB, not 2 x 4 MB; bit 4: the arcade monitor, 512 x 384); a game
-	// without an M48T58 has no index 3
+	// without an M48T58 has no index 3. The saved file (the MRA's nvram, index 2) is the EEPROM's 128 bytes, then for a game with an
+	// M48T58 its 8 KB: index 2's bytes from 128 go to the M48T58
 	input  logic        ld_wr,
 	input  logic [2:0]  ld_sel,
 	input  logic [25:0] ld_addr,
@@ -38,6 +39,10 @@ module m2_boot #(
 	input  logic [6:0]  ee_ua,          // the EEPROM's upload: its byte at ee_ua, a clock later
 	output logic [7:0]  ee_ud,
 	output logic        ee_chg,         // a clock: the game wrote the EEPROM
+	input  logic [64:0] rtc,            // hps_io's RTC, for the M48T58's clock
+	input  logic [12:0] tk_ua,          // the M48T58's upload: its byte at tk_ua, a few clocks later
+	output logic [7:0]  tk_ud,
+	output logic        tk_chg,         // a clock: the game wrote the M48T58's memory
 
 	// DDR3 (MiSTer's DDRAM_*, on clk)
 	input  logic        ddr_busy,
@@ -644,22 +649,31 @@ module m2_boot #(
 		.play(cd_play), .play_stop(cd_stop), .play_lba(cd_lba), .play_len(cd_len), .pos(cd_pos), .playing(cd_playing), .finished(cd_finished),
 		.paused(cd_paused), .vol_l(cd_vol_l), .vol_r(cd_vol_r)
 	);
-	// the M48T58: 8 KB, a byte in bits 15:8 of each 16-bit address. Read from the address coming up, as the DSP's are. Its clock doesn't run: its
-	// registers read as the memory they're in
+	// the M48T58 (rtl/m2_tk.sv): 8 KB and a clock, a byte in bits 15:8 of each 16-bit address. Read from the address coming up, as the
+	// DSP's are. Loaded from index 3's first 8 KB (the MRA's image), then from the saved file (index 2 from byte 128). A file saved
+	// before the M48T58 was (the EEPROM's 128 bytes alone) comes from Main padded with zeros: the image's first byte is never 0 (its
+	// first line is the game's ID, "GX636", "GN810", ...), so a 0 there leaves the MRA's image as it was
 	logic [7:0]  tk_q;
-	wire         tk_ld = ld_wr && ld_sel == 3'd3 && !ld_addr[13];
-	wire         tk_we = u_req && u_we && u_tk;
-	ppc_ram #(.W(8), .AW(13)) tk
+	logic        tk_sv;             // the saved file's M48T58 part is real (set at its byte 128, before its other bytes come)
+	always_ff @(posedge clk) if (ld_wr && ld_sel == 3'd2 && ld_addr == 26'd128) tk_sv <= ld_data != 8'h00;
+	wire         tk_ld3 = ld_wr && ld_sel == 3'd3 && !ld_addr[13];
+	wire         tk_ld2 = ld_wr && ld_sel == 3'd2 && ld_addr >= 26'd128 && ld_addr < 26'd128 + 26'd8192 &&
+	                      (ld_addr == 26'd128 ? ld_data != 8'h00 : tk_sv);
+	wire  [12:0] tk_lda = tk_ld3 ? ld_addr[12:0] : 13'(ld_addr - 26'd128);
+	m2_tk tk
 	(
-		.clk, .we(tk_ld || tk_we), .wa(tk_ld ? ld_addr[12:0] : u_pa[13:1]), .wd(tk_ld ? ld_data : u_wdata[15:8]),
-		.ra(c_u_pa[n_s][13:1]), .rd(tk_q)
+		.clk, .rtc,
+		.ld_we(tk_ld3 || tk_ld2), .ld_a(tk_lda), .ld_d(ld_data),
+		.we(u_req && u_we && u_tk), .wa(u_pa[13:1]), .wd(u_wdata[15:8]),
+		.cpu_rd(c_u_pa[n_s][31:14] == 18'h0db00), .ra(c_u_pa[n_s][13:1]), .rd(tk_q),
+		.ua(tk_ua), .ud(tk_ud), .chg(tk_chg)
 	);
 	m2_kio kio
 	(
 		.clk, .rst,
 		.a(u_pa[23:1]), .we(u_req && u_we && u_kio), .wd(u_wdata[15:0]), .rd(kio_rd),
 		.ata_int(cd_int), .in_p1, .in_dsw, .in_p4, .in_p6, .in_p5, .gun_x, .gun_y,
-		.ee_wr(ld_wr && ld_sel == 3'd2), .ee_a(ld_addr[6:0]), .ee_d(ld_data), .ee_ua, .ee_ud, .ee_chg
+		.ee_wr(ld_wr && ld_sel == 3'd2 && ld_addr < 26'd128), .ee_a(ld_addr[6:0]), .ee_d(ld_data), .ee_ua, .ee_ud, .ee_chg
 	);
 
 	// the stubs' compares a clock early, on the address the choice takes (s_hit: the entry with u_pa's word), with the write

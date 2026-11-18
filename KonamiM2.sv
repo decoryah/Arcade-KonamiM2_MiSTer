@@ -149,6 +149,9 @@ wire   [7:0] ioctl_dout;
 wire         ioctl_wait;
 wire   [7:0] ee_ud;         // the EEPROM, for Main to save (the MRA's nvram, index 2): it asks with ioctl_addr and takes the byte a while later
 wire         ee_chg;
+wire   [7:0] tk_ud;         // the M48T58's 8 KB, after the EEPROM in the same file (index 2, bytes from 128) for a game with one
+wire         tk_chg;
+wire  [64:0] rtc;           // the MiSTer's clock (local time), for the M48T58's
 
 wire  [31:0] joystick_0, joystick_1, joystick_2;
 wire  [15:0] joystick_l_analog_0, joystick_l_analog_1, joystick_l_analog_2;
@@ -180,9 +183,10 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_dout(ioctl_dout),
 	.ioctl_wait(ioctl_wait),
 	.ioctl_upload(),
-	.ioctl_upload_req(ee_chg),      // (Main saves on the OSD's opening only when asked)
+	.ioctl_upload_req(ee_chg | tk_chg), // (Main saves on the OSD's opening only when asked)
 	.ioctl_upload_index(8'd2),
-	.ioctl_din(ee_ud),
+	.ioctl_din(ioctl_addr < 27'd128 ? ee_ud : tk_ud),
+	.RTC(rtc),
 	.ioctl_rd(),
 
 	.joystick_0(joystick_0),
@@ -293,6 +297,7 @@ m2_boot #(.TICK(8)) u_boot
 	.clk(clk_cpu), .rst(cpu_rst_s[1]),
 	.ld_wr(ld_wr_c), .ld_sel(ld_sel), .ld_addr(ld_a[25:0]), .ld_data(ld_d), .ld_wait(ld_wait_c),
 	.ee_ua(ioctl_addr[6:0]), .ee_ud(ee_ud), .ee_chg(ee_chg),
+	.rtc(rtc), .tk_ua(13'(ioctl_addr - 27'd128)), .tk_ud(tk_ud), .tk_chg(tk_chg),
 	.in_p1({6'b111111, ~joystick_1[8], ~joystick_0[8]}),  // (the service coin not on a button: Coin does as much)
 	.in_dsw(dsw), .dec2_off(~status[7]),
 	.hpos(hpos), .vpos(vpos), .rgb(vdu_rgb), .vdu_on(vdu_on), .audio_l(audio_l), .audio_r(audio_r),

@@ -246,6 +246,13 @@ to 20, 20 and 24. Total Vice's MRA
 also sets GAME OPTIONS' VIOLENT MODE to BLOODY: the set has CLEAN, with no blood. A saved EEPROM in `config/nvram/` takes the MRA's place:
 delete it to have the MRA's settings again. Evil Night's blood is GAME OPTIONS' BLOOD COLOR, which the set has at LIGHTNING.
 
+**The M48T58** (Battle Tryst, Heat of Eleven, Evil Night, Hell Night): the board's battery-backed RAM and clock. Its 8 KB is saved with
+the EEPROM in the same file in `config/nvram/` (128 bytes of EEPROM, then the 8 KB). In MAME, Battle Tryst writes coin counts there on
+every coin, and Heat of Eleven's match lighting follows the clock's time of day; both games' service menus show the clock (Battle
+Tryst's BOOKKEEPING page, Heat of Eleven's ADJUST SYSTEM CLOCK). The clock is set from the MiSTer's clock (local time) when the
+core starts, then runs on its own; a time the game sets holds until the core is loaded again. A 128-byte save from an older build
+of these four games still gives the EEPROM its settings; the M48T58 starts from the MRA's image that once, and the next save has both.
+
 ## Notes
 
 - **Speed:** in Polystars, where the real board slows down, the core slows down less (above). The other games haven't been timed
