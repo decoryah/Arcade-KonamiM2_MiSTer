@@ -407,14 +407,13 @@ module ppc_pipe #(
 	fdec_t       xf;
 	fpk_t        x_fk;                 // xf.op's, for the float control (pd.fk)
 	logic        x_slow;                // xf.op is the iterative unit's
-	logic        x_madd;                // ... a multiply-add (its addend may come late)
 	logic        fpu_busy, fpu_start, fpu_done;
 	logic [4:0]  fpu_rd;
 	logic [32:0] fpu_res;
 	logic        fpp_issue, fpp_ok, fpp_dok, fpp_busy, fpp_ev, fpp_wv;
 	logic [4:0]  fpp_erd, fpp_wrd;
 	logic [32:0] fpp_evl, fpp_wval;
-	logic [31:0] fpp_pe, fpp_pw, fpp_pn, fpp_lb;   // FPRs it writes (ppc_fps_ctl's pe / pw / pn), a late addend's (lb)
+	logic [31:0] fpp_pe, fpp_pw, fpp_pn;   // FPRs it writes (ppc_fps_ctl's pe / pw / pn)
 
 	wire m_done = m_valid && (m_kind == MK_FMOV || d_valid);
 	wire m_free = !m_valid || (m_done && !n_valid);    // M empty after this clock (for a move)
@@ -527,25 +526,18 @@ module ppc_pipe #(
 		return fpend_mx(f) || fpend_ux(f);
 	endfunction
 	// for an op to the float pipeline, which takes its results as they leave its last stage (ev; FWD forwards them, with
-	// FPF it takes them itself): a source not ready then; a multiply-add's addend not ready by the time the op reaches A0;
-	// a destination written later by an op in flight. The float units' part (_u), then with M's
+	// FPF it takes them itself): a source not ready then; a destination written later by an op in flight. The float units' part (_u), then with M's
 	function automatic logic fpend_fu(input logic [4:0] f);
 		return fpu_busy && !(FWD && fpu_done) && fpu_rd == f;
 	endfunction
 	function automatic logic fpend_pu(input logic [4:0] f);
 		return FWD || FPF ? fpp_pe[f] || fpend_fu(f) : fpend_u(f);
 	endfunction
-	function automatic logic fpend_pbu(input logic [4:0] f);
-		return FWD || FPF ? (fpp_pe[f] && !fpp_lb[f]) || fpend_fu(f) : fpend_u(f);
-	endfunction
 	function automatic logic fpend_pdu(input logic [4:0] f);
 		return FWD || FPF ? (fpp_pn[f] && !fpp_dok) || fpend_fu(f) : fpend_u(f);
 	endfunction
 	function automatic logic fpend_p(input logic [4:0] f);
 		return fpend_mx(f) || fpend_pu(f);
-	endfunction
-	function automatic logic fpend_pb(input logic [4:0] f);
-		return fpend_mx(f) || fpend_pbu(f);
 	endfunction
 	function automatic logic fpend_pd(input logic [4:0] f);
 		return fpend_mx(f) || fpend_pdu(f);
@@ -559,13 +551,13 @@ module ppc_pipe #(
 	// verilator lint_off UNUSEDSIGNAL
 	wire [32:0] fa_u = fxe(op[20:16], 2'd0, fr_a), fb_u = fxe(op[15:11], 2'd1, fr_b), fc_u = fxe(op[10:6], 2'd2, fr_c);
 	// verilator lint_on UNUSEDSIGNAL
-	logic [2:0]  fpp_bw, fpp_fe, fpp_fw;
+	logic [2:0]  fpp_fe, fpp_fw;
 	ppc_fps_ctl fpctl (
-		.clk, .rst, .allow(fr.allow[FP_ID]), .res_a(fr.res_a), .res_s(fr.res_s), .res_w(fr.res_w),
+		.clk, .rst, .allow(fr.allow[FP_ID]), .hold(fr.hold),
 		.issue(fpp_issue), .pk(x_fk), .rd(op[25:21]), .ra(op[20:16]), .rb(op[15:11]), .rc(op[10:6]), .ok(fpp_ok),
-		.dok(fpp_dok), .busy(fpp_busy), .bw(fpp_bw), .fe(fpp_fe), .fw(fpp_fw), .pe(fpp_pe), .pw(fpp_pw), .pn(fpp_pn), .lb(fpp_lb)
+		.dok(fpp_dok), .busy(fpp_busy), .fe(fpp_fe), .fw(fpp_fw), .pe(fpp_pe), .pw(fpp_pw), .pn(fpp_pn)
 	);
-	assign fp_req = '{fpp_issue, fpu_start, xf.op, fmode, fa_u[31:0], fb_u[31:0], fc_u[31:0], op[25:21], fpp_bw,
+	assign fp_req = '{fpp_issue, fpu_start, xf.op, fmode, fa_u[31:0], fb_u[31:0], fc_u[31:0], op[25:21],
 		FPF ? fpp_fe : 3'b0, FPF ? fpp_fw : 3'b0, xv && xf.go};
 	assign fpp_ev = fr.ev && fr.ecpu == FP_ID;
 	assign fpp_erd = fr.erd;
@@ -760,10 +752,10 @@ module ppc_pipe #(
 	endfunction
 	// verilator lint_on UNUSEDSIGNAL
 	// X's decode, done as its instruction goes in (from op, it cost the hazards and all after them several levels):
-	// rw_dec's, the float op, a multiply-add, the iterative unit's, a two-clock one (x_mul), the access, its address's rA|0
+	// rw_dec's, the float op, the iterative unit's, a two-clock one (x_mul), the access, its address's rA|0
 	// a zero
 	typedef struct packed {
-		logic [7:0] rw; fdec_t xf; fpk_t fk; logic madd, slow, mul; mdec_t m; logic ea_z;   // (fk: xf.op's, the float control's)
+		logic [7:0] rw; fdec_t xf; fpk_t fk; logic slow, mul; mdec_t m; logic ea_z;   // (fk: xf.op's, the float control's)
 		logic fpi;                                               // a float instruction (x_fpoff)
 		logic sh_r, sh_ar, sh_i, sh_x, sh_w, sh_wrap, sh_ins;   // the rotator's choices (sh_*)
 		rdec_t r; logic [2:0] fm;                                // X's result's (x_res), a float move's (m_val)
@@ -776,8 +768,6 @@ module ppc_pipe #(
 		d.rw = rw_dec(o);
 		d.xf = fpu_dec(o);
 		d.fk = fpk_s(d.xf.op);
-		d.madd = d.xf.op == F_MADD || d.xf.op == F_MSUB || d.xf.op == F_NMADD || d.xf.op == F_NMSUB || d.xf.op == F_MADDS ||
-			d.xf.op == F_MSUBS || d.xf.op == F_NMADDS || d.xf.op == F_NMSUBS;
 		d.slow = d.xf.op == F_DIV || d.xf.op == F_DIVS || d.xf.op == F_RES;   // (frsqrte: the pipeline's, as the 602's)
 		d.mul = o[31:26] == 6'h07 || (o[31:26] == 6'h1f && (o[10:1] == 10'h00b || o[10:1] == 10'h04b || o[10:1] == 10'h0eb ||
 			o[10:1] == 10'h2eb)) || (o[31:26] == 6'h3f && !o[5] && (o[10:1] == 10'h000 || o[10:1] == 10'h020));
@@ -1091,11 +1081,10 @@ module ppc_pipe #(
 		x_try = x_run && xv && x_go && !(a_v && !a_seq && (a_flt || a_cov));
 		xf = pd.xf;
 		x_fk = pd.fk;
-		x_madd = pd.madd;
 		x_slow = pd.slow;
 		x_haz0 = (g_a && gpend_x(pg(rA))) || (g_b && gpend_x(pg(rB))) || (g_d && gpend_x(pg(rD))) ||
 			(xf.go && !x_slow ?
-				(f_a && fpend_p(rA)) || (f_b && (x_madd ? fpend_pb(rB) : fpend_p(rB))) || (f_c && fpend_p(frC)) ||
+				(f_a && fpend_p(rA)) || (f_b && fpend_p(rB)) || (f_c && fpend_p(frC)) ||
 				(f_d && fpend_pd(rD)) :
 			 (FWD || FPF) && pd.fce ?
 				(f_a && fpend_p(rA)) || (f_b && fpend_p(rB)) :
@@ -1480,7 +1469,7 @@ module ppc_pipe #(
 		logic fm, ff;
 		fm = (f_a && fpend_mx(rA)) || (f_b && fpend_mx(rB)) || (f_c && fpend_mx(frC)) || (f_d && fpend_mx(rD));
 		ff = xf.go && !x_slow ?
-			(f_a && fpend_pu(rA)) || (f_b && (x_madd ? fpend_pbu(rB) : fpend_pu(rB))) || (f_c && fpend_pu(frC)) ||
+			(f_a && fpend_pu(rA)) || (f_b && fpend_pu(rB)) || (f_c && fpend_pu(frC)) ||
 			(f_d && fpend_pdu(rD)) :
 			(FWD || FPF) && pd.fce ? (f_a && fpend_pu(rA)) || (f_b && fpend_pu(rB)) :
 			(f_a && fpend_ux(rA)) || (f_b && fpend_ux(rB)) || (f_c && fpend_ux(frC)) || (f_d && fpend_ux(rD));

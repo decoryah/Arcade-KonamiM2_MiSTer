@@ -4,7 +4,7 @@ set -e
 R=${R:-/mnt/c/repos/konamim2-mister/mister}
 export PATH=~/tools/oss-cad-suite/bin:$PATH
 N=${1:-2000000}
-for TOP in ppc_fps_dp ppc_fps_it; do
+for TOP in ppc_fps3 ppc_fps_it; do
 	B=~/build_m2/ppcfps_$TOP
 	DEF=""
 	if [ $TOP = ppc_fps_it ]; then DEF=-DIT; fi

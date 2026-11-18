@@ -304,7 +304,7 @@ m2_boot #(.TICK(8)) u_boot
 ///////////////////////   VIDEO   ///////////////////////
 
 // The raster: 857 x 262 at 59.39 Hz, 640 x 240 shown (near MAME's set_ntsc(); rtl/m2_vtiming.sv); with the board byte's bit 4 (Hell
-// Night's), the arcade monitor's, 684 x 416 at 58.6 Hz, 512 x 384 shown (MAME's set_arcres())
+// Night's), the arcade monitor's, 673 x 416 at 59.53 Hz, 512 x 384 shown (MAME's set_arcres() rates)
 wire        ce_pix, hblank, vblank, hsync, vsync;
 m2_vtiming u_vtiming
 (
