@@ -32,11 +32,12 @@
     <rom index="2" zip="btltryst.zip" md5="none">
         <part name="93c46.7k"/>
     </rom>
-    <!-- the EEPROM, the service menu's settings: Main saves it (nvram/) and loads it in place of the set's 93c46.7k -->
-    <nvram index="2" size="128"/>
 
     <rom index="3" zip="btltryst.zip" md5="none">
         <part name="m48t58"/>
         <part>09</part>
     </rom>
+    <!-- the EEPROM (the service menu's settings) and the M48T58's 8 KB (the coin books): Main saves them in one file (nvram/)
+         and loads it, after both, in place of the set's 93c46.7k and m48t58 -->
+    <nvram index="2" size="8320"/>
 </misterromdescription>

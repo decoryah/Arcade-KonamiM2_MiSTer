@@ -2,14 +2,18 @@
 // the owner's Seta 2 core and ppriest's gx_guns.sv), the ports' scale, a third player and the reload differ.
 //
 // Each player's aim is a held position v = 0..255 per axis across the picture, moved by
-//   the left stick   absolutely, past a dead zone of 8: -128..127 across the picture, which is what Sinden and GUN4IR guns present
+//   the left stick   absolutely: -128..127 across the picture, which is what Sinden and GUN4IR guns present (MiSTer calibrates them, F10,
+//                    to -127..127 edge to edge, saturating there when aimed off the picture)
 //   the d-pad        two units a frame while held
-//   the mouse        relatively, for the player the OSD gives it; its left button is the trigger, its right the reload
-// Each player's stick has a mode (OSD): Auto (an axis pushed to 96 or more moves as the d-pad does: arcade sticks on gamepad encoders; below that, absolutely), Aim (always
-// absolute) or D-pad (any deflection moves as the d-pad).
+//   the mouse        relatively, for the player the OSD gives the mouse's aim
+// Each player's stick has a mode (OSD): Auto (absolute past a dead zone of 8; an axis pushed to 96 or more moves as the d-pad does: arcade sticks on gamepad
+// encoders), Aim (absolute, every position, no dead zone: a light gun's) or D-pad (any deflection moves as the d-pad).
+// The mouse (OSD): its left button is a player's trigger, its right the reload, in every mode; "aim+trigger" also aims that player's gun by its movement, "trigger" leaves
+// the aim to the gun's stick: a Sinden gun presents its aim as the stick and its trigger as the mouse's button.
 //
-// The ports: X 0..639, Y 0..239, as MAME's; on the arcade monitor (arc: Hell Night) X 0..511, Y 0..383, as MAME's hellngt. A gun at the left or right edge is off the screen, X and Y reading 0. To reload, P1's and P3's guns are aimed up (a mercury
-// switch, in MAME the top edge of the picture), P2's has a button: Button 2 does each of these.
+// The ports: X 0..639, Y 0..239, as MAME's; on the arcade monitor (arc: Hell Night) X 0..511, Y 0..383, as MAME's hellngt. A gun within the OSD's off-screen edge (2-10
+// pixels) of the left or right edge is off the screen, X and Y reading 0. To reload, P1's and P3's guns are aimed up (a mercury switch, in MAME the top edge of the
+// picture: here within the edge, in lines, half as many on the TV's raster), P2's has a button: Button 2 does each of these.
 `default_nettype none
 module m2_guns (
 	input  logic        clk,
@@ -19,7 +23,8 @@ module m2_guns (
 	input  logic [15:0] ana [0:2],          // joystick_l_analog_0..2: { Y, X }, signed
 	input  logic [24:0] mouse,              // hps_io's ps2_mouse: bit 24 toggles a packet, Y positive up
 	input  logic [1:0]  mode [0:2],         // each player's stick: 0 Auto, 1 Aim, 2 D-pad
-	input  logic [1:0]  ms_who,             // the mouse: 0 P1, 1 P2, 2 P3, 3 off
+	input  logic [2:0]  ms_who,             // the mouse: 0 P1's trigger, 1 P1's aim and trigger, 2 / 3 P2's, 4 / 5 P3's, 6 / 7 off
+	input  logic [1:0]  edge_sel,           // the off-screen edge: 0 4 pixels, 1 2, 2 8, 3 10
 	input  logic        off_fire,           // Total Vice: Button 2 fires with the gun off the screen, for every player
 	input  logic        arc,                // the arcade monitor's raster (512 x 384: Hell Night), not the TV's (640 x 240)
 
@@ -28,6 +33,7 @@ module m2_guns (
 	output logic [15:0] p5,                 // MAME's P5, the switches, as it's read
 
 	input  logic [2:0]  show,               // the crosshairs: bit 0 P1, bit 1 P2, bit 2 P3
+	input  logic [1:0]  border,             // Sinden's white border: 0, 1, 2: 16, 24, 8 pixels (below), 3 none (16 the OSD's default)
 	input  logic [9:0]  hpos,
 	input  logic [8:0]  vpos,
 	input  logic [23:0] rgb_in,
@@ -44,7 +50,8 @@ module m2_guns (
 	end
 	wire       ms_ev = ms[24] ^ ms_t;
 	wire       frame = vblank && !vbl_l;
-	wire [2:0] ms_sel = {ms_who == 2'd2, ms_who == 2'd1, ms_who == 2'd0};
+	wire [2:0] ms_sel = {ms_who[2:1] == 2'd2, ms_who[2:1] == 2'd1, ms_who[2:1] == 2'd0};   // the mouse's buttons
+	wire [2:0] ms_aim = ms_sel & {3{ms_who[0]}};                                           // ... and its movement
 
 	localparam logic [7:0] DEAD = 8'd8;     // below this the axis is at rest
 	localparam logic [7:0] FULL = 8'd96;    // at or above it, Auto moves as the d-pad
@@ -72,17 +79,18 @@ module m2_guns (
 			sy = mode[g] == 2'd2 ? ly : mode[g] == 2'd1 ? 1'b0 : mag(ay) >= FULL;
 			dir = {j[g][3] | (ay[7] & sy), j[g][2] | (!ay[7] & sy), j[g][1] | (ax[7] & sx), j[g][0] | (!ax[7] & sx)};
 			if (rst) begin vx[g] <= 8'h80; vy[g] <= 8'h80; end
-			else if (ms_ev && ms_sel[g])
+			else if (ms_ev && ms_aim[g])
 			begin
 				vx[g] <= step(vx[g], $signed({{2{ms[4]}}, ms[15:8]}));
 				vy[g] <= step(vy[g], -$signed({{2{ms[5]}}, ms[23:16]}));
 			end
 			else
 			begin
+				// (Aim: the stick's position as it is, a light gun's; the d-pad still moves it while held)
 				if (dir[1:0] != 2'b00) begin if (frame) vx[g] <= step(vx[g], dir[0] ? 10'sd2 : -10'sd2); end
-				else if (lx) vx[g] <= ax ^ 8'h80;
+				else if (lx || mode[g] == 2'd1) vx[g] <= ax ^ 8'h80;
 				if (dir[3:2] != 2'b00) begin if (frame) vy[g] <= step(vy[g], dir[2] ? 10'sd2 : -10'sd2); end
-				else if (ly) vy[g] <= ay ^ 8'h80;
+				else if (ly || mode[g] == 2'd1) vy[g] <= ay ^ 8'h80;
 			end
 		end
 
@@ -92,6 +100,8 @@ module m2_guns (
 	wire  [9:0]  xr [0:2] = '{xm[0][17:8], xm[1][17:8], xm[2][17:8]};      // 0..639 (0..511)
 	wire  [8:0]  yr [0:2] = '{ym[0][16:8], ym[1][16:8], ym[2][16:8]};      // 0..239 (0..383)
 	wire  [9:0]  x_max = arc ? 10'd511 : 10'd639;
+	wire  [3:0]  ex = edge_sel == 2'd1 ? 4'd2 : edge_sel == 2'd2 ? 4'd8 : edge_sel == 2'd3 ? 4'd10 : 4'd4;   // the off-screen edge, pixels
+	wire  [3:0]  ey = arc ? ex : {1'b0, ex[3:1]};                                                            // ... lines
 	always_ff @(posedge clk)
 	begin
 		for (int g = 0; g < 3; g++)
@@ -102,10 +112,10 @@ module m2_guns (
 			ym[g] <= {9'd0, vy[g]} * (arc ? 17'd385 : 17'd240);
 			trig[g] <= j[g][4] | (ms_sel[g] & ms[0]) | (off_fire & reload[g]);
 			reload[g] <= j[g][5] | (ms_sel[g] & ms[1]);
-			off = xr[g] == 10'd0 || xr[g] == x_max || (reload[g] && (g != 1 || off_fire));
+			off = xr[g] < 10'(ex) || xr[g] > x_max - 10'(ex) || (reload[g] && (g != 1 || off_fire));
 			gun_x[g] <= off ? 10'd0 : xr[g];
 			gun_y[g] <= off ? 9'd0 : yr[g];
-			aim_up[g] <= yr[g] == 9'd0 || reload[g];
+			aim_up[g] <= yr[g] < 9'(ey) || reload[g];
 		end
 		// (aimed up reads 0: MAME's field is IP_ACTIVE_LOW, and a port's read inverts its custom fields as it does its buttons)
 		p5 <= {1'b1, !aim_up[2], !reload[1], !aim_up[0], 1'b1, ~trig, 8'hff};
@@ -120,13 +130,37 @@ module m2_guns (
 		// (on the TV's raster a line's two pixels are as wide as one is high; the arcade monitor's pixels are square: sq)
 		return (dx == 10'd0 && dy <= 9'd6 && dy >= 9'd2) || (dy == 9'd0 && (sq ? dx <= 10'd6 && dx >= 10'd2 : dx <= 10'd12 && dx >= 10'd4));
 	endfunction
+	// ---- Sinden's border ---------------------------------------------------------------------------------------------------
+	// A Sinden gun's camera finds the picture by a white border round it: the picture's outermost pixels white, drawn in the game's
+	// own pixels (before the scaler, so it stays at the picture's edge at any output), over the crosshairs. The sides 8, 16 or 24 pixels
+	// across (8 on the TV's 640-pixel line is a thinner share of the picture than 8 on a 496-pixel one, and a dark game leaves the border
+	// the only bright outline the camera has: at 8 a Sinden's driver kept taking a bright edge in the room for the picture's side, its X
+	// jumping by a third of the screen, while Y held). The bottom as wide (on the TV's raster half as many lines: a line is as tall as
+	// two pixels are wide); the top stays thin, 4 lines on the TV's raster and 8 on the arcade monitor's, so it covers little of the
+	// scores there (the games keep the bottom clear). A black band inside it (below). (Drawing the border round the picture in the
+	// scaler instead, covering nothing, is the better way: a later change.)
+	wire  [4:0]  bw = border == 2'd0 ? 5'd16 : border == 2'd1 ? 5'd24 : 5'd8;
+	wire  [4:0]  bt = arc ? 5'd8 : 5'd4;                    // the top, lines
+	wire  [4:0]  bb = arc ? bw : {1'b0, bw[4:1]};           // the bottom, lines
+	wire  [8:0]  y_max = arc ? 9'd383 : 9'd239;
+	// inside it a black band, 4 pixels across (2 lines on the TV's raster), so the game's own bright pixels never touch the white:
+	// the gun's driver takes white touching white for one bigger shape, and finds the picture's edge in the wrong place
+	wire  [5:0]  kband = arc ? 6'd4 : 6'd2;
+	wire  [5:0]  kw = 6'(bw) + 6'd4;
+	wire  [5:0]  kt = 6'(bt) + kband;
+	wire  [5:0]  kb = 6'(bb) + kband;
+	logic        bd, bk;
 	logic c0, c1, c2;
 	always_ff @(posedge clk)
 	begin
 		c0 <= show[0] && on_cross(hpos, vpos, xr[0], yr[0], arc);
 		c1 <= show[1] && on_cross(hpos, vpos, xr[1], yr[1], arc);
 		c2 <= show[2] && on_cross(hpos, vpos, xr[2], yr[2], arc);
+		bd <= border != 2'd3 && hpos <= x_max && vpos <= y_max &&
+		      (hpos < 10'(bw) || hpos > x_max - 10'(bw) || vpos < 9'(bt) || vpos > y_max - 9'(bb));
+		bk <= border != 2'd3 && hpos <= x_max && vpos <= y_max &&
+		      (hpos < 10'(kw) || hpos > x_max - 10'(kw) || vpos < 9'(kt) || vpos > y_max - 9'(kb));
 	end
-	assign rgb_out = c0 ? 24'hff2020 : c1 ? 24'h20ff20 : c2 ? 24'hffff20 : rgb_in;
+	assign rgb_out = bd ? 24'hffffff : bk ? 24'h000000 : c0 ? 24'hff2020 : c1 ? 24'h20ff20 : c2 ? 24'hffff20 : rgb_in;
 endmodule
 `default_nettype wire
