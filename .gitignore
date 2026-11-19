@@ -31,6 +31,7 @@ c5_pin_model_dump.txt
 # simulation
 sim/obj_*/
 sim/emu/obj_*/
+sim/crt/build/
 sim/*.log
 sim/emu/*.log
 # fx68k's microcode, linked next to the benches (run_sys.sh, run_emu.sh)

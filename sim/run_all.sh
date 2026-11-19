@@ -36,6 +36,7 @@ for c in ppc1 ppc2; do
 done
 check "coh" "$(bash $S/coh/run.sh 4000000 1 2>&1)" "^PASS"
 check "coh latency" "$(bash $S/coh/run.sh 4000000 2 2>&1)" "^PASS"
+check "crt" "$(bash $S/crt/run.sh 2>&1)" "^PASS on both rasters"
 if have "m2boot" $T/boot/p1.tr; then
 	check "m2boot" "$(bash $S/m2boot/run.sh 2>&1)" "^PASS"
 fi

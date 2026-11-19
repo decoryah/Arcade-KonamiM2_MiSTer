@@ -117,8 +117,8 @@ set_global_assignment -name VERILOG_MACRO "PPC_REGS_MLAB=1"
 # High Res (rtl/m2_vtiming.sv). Its RBF goes in _Arcade/cores as KonamiM2HellNight_<date>.rbf, the name its MRA asks for. A 64 KB Z
 # cache (Z_CACHE_IB=11; 4 KB without it: the Z path is what Hell Night's lists wait for), and what Hell Night doesn't use left out, as in Battle Tryst's build but
 # for the discards (a census of its attract and its gameplay in the M2 emulator). The CPUs' caches fixed at 32 KB (PPC_CACHE_KB: no
-# OSD size option there, which frees the room the CPU 2 decrementer option needs). Seed 13 (it meets timing with this
-# tree)
+# OSD size option there, which frees the room the CPU 2 decrementer option needs). CRT Adjust's vertical shift for 416 lines
+# (CRT_VTOTAL; 262 without it). Seed 13 (it meets timing with this tree)
 #set_global_assignment -name VERILOG_MACRO "Z_SDRAM=1"
 #set_global_assignment -name VERILOG_MACRO "Z_CACHE_IB=11"
 #set_global_assignment -name VERILOG_MACRO "PPC_NO_TRAP=1"
@@ -127,6 +127,7 @@ set_global_assignment -name VERILOG_MACRO "PPC_REGS_MLAB=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_WCLIPIN=1"
 #set_global_assignment -name VERILOG_MACRO "TE_NO_DISCARD_RGB=1"
 #set_global_assignment -name VERILOG_MACRO "PPC_CACHE_KB=32"
+#set_global_assignment -name VERILOG_MACRO "CRT_VTOTAL=416"
 #set_global_assignment -name SEED 13
 
 # disable bilinear filtering when downscaling

@@ -249,6 +249,7 @@ Pause again goes on (a reset ends it too). While paused, Step runs one frame and
 | CD audio image | the disc's whole image, `<set>_full.bin` |
 | Aspect ratio | Original, Full Screen, two custom |
 | Scale | Normal, V-Integer, HV-Integer, Narrower HV-Integer, HV-Integer+ |
+| CRT Adjust (page) | Off, On; H-Size 0 to +5 and -16 to -1, H-Position -48 to +16, V-Shift -16 to +15: rmonic79's CRT Adjust (`modules/crt-adjust`, `rtl/m2_crt.sv`) for an analog CRT, Hell Night's 24 kHz too: the picture is sized and moved through a line buffer while the sync keeps its timing, so the monitor stays locked. A size step is 1/80 of a pixel (1/64 in Hell Night), about 8 pixels across the picture; a position step is 2 pixels. The position stops where the picture would reach into the hsync pulse or past the line's end, so a line is always whole: in the 640 x 240 games H-Size +2 to +5 stop it further left (at +5 from -2: the picture moves 4 pixels left), and -13 to -16 at -47 and -46; in Hell Night it goes from -23 at H-Size 0 (-14 at -16, -25 at +5) to +16 (+14, +9 and +5 at H-Size +3, +4 and +5). Far left, the picture is in the black before it that a CRT measures: if its brightness changes there, move it back. Off, the picture passes straight through, as before |
 | P1 Input, P2 Input, P3 Input (gun games; P3 in Evil Night and Hell Night) | Controller (the default), Mouse, Sinden, Light gun: what the player aims with (above) |
 | Controller stick (shown with a player on Controller) | Position, Move |
 | Crosshair (shown with a player on Controller or Mouse) | On, Off: each such player's, once that player aims |
@@ -291,7 +292,6 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
 - **In MAME:** MAME 0.289 marks Battle Tryst and Heat of Eleven '98 as preliminary. Its Heat of Eleven runs the attract mode; its
   Battle Tryst stops at the MPEG intro, which the core gets past. Total Vice's JAD, AAB and UAC sets are marked not working, and
   aren't supported.
-- **CRT Adjust:** not yet.
 
 ## What is verified
 
@@ -323,10 +323,11 @@ The plan and how the machine is built are in [docs/design.md](docs/design.md); w
 |---|---|
 | `KonamiM2.sv` | the MiSTer top level (`emu`) |
 | `rtl/` | the machine |
-| `sim/` | Verilator benches, run from WSL; `sim/run_all.sh` runs them all, one PASS / FAIL line each |
+| `sim/` | Verilator benches (CRT Adjust's, `sim/crt`, Icarus Verilog), run from WSL; `sim/run_all.sh` runs them all, one PASS / FAIL line each |
 | `tools/` | the disc files' maker (`m2disc.py`, with `cdimage.py` and `cdfix.py`), MAME capture scripts (`tools/lua/`), the reports, the reference models (`tools/ref/`) |
 | `mra/`, `releases/`, `dist/` | MRAs, the tested RBFs with their fitter / timing summaries, release notes and zips |
 | `hps/m2mpegd/` | the MPEG decoder for Battle Tryst's movies, on the MiSTer's ARM (`m2mpegd`), its scripts and kernel module |
+| `modules/` | vendored: rmonic79's CRT Adjust, with the owner's other cores' changes (`modules/VENDOR.md`) |
 | `sys/` | the MiSTer framework |
 
 The benches expect the owner's layout: this repository at `/mnt/c/repos/konamim2-mister/mister` and, next to it, `work/` with what is
@@ -370,6 +371,7 @@ or from a given frame, for `sim/ppcreplay`; how to run it is at the top of the s
   freeze, the CPU cache size option, `tools/build.py`, `tools/cdimage.py`'s older CHDs.
 * The owner's Gaelco 3D core: the platform layer, the base of the Z buffer in the SDRAM (`rtl/m2_zmem.sv`), the way each block is
   checked, the benches and the release packaging.
+* **rmonic79 (Umberto Parisi)**, with Andrea Bogazzi (asturur): CRT Adjust (GPL-3.0-or-later).
 * The MiSTer framework (Sorgelig and contributors).
 
 ## Licence

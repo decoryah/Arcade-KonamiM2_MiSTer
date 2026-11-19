@@ -5,6 +5,8 @@ set_global_assignment -name SEARCH_PATH rtl
 
 # the platform layer
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_vtiming.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/m2_crt.sv
+set_global_assignment -name SYSTEMVERILOG_FILE modules/crt-adjust/crt_adjust.sv
 
 # the machine: ppc1 and its memory
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ppc_fpu_pkg.sv

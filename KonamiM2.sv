@@ -89,6 +89,12 @@ localparam CONF_STR = {
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[34:32],Scale,Normal,V-Integer,HV-Integer,Narrower HV-Integer,HV-Integer+;",
+	// (the picture's size and place on an analog CRT: rtl/m2_crt.sv; an H-Position step is 2 of the M2's pixels)
+	"P2,CRT Adjust;",
+	"P2O[63],CRT Adjust,Off,On;",
+	"H7P2O[68:64],CRT H-Size,0,+1,+2,+3,+4,+5,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"H7P2O[75:69],CRT H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,-48,-47,-46,-45,-44,-43,-42,-41,-40,-39,-38,-37,-36,-35,-34,-33,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"H7P2O[80:76],CRT V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
 	"-;",
 	// (the gun games: each player's Input, and below it only the settings an Input in use has; the bits before 51 were the older gun settings, left unused)
 	"H1O[54:53],P1 Input,Controller,Mouse,Sinden,Light gun;",
@@ -174,7 +180,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({9'd0, ~gun_game | ~|in_gun, ~gun_game | ~|in_sin, ~gun_game | ~|(in_ctl | in_ms), ~gun_game | ~|in_ctl, ~gun_game | board[2], ~gun_game, direct_video}),
+	.status_menumask({8'd0, ~status[63], ~gun_game | ~|in_gun, ~gun_game | ~|in_sin, ~gun_game | ~|(in_ctl | in_ms), ~gun_game | ~|in_ctl, ~gun_game | board[2], ~gun_game, direct_video}),
 	.forced_scandoubler(forced_scandoubler),
 	.direct_video(direct_video),
 	.gamma_bus(gamma_bus),
@@ -386,18 +392,33 @@ generate
 	end
 endgenerate
 
+// CRT Adjust (the OSD's page): the picture's size, horizontal place and vertical place on an analog CRT, through a line buffer,
+// the sync pulses as they were (rtl/m2_crt.sv: rmonic79's MiSTer-CRT-Adjust). Off, the picture passes straight through. The frame's
+// most lines: 262, or Hell Night's build's 416 (its qsf block sets CRT_VTOTAL)
+`ifndef CRT_VTOTAL
+`define CRT_VTOTAL 262
+`endif
+wire        crt_ce, crt_hs, crt_vs, crt_hb, crt_vb;
+wire [23:0] crt_rgb;
+m2_crt #(.VTOTAL(`CRT_VTOTAL)) u_crt
+(
+	.clk(clk_sys), .arc(board[4]), .on(status[63]), .osd_size(status[68:64]), .osd_pos(status[75:69]), .osd_vshift(status[80:76]),
+	.ce_in(ce_pix), .rgb_in(rgb), .hs_in(hsync), .vs_in(vsync), .hb_in(hblank), .vb_in(vblank),
+	.ce_out(crt_ce), .rgb_out(crt_rgb), .hs_out(crt_hs), .vs_out(crt_vs), .hb_out(crt_hb), .vb_out(crt_vb)
+);
+
 wire        vga_de_mix;
 
 arcade_video #(.WIDTH(640), .DW(24)) arcade_video
 (
 	.*,
 	.clk_video(clk_sys),
-	.ce_pix(ce_pix),
-	.RGB_in(rgb),
-	.HBlank(hblank),
-	.VBlank(vblank),
-	.HSync(hsync),
-	.VSync(vsync),
+	.ce_pix(crt_ce),
+	.RGB_in(crt_rgb),
+	.HBlank(crt_hb),
+	.VBlank(crt_vb),
+	.HSync(crt_hs),
+	.VSync(crt_vs),
 	.fx(3'd0),
 	.forced_scandoubler(1'b0),
 	.VGA_DE(vga_de_mix)
