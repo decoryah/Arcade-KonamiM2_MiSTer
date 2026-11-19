@@ -53,18 +53,18 @@ No ROMs or CD images are in this repository; you supply your own MAME sets.
 MAME's Konami M2 driver, Total Vice in its EBA version. The owner has played Tobe! Polystars through, more than once, and has played
 Evil Night, Total Vice, Hell Night, Battle Tryst and Heat of Eleven '98; tallendorf has played the last three too, and left Battle
 Tryst's and Hell Night's attract running for hours without a freeze.
-**Polystars runs at full speed:** stage 3, timed against a video of the real board, takes 154.8 s where the board takes 173.6 s (112 %
-of its speed; 110 % before the lava, 133 % in it, 106 % after). Where the real board slows down, the core slows down less. The other
-games' speed hasn't been timed against a real board; Hell Night's continue screen and Battle Tryst's character select are known to run
-slow (see Notes).
+**Polystars runs at full speed:** stage 3, timed against a video of the real board on release 20261110's core, takes 154.8 s where the
+board takes 173.6 s (112 % of its speed; 110 % before the lava, 133 % in it, 106 % after). Where the real board slows down, the core
+slows down less. The other games' speed hasn't been timed against a real board; Hell Night's continue screen and Battle Tryst's
+character select are known to run slow (see Notes).
 Built with Quartus 17.0, each core's timing met on every clock (the slack on the worst path):
 
 | Core | ALMs (of 41,910) | Machine, 66.67 MHz | SDRAM, 133.33 MHz | HDMI |
 |---|---|---|---|---|
-| `KonamiM2` | 38,761 (92 %) | +1.152 ns | | +0.407 ns |
-| `KonamiM2HellNight` | 41,439 (99 %) | +0.603 ns | +0.111 ns | +0.073 ns |
-| `KonamiM2Tryst` | 41,396 (99 %) | +0.592 ns | +0.148 ns | +0.146 ns |
-| `KonamiM2Heat` | 40,223 (96 %) | +0.881 ns | +0.591 ns | +0.356 ns |
+| `KonamiM2` | 36,992 (88 %) | +1.616 ns | | +0.367 ns |
+| `KonamiM2HellNight` | 38,179 (91 %) | +0.737 ns | +0.262 ns | +0.335 ns |
+| `KonamiM2Tryst` | 39,850 (95 %) | +0.674 ns | +0.407 ns | +0.560 ns |
+| `KonamiM2Heat` | 36,380 (87 %) | +1.300 ns | +0.160 ns | +0.236 ns |
 
 | Game | Set | On this core |
 |---|---|---|
@@ -78,8 +78,15 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
 
 ## Install
 
-1. Unzip `KonamiM2_MiSTer_<date>.zip` (`tools/package.py` writes it to `dist/`) over the root of the SD card (`/media/fat/`): the four
-   cores go to `_Arcade/cores/`, the six MRAs to `_Arcade/`. Each MRA asks for its core by name:
+1. Unzip `KonamiM2_MiSTer_<date>.zip` (`tools/package.py` writes it to `dist/`) over the root of the SD card (`/media/fat/`):
+
+   | On the SD card | What |
+   |---|---|
+   | `_Arcade/cores/` | the four cores |
+   | `_Arcade/` | the six MRAs |
+   | `m2mpegd/`, `Scripts/m2mpegd_autostart_on.sh`, `Scripts/m2mpegd_autostart_off.sh` | Battle Tryst's movies' decoder (Battle Tryst's movies, below) |
+
+   Each MRA asks for its core by name:
 
    | Core | MRAs | Needs |
    |---|---|---|
@@ -88,8 +95,9 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
    | `KonamiM2Tryst_<date>.rbf` | Battle Tryst | the SDRAM board |
    | `KonamiM2Heat_<date>.rbf` | Heat of Eleven '98 | the SDRAM board |
 
-   By hand from the repository: `releases/<core>_<date>.rbf` to `_Arcade/cores/`, `mra/*.mra` to `_Arcade/`. Hell Night, Battle Tryst
-   and Heat of Eleven keep their Z buffer in the SDRAM board's memory (any size: it uses the first 32 MB).
+   By hand from the repository: `releases/<core>_<date>.rbf` to `_Arcade/cores/`, `mra/*.mra` to `_Arcade/`, and for Battle Tryst's
+   movies `m2mpegd/` and `Scripts/` (Battle Tryst's movies, below). Hell Night, Battle Tryst and Heat of Eleven keep their Z buffer in
+   the SDRAM board's memory (any size: it uses the first 32 MB).
 2. Make each game's disc files from the CHD in your MAME 0.289 set. They aren't in a MAME set: `<set>_cd.zip` holds the disc's data
    track, which the core loads with the game, and `<set>_full.bin` the whole disc, from which it plays the music.
 
@@ -104,8 +112,11 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
 
    The `.cue` is the image's cue sheet; the core doesn't need it. Make them in either of these ways:
 
-   - **Any of these, with this repository's `tools/m2disc.py`** (Python 3 and MAME's `chdman`, nothing else). From the folder you
-     want the files in:
+   - **Any of the six, in a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
+     (for Polystars, keep *Repair gaps in Polystars music* ticked) and download the three files it makes. The conversion runs on your
+     computer, and the CHD isn't uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory.
+   - **Or with this repository's `tools/m2disc.py`** (Python 3 and MAME's `chdman`, nothing else). From the folder you want the
+     files in:
 
      ```
      python3 tools/m2disc.py polystar/623jaa02.chd
@@ -123,9 +134,6 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
      ones, so the tool pads that track in `totlvice_full.bin`; it does the same for an older Polystars CHD kept that way. Polystars'
      music it also repairs (below). Hell Night, Battle Tryst and Heat of Eleven are checked on their data sectors alone, as CHDs
      of their discs go round with the 2 s before the music kept in different ways; each is laid out as on the disc.
-   - **Any of the six, in a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
-     (for Polystars, keep *Repair gaps in Polystars music* ticked) and download the three files it makes. The conversion runs on your
-     computer, and the CHD isn't uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory.
 
    **Polystars' music:** MAME marks `623jaa02.chd` as a bad dump: its music has 28 stretches of 0.35 s of silence, where the ripper's
    reads failed, 16 of them in the stage 7 boss's music. On the board they're short gaps in the music. Both ways above fill each from
@@ -153,13 +161,13 @@ are black.
 
 ### Install
 
-From the release, `m2mpegd_<date>.zip` holds two folders; copy both to the root of the SD card (`/media/fat`):
+The release zip (Install, above) puts it on the SD card:
 
 | On the SD card | What |
 |---|---|
 | `m2mpegd/m2mpegd` | the decoder |
 | `m2mpegd/m2mpegd_service.sh` | starts and stops it |
-| `m2mpegd/m2_mem_wc-<kernel>.ko` | an optional kernel module for a faster picture copy, one per MiSTer kernel |
+| `m2mpegd/m2_mem_wc-5.15.1-MiSTer.ko`, `m2_mem_wc-6.18.38-MiSTer.ko` | a kernel module for a faster picture copy, for each of these MiSTer kernels (built by tallendorf) |
 | `Scripts/m2mpegd_autostart_on.sh` | turns starting the decoder at boot on |
 | `Scripts/m2mpegd_autostart_off.sh` | turns it off |
 
@@ -281,12 +289,13 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
 ## Notes
 
 - **Speed:** in Polystars, where the real board slows down, the core slows down less (above). The other games haven't been timed
-  against a real board. Two scenes are known to run slow: Hell Night's continue screen, whose 10 s take about 17, and Battle Tryst's
-  character select, at about a third of its speed (its matches are close to full speed).
+  against a real board. Two scenes are known to run slow: Hell Night's continue screen, whose 10 s take about 14 (about 20 before its
+  Z cache grew to 64 KB), and Battle Tryst's character select, at about a third of its speed in release 20261114 (its matches are close
+  to full speed).
 - **Hell Night** (ver EAA), Evil Night's European version, draws only in High Res, on the arcade monitor (512 x 384, about 24 kHz),
   where on this core the other games draw in Low Res (640 x 240, the TV's): its MRA's board byte asks for that raster, and its guns'
-  range is MAME's hellngt's. A CRT for it needs to take 24 kHz. Its frame rate on the core is 58.6 Hz where MAME's is 59.5 Hz, so it
-  runs about 1.6 % slow.
+  range is MAME's hellngt's. A CRT for it needs to take 24 kHz. Its line and frame rates are MAME's within 0.1 %: 24.77 kHz and
+  59.53 Hz.
 - **The SDRAM board's builds** (Hell Night, Battle Tryst, Heat of Eleven) keep the Z buffer there. On the bench, with the Z buffer in
   SDRAM, a few pixels of some pictures take another pixel's colour; not yet fixed.
 - **In MAME:** MAME 0.289 marks Battle Tryst and Heat of Eleven '98 as preliminary. Its Heat of Eleven runs the attract mode; its
@@ -298,6 +307,8 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
 - From power-on, in simulation (`sim/m2boot`), the machine loads the OS from the CD image and shows the same boot checks and title
   screen as MAME.
 - The Triangle Engine's writes are the same as MAME's, byte for byte, on the lists dumped from the game (`sim/te`).
+- CRT Adjust (`sim/crt`): on both rasters, On at 0 / 0 / 0 is the same picture in the same place as Off, every H-Size at every
+  H-Position keeps each line whole, after the hsync pulse and inside the line, and V-Shift moves the picture by whole lines.
 - The CPUs against MAME's instruction traces (`sim/ppcreplay`) and against a reference model with random programs and interrupts
   (`sim/ppccore`), the caches' coherence (`sim/coh`).
 - The YMZ280B against a port of MAME's device on Evil Night's sample ROM, sample for sample, on random voices and on the game's own
@@ -309,7 +320,9 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
   byte `tools/m2disc.py`'s.
 - On a real MiSTer, HDMI and a Sony CRT: Polystars' attract mode for 60 minutes; the whole game played through, with the repaired
   disc image without a gap in the music. Evil Night and Total Vice played, with their music and sound effects. Hell Night, Battle
-  Tryst and Heat of Eleven '98 played on their own cores, with the SDRAM board.
+  Tryst and Heat of Eleven '98 played on their own cores, with the SDRAM board. Before release 20261119: all of
+  tallendorf's changes in it together, on his last test build; the gun games' Input settings; Battle Tryst's movies with `m2mpegd`
+  and its auto-start scripts; and, on this release's own cores, CRT Adjust on a CRT.
 - By tallendorf, on a MiSTerPi, a MultiSystem 2 and a DE10-Nano with the SDRAM board: Hell Night and Heat of Eleven '98 played, a
   Battle Tryst match played; Hell Night's attract for 10 h without a freeze, and Battle Tryst's for 17.2 h and 16.6 h on a debug build
   that forces CPU 2's decrementer every half second, with the OSD's gate (*CPU 2 DEC interrupt* Off).
@@ -343,7 +356,7 @@ default build, Hell Night's, Battle Tryst's or Heat of Eleven's (the qsf's lines
 the RBF in `releases/` as `KonamiM2_<date>.rbf`, `KonamiM2HellNight_<date>.rbf`, `KonamiM2Tryst_<date>.rbf` or
 `KonamiM2Heat_<date>.rbf` (the names the MRAs ask for),
 with its fitter and timing summaries, if it meets timing on every clock. `tools/package.py` puts the games' builds of the
-release's date in its zip, with their MRAs.
+release's date in its zip, with their MRAs and the movies' decoder (`hps/m2mpegd/build/`).
 
 ## Capturing from MAME
 
@@ -367,8 +380,10 @@ or from a given frame, for `sim/ppcreplay`; how to run it is at the top of the s
 * The owner's Slap Shot core: the light guns (`rtl/m2_guns.sv`, after the owner's Seta 2 core and ppriest's `gx_guns.sv`).
 * tallendorf: the single-precision float units and the FP-unavailable exception, triangle engine and DSP fixes and speed-ups,
   Hell Night's, Battle Tryst's and Heat of Eleven's builds (the Z buffer in the SDRAM, based on the owner's Gaelco 3D core; the
-  arcade monitor's raster; the CD streaming; the MPEG unit's control and its decoder on the ARM; compressed texture loads), the fix for CPU 2's decrementer
-  freeze, the CPU cache size option, `tools/build.py`, `tools/cdimage.py`'s older CHDs.
+  arcade monitor's raster; the CD streaming; the MPEG unit's control and its decoder on the ARM with its kernel module; compressed
+  texture loads), the CPUs as a 602 (its 3-clock float pipeline, its traps), the triangle engine's blender as measured on a real M2,
+  Pause and Step, Sinden guns, the M48T58's clock and RAM, the fix for CPU 2's decrementer freeze, the CPU cache size option,
+  `tools/build.py`, `tools/cdimage.py`'s older CHDs.
 * The owner's Gaelco 3D core: the platform layer, the base of the Z buffer in the SDRAM (`rtl/m2_zmem.sv`), the way each block is
   checked, the benches and the release packaging.
 * **rmonic79 (Umberto Parisi)**, with Andrea Bogazzi (asturur): CRT Adjust (GPL-3.0-or-later).

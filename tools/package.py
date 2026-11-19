@@ -7,6 +7,14 @@
                                         Heat of Eleven's, Battle Tryst's and Hell Night's own builds, if releases/ has them for
                                         the date (tools/build.py heat, tryst, hellngt); their MRAs only with them
 
+With Battle Tryst's build, also its movies' decoder on the ARM (hps/m2mpegd/README.md), if hps/m2mpegd/build/ has it
+(hps/m2mpegd/build_arm.sh):
+
+  m2mpegd/m2mpegd                       the decoder             (hps/m2mpegd/build/m2mpegd)
+  m2mpegd/m2mpegd_service.sh            starts and stops it     (hps/m2mpegd/scripts/)
+  m2mpegd/m2_mem_wc-<kernel>.ko         the kernel module, one per MiSTer kernel, those in hps/m2mpegd/build/ (kernel/m2_mem_wc/)
+  Scripts/m2mpegd_autostart_on.sh, Scripts/m2mpegd_autostart_off.sh   (hps/m2mpegd/scripts/)
+
   python3 tools/package.py [YYYYMMDD[a-z]]
 
 Writes dist/KonamiM2_MiSTer_<date>.zip (dist/ holds only the release notes in the repository); with no date, the newest
@@ -34,19 +42,42 @@ def main(argv):
     own = [r for r in (os.path.join(REPO, 'releases', '%s_%s.rbf' % (b, date)) for b in ('KonamiM2Heat', 'KonamiM2Tryst', 'KonamiM2HellNight'))
            if os.path.exists(r)]
     names = ['KonamiM2'] + [re.search(r'(KonamiM2\w+)_', os.path.basename(r)).group(1) for r in own]
+    files = []
+    for mra in sorted(glob.glob(os.path.join(REPO, 'mra', '*.mra'))):
+        with open(mra, encoding='utf-8') as f:
+            if re.search(r'<rbf>(\w+)</rbf>', f.read()).group(1) in names:
+                files.append((mra, '_Arcade/' + os.path.basename(mra)))
+    files += [(r, '_Arcade/cores/' + os.path.basename(r)) for r in [rbf] + own]
+    if 'KonamiM2Tryst' in names:
+        files += mpeg()
     out = os.path.join(REPO, 'dist', 'KonamiM2_MiSTer_%s.zip' % date)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        for mra in sorted(glob.glob(os.path.join(REPO, 'mra', '*.mra'))):
-            with open(mra, encoding='utf-8') as f:
-                if re.search(r'<rbf>(\w+)</rbf>', f.read()).group(1) not in names:
-                    continue
-            z.write(mra, '_Arcade/' + os.path.basename(mra))
-        for r in [rbf] + own:
-            z.write(r, '_Arcade/cores/' + os.path.basename(r))
+        for src, name in files:
+            info = zipfile.ZipInfo.from_file(src, name)
+            info.external_attr = (0o100755 if name == 'm2mpegd/m2mpegd' or name.endswith('.sh') else 0o100644) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(src, 'rb') as f:
+                data = f.read()
+            if name.endswith('.sh'):
+                data = data.replace(b'\r\n', b'\n')   # (the ARM's shell: a checkout's CRLF would break the scripts)
+            z.writestr(info, data)
     print(out)
     for n in zipfile.ZipFile(out).namelist():
         print(' ', n)
+
+
+def mpeg():
+    """Battle Tryst's movies' decoder, its scripts and the kernel modules built so far"""
+    h = os.path.join(REPO, 'hps', 'm2mpegd')
+    d = os.path.join(h, 'build', 'm2mpegd')
+    if not os.path.exists(d):
+        print('no hps/m2mpegd/build/m2mpegd (hps/m2mpegd/build_arm.sh): the zip goes without it')
+        return []
+    files = [(d, 'm2mpegd/m2mpegd'), (os.path.join(h, 'scripts', 'm2mpegd_service.sh'), 'm2mpegd/m2mpegd_service.sh')]
+    files += [(k, 'm2mpegd/' + os.path.basename(k)) for k in sorted(glob.glob(os.path.join(h, 'build', 'm2_mem_wc-*.ko')))]
+    files += [(os.path.join(h, 'scripts', s), 'Scripts/' + s) for s in ('m2mpegd_autostart_on.sh', 'm2mpegd_autostart_off.sh')]
+    return files
 
 
 if __name__ == '__main__':
