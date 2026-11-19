@@ -160,20 +160,29 @@ From the release, `m2mpegd_<date>.zip` holds two folders; copy both to the root 
 | `m2mpegd/m2mpegd` | the decoder |
 | `m2mpegd/m2mpegd_service.sh` | starts and stops it |
 | `m2mpegd/m2_mem_wc-<kernel>.ko` | an optional kernel module for a faster picture copy, one per MiSTer kernel |
-| `Scripts/Battle_Tryst_MPEG.sh` | starts Battle Tryst with its movies |
-| `Scripts/m2mpegd_autostart.sh` | turns starting the decoder at boot on or off |
+| `Scripts/m2mpegd_autostart_on.sh` | turns starting the decoder at boot on |
+| `Scripts/m2mpegd_autostart_off.sh` | turns it off |
 
 The Battle Tryst MRA and RBF go where they always do (Install, above).
 
-### Playing
+### Turning it on
 
-- **From Scripts:** run `Battle_Tryst_MPEG`. It starts the decoder and loads Battle Tryst (the most recently copied
-  `Battle Tryst*.mra` in `_Arcade`; to always load one MRA, put its path in the script's `MRA=` line). The decoder quits by
-  itself when another core is loaded, so nothing is left running.
-- **Or at every boot:** run `m2mpegd_autostart` once. It adds a line to `/media/fat/linux/user-startup.sh` (a backup of the file
-  is kept as `user-startup.sh.bak_m2mpegd`), and then Battle Tryst's movies play however the game is loaded, from the Arcade
-  menu too. While another core runs, the decoder only looks once a second at which core is loaded. Run it again to turn it
-  off.
+Run `m2mpegd_autostart_on` from Scripts once. It adds a line to `/media/fat/linux/user-startup.sh` (a backup of the file is
+kept as `user-startup.sh.bak_m2mpegd`) and starts the decoder; from then on it starts at every boot. Battle Tryst then plays
+its movies however it's loaded, from any MRA in any folder: the decoder goes by the core's name (`btltryst`, the MRA's set
+name), not by a file's path. `m2mpegd_autostart_off` removes the line and stops the decoder. Running either one again
+changes nothing.
+
+Each script goes back to the menu by itself a few seconds after it's done (the menu reloads, as when you leave a core); a
+button press goes back sooner. With only a CRT connected and no scaler on it, MiSTer shows a notice about `MiSTer.ini`
+instead of a script's text while any script runs. That's normal: wait for the menu to come back.
+
+- **What it costs while another core runs:** nothing you'd notice. The decoder sleeps, at normal priority, wakes once a
+  second to read which core is loaded (a file in RAM), and touches no other memory. The FPGA cores don't run on the ARM.
+- **While Battle Tryst runs:** it decodes each picture on both ARM cores, at raised priority, and goes back to sleep when
+  another core is loaded.
+- **It never writes into another core's memory:** it starts only when the loaded core is Battle Tryst's and that core's MPEG
+  block in DDR3 is there and moving.
 
 The decoder's messages go to `/tmp/m2mpegd.log` (in RAM, nothing is written to the SD card).
 

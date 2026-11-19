@@ -1,9 +1,8 @@
 #!/bin/sh
 # m2mpegd_service.sh start|stop|status: the MPEG daemon as a background service (on the MiSTer, in /media/fat/m2mpegd).
-# - start: from the auto-start line in /media/fat/linux/user-startup.sh (m2mpegd_autostart.sh adds it), so the daemon waits
-#   for Battle Tryst from boot on. It does nothing while another core runs: it reads /tmp/CORENAME once a second.
-# - start once: the launcher's mode (Battle_Tryst_MPEG.sh): the daemon leaves by itself when Tryst goes, or if Tryst isn't
-#   loaded within 60 seconds.
+# - start: from the auto-start line in /media/fat/linux/user-startup.sh (m2mpegd_autostart_on.sh adds it), so the daemon waits
+#   for Battle Tryst from boot on, however the game is loaded. While another core runs it sleeps, at normal priority, and
+#   reads /tmp/CORENAME once a second.
 # - stop: the daemon leaves cleanly (SIGTERM: the core stops waiting for it at once).
 # One copy at a time; its messages in /tmp/m2mpegd.log (RAM, not the SD card).
 D=/media/fat/m2mpegd
@@ -22,7 +21,6 @@ case "$1" in
       echo "m2mpegd: already running"
       exit 0
     fi
-    if [ "$2" = once ]; then MODE="--until-gone 60"; else MODE=""; fi
     [ -x "$D/m2mpegd" ] || { echo "m2mpegd: $D/m2mpegd not found"; exit 1; }
     # The write-combined module (kernel/m2_mem_wc: a picture's copy 0.3 ms instead of 3.7), one build per kernel named
     # m2_mem_wc-<uname -r>.ko (insmod refuses another kernel's anyway); without it the daemon writes game RAM through /dev/mem
@@ -34,7 +32,7 @@ case "$1" in
         echo "m2mpegd: no m2_mem_wc for kernel $(uname -r), game RAM through /dev/mem"
       fi
     fi
-    setsid nohup "$D/m2mpegd" --base $BASE --pace $PACE --log $LOG $MODE > /dev/null 2>&1 < /dev/null &
+    setsid nohup "$D/m2mpegd" --base $BASE --pace $PACE --log $LOG > /dev/null 2>&1 < /dev/null &
     sleep 1
     running && echo "m2mpegd: started" || { echo "m2mpegd: didn't start (see $LOG)"; exit 1; }
     ;;
@@ -51,7 +49,7 @@ case "$1" in
     running && echo "m2mpegd: running (pid $(pidof m2mpegd))" || echo "m2mpegd: not running"
     ;;
   *)
-    echo "usage: $0 start [once] | stop | status"
+    echo "usage: $0 start | stop | status"
     exit 2
     ;;
 esac

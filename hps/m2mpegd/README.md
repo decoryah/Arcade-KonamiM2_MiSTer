@@ -13,9 +13,8 @@ normally and its movies are black. How to install and play is in the core's [REA
 | `src/m2mpeg_unit.*` | the unit's picture path: registers in, slice bytes in, the output formatter's bytes out, as MAME's M2 driver |
 | `src/3dom2_mpeg.*` | the MPEG-1 video picture decoder (ISO 11172-2), as in MAME's M2 driver; `emu.h`, the one thing it takes from MAME's |
 | `src/m2mpeg_protocol.h` | the block's layout and access (PROTOCOL.md) |
-| `scripts/m2mpegd_service.sh` | starts and stops the daemon (`start`, `start once`, `stop`, `status`) |
-| `scripts/Battle_Tryst_MPEG.sh` | for `Scripts/`: starts the daemon for one session and loads Battle Tryst |
-| `scripts/m2mpegd_autostart.sh` | for `Scripts/`: turns starting the daemon at boot on or off (a line in `/media/fat/linux/user-startup.sh`) |
+| `scripts/m2mpegd_service.sh` | starts and stops the daemon (`start`, `stop`, `status`) |
+| `scripts/m2mpegd_autostart_on.sh`, `_off.sh` | for `Scripts/`: turn starting the daemon at boot on and off (a line in `/media/fat/linux/user-startup.sh`); each goes back to the menu by itself (`load_core menu.rbf` into `/dev/MiSTer_cmd`, only from the menu) |
 | `kernel/m2_mem_wc/` | an optional kernel module: game RAM mapped write-combined, so a picture's copy takes about 0.3-0.5 ms instead of 3.7. It has a second window, a 1 MB test block at DDR3 0x3C000000 that neither the core nor the framework uses, for measuring a mapping's speed; the daemon doesn't use it |
 | `build_arm.sh` | builds `build/m2mpegd` |
 | `PROTOCOL.md` | the DDR3 block between the core and the daemon (version 1) |
@@ -52,11 +51,10 @@ another compiler (e.g. Ubuntu's gcc 13) gets a config with other settings, an AB
 | `m2mpegd/m2mpegd` | `build/m2mpegd` |
 | `m2mpegd/m2mpegd_service.sh` | `scripts/` |
 | `m2mpegd/m2_mem_wc-<kernel>.ko` | `kernel/m2_mem_wc/` (optional, one per MiSTer kernel) |
-| `Scripts/Battle_Tryst_MPEG.sh` | `scripts/` |
-| `Scripts/m2mpegd_autostart.sh` | `scripts/` |
+| `Scripts/m2mpegd_autostart_on.sh`, `Scripts/m2mpegd_autostart_off.sh` | `scripts/` |
 
-`m2mpegd_service.sh start` runs `m2mpegd --base 30400000 --pace 22 --log /tmp/m2mpegd.log` in the background (`start once`
-adds `--until-gone 60`, the launcher's mode). The daemon's options:
+`m2mpegd_service.sh start` runs `m2mpegd --base 30400000 --pace 22 --log /tmp/m2mpegd.log` in the background; the auto-start
+line in `/media/fat/linux/user-startup.sh` (`m2mpegd_autostart_on.sh` adds it, `m2mpegd_autostart_off.sh` removes it) runs it at boot. The daemon's options:
 
 | Option | |
 |---|---|
@@ -65,13 +63,13 @@ adds `--until-gone 60`, the launcher's mode). The daemon's options:
 | `--log FILE` | its messages (default `/tmp/m2mpegd.log`: RAM, nothing is written to the SD card) |
 | `--threads 1\|2` | a picture's work on one or both ARM cores (default 2) |
 | `--pace MS` | each picture copied into game RAM MS after its data has come (default 0, as soon as it's ready). The game redraws the movie from game RAM every frame, so a copy at a fixed point in the frame stays clear of that read: the service gives 22, without which the movie tears |
-| `--until-gone SEC` | exit once a served core has been loaded and has gone, or if none is loaded within SEC seconds |
 | `--wc auto\|on\|off` | game RAM through `/dev/m2_mem_wc` when the module is loaded (auto), only through it (on), or through `/dev/mem` (off) |
 | `--check` | print what it would do and exit (maps nothing) |
 
-It raises its own priority (nice -20, so it runs as root) and leaves cleanly on SIGTERM / SIGINT. While no served core runs it
-only reads `/tmp/CORENAME` once a second. Don't run it against a core without the MPEG block: it writes the block's words and
-game RAM.
+While no served core runs it sleeps, at normal priority, and reads `/tmp/CORENAME` once a second (one wake-up a second). While
+it serves a core it raises its priority (nice -20, so it runs as root), and lowers it again when the core goes. It leaves
+cleanly on SIGTERM / SIGINT, at once also while it sleeps. Don't run it against a core without the MPEG block: it writes the
+block's words and game RAM.
 
 ## Tests
 

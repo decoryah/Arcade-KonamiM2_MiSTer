@@ -120,7 +120,7 @@ FPGA would only detect a lost race, not prevent it.
    after the time-out is still written (in order; a later picture can't be written before it), and counted as late.
 5. **Leave** when the beat stops for 200 ms, the header's magic goes, or `/tmp/CORENAME` changes: clear present's magic,
    unmap, forget the pictures. On SIGTERM / SIGINT the same.
-6. Runs at raised priority (`nice -n -20`). Logs to `/tmp`.
+6. Runs at raised priority (`nice -n -20`) while attached; at normal priority while it waits. Logs to `/tmp`.
 7. **A core reset** is seen two ways while idle: the beat goes down, or present's magic no longer reads "MPGD" (the FPGA's
    reset clear is the only thing that clears it). Either: start again at entry 0, forget the pictures and the register
    copy, write present again. After a reset seen through present, wait 1 ms (the FPGA writes the beat after the line) and
