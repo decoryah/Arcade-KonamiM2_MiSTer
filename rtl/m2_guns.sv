@@ -5,11 +5,12 @@
 //   the left stick   absolutely: -128..127 across the picture, which is what Sinden and GUN4IR guns present (MiSTer calibrates them, F10,
 //                    to -127..127 edge to edge, saturating there when aimed off the picture)
 //   the d-pad        two units a frame while held
-//   the mouse        relatively, for the player the OSD gives the mouse's aim
-// Each player's stick has a mode (OSD): Auto (absolute past a dead zone of 8; an axis pushed to 96 or more moves as the d-pad does: arcade sticks on gamepad
-// encoders), Aim (absolute, every position, no dead zone: a light gun's) or D-pad (any deflection moves as the d-pad).
-// The mouse (OSD): its left button is a player's trigger, its right the reload, in every mode; "aim+trigger" also aims that player's gun by its movement, "trigger" leaves
-// the aim to the gun's stick: a Sinden gun presents its aim as the stick and its trigger as the mouse's button.
+//   the mouse        relatively, for the player whose OSD Input is Mouse (ms_aim)
+// Each player's stick has a mode, from that player's OSD Input (KonamiM2.sv): Auto (absolute past a dead zone of 8; an axis pushed to 96 or more moves as the
+// d-pad does: arcade sticks on gamepad encoders; a Controller's, or with the OSD's Controller stick at Move, D-pad: any deflection moves as the d-pad) or Aim
+// (absolute, every position, no dead zone: a light gun's, Sinden or another).
+// The mouse's left button is a player's trigger, its right the reload (ms_btn: the first player on Mouse, Sinden or Light gun; MiSTer gives a light gun's trigger
+// as the mouse's button, and joins every mouse's and gun's buttons into one).
 //
 // The ports: X 0..639, Y 0..239, as MAME's; on the arcade monitor (arc: Hell Night) X 0..511, Y 0..383, as MAME's hellngt. A gun within the OSD's off-screen edge (2-10
 // pixels) of the left or right edge is off the screen, X and Y reading 0. To reload, P1's and P3's guns are aimed up (a mercury switch, in MAME the top edge of the
@@ -23,7 +24,8 @@ module m2_guns (
 	input  logic [15:0] ana [0:2],          // joystick_l_analog_0..2: { Y, X }, signed
 	input  logic [24:0] mouse,              // hps_io's ps2_mouse: bit 24 toggles a packet, Y positive up
 	input  logic [1:0]  mode [0:2],         // each player's stick: 0 Auto, 1 Aim, 2 D-pad
-	input  logic [2:0]  ms_who,             // the mouse: 0 P1's trigger, 1 P1's aim and trigger, 2 / 3 P2's, 4 / 5 P3's, 6 / 7 off
+	input  logic [2:0]  ms_aim,             // the player the mouse's movement aims (one bit or none)
+	input  logic [2:0]  ms_btn,             // the player whose trigger and reload the mouse's buttons are (one bit or none)
 	input  logic [1:0]  edge_sel,           // the off-screen edge: 0 4 pixels, 1 2, 2 8, 3 10
 	input  logic        off_fire,           // Total Vice: Button 2 fires with the gun off the screen, for every player
 	input  logic        arc,                // the arcade monitor's raster (512 x 384: Hell Night), not the TV's (640 x 240)
@@ -32,8 +34,8 @@ module m2_guns (
 	output logic [8:0]  gun_y [0:2],
 	output logic [15:0] p5,                 // MAME's P5, the switches, as it's read
 
-	input  logic [2:0]  show,               // the crosshairs: bit 0 P1, bit 1 P2, bit 2 P3
-	input  logic [1:0]  border,             // Sinden's white border: 0, 1, 2: 16, 24, 8 pixels (below), 3 none (16 the OSD's default)
+	input  logic [2:0]  show,               // the crosshairs: bit 0 P1, bit 1 P2, bit 2 P3 (each once that player has aimed: seen)
+	input  logic [1:0]  border,             // Sinden's white border: 0, 1, 2: 16, 24, 8 pixels (below), 3 none (none unless a player's Input is Sinden)
 	input  logic [9:0]  hpos,
 	input  logic [8:0]  vpos,
 	input  logic [23:0] rgb_in,
@@ -50,8 +52,6 @@ module m2_guns (
 	end
 	wire       ms_ev = ms[24] ^ ms_t;
 	wire       frame = vblank && !vbl_l;
-	wire [2:0] ms_sel = {ms_who[2:1] == 2'd2, ms_who[2:1] == 2'd1, ms_who[2:1] == 2'd0};   // the mouse's buttons
-	wire [2:0] ms_aim = ms_sel & {3{ms_who[0]}};                                           // ... and its movement
 
 	localparam logic [7:0] DEAD = 8'd8;     // below this the axis is at rest
 	localparam logic [7:0] FULL = 8'd96;    // at or above it, Auto moves as the d-pad
@@ -67,6 +67,7 @@ module m2_guns (
 
 	logic [7:0] vx [0:2];
 	logic [7:0] vy [0:2];
+	logic [2:0] seen;                       // a player has aimed or fired since the reset: only then is the crosshair drawn, so an idle player's isn't
 	always_ff @(posedge clk)
 		for (int g = 0; g < 3; g++)
 		begin
@@ -78,6 +79,8 @@ module m2_guns (
 			sx = mode[g] == 2'd2 ? lx : mode[g] == 2'd1 ? 1'b0 : mag(ax) >= FULL;
 			sy = mode[g] == 2'd2 ? ly : mode[g] == 2'd1 ? 1'b0 : mag(ay) >= FULL;
 			dir = {j[g][3] | (ay[7] & sy), j[g][2] | (!ay[7] & sy), j[g][1] | (ax[7] & sx), j[g][0] | (!ax[7] & sx)};
+			if (rst) seen[g] <= 1'b0;
+			else if (dir != 4'd0 || lx || ly || j[g][4] || (ms_ev && (ms_aim[g] || (ms_btn[g] && ms[0])))) seen[g] <= 1'b1;
 			if (rst) begin vx[g] <= 8'h80; vy[g] <= 8'h80; end
 			else if (ms_ev && ms_aim[g])
 			begin
@@ -110,8 +113,8 @@ module m2_guns (
 			// (255 x 642 / 256 = 639, 255 x 514 / 256 = 511; 255 x 240 / 256 = 239, 255 x 385 / 256 = 383)
 			xm[g] <= {10'd0, vx[g]} * (arc ? 18'd514 : 18'd642);
 			ym[g] <= {9'd0, vy[g]} * (arc ? 17'd385 : 17'd240);
-			trig[g] <= j[g][4] | (ms_sel[g] & ms[0]) | (off_fire & reload[g]);
-			reload[g] <= j[g][5] | (ms_sel[g] & ms[1]);
+			trig[g] <= j[g][4] | (ms_btn[g] & ms[0]) | (off_fire & reload[g]);
+			reload[g] <= j[g][5] | (ms_btn[g] & ms[1]);
 			off = xr[g] < 10'(ex) || xr[g] > x_max - 10'(ex) || (reload[g] && (g != 1 || off_fire));
 			gun_x[g] <= off ? 10'd0 : xr[g];
 			gun_y[g] <= off ? 9'd0 : yr[g];
@@ -153,9 +156,9 @@ module m2_guns (
 	logic c0, c1, c2;
 	always_ff @(posedge clk)
 	begin
-		c0 <= show[0] && on_cross(hpos, vpos, xr[0], yr[0], arc);
-		c1 <= show[1] && on_cross(hpos, vpos, xr[1], yr[1], arc);
-		c2 <= show[2] && on_cross(hpos, vpos, xr[2], yr[2], arc);
+		c0 <= show[0] && seen[0] && on_cross(hpos, vpos, xr[0], yr[0], arc);
+		c1 <= show[1] && seen[1] && on_cross(hpos, vpos, xr[1], yr[1], arc);
+		c2 <= show[2] && seen[2] && on_cross(hpos, vpos, xr[2], yr[2], arc);
 		bd <= border != 2'd3 && hpos <= x_max && vpos <= y_max &&
 		      (hpos < 10'(bw) || hpos > x_max - 10'(bw) || vpos < 9'(bt) || vpos > y_max - 9'(bb));
 		bk <= border != 2'd3 && hpos <= x_max && vpos <= y_max &&

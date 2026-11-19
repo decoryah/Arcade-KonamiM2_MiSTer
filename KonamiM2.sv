@@ -90,13 +90,14 @@ localparam CONF_STR = {
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[34:32],Scale,Normal,V-Integer,HV-Integer,Narrower HV-Integer,HV-Integer+;",
 	"-;",
-	"H1O[36:35],P1 Stick,Auto,Aim,D-pad;",
-	"H1O[38:37],P2 Stick,Auto,Aim,D-pad;",
-	"H2O[40:39],P3 Stick,Auto,Aim,D-pad;",
-	"H1O[50:48],Mouse,P1 trigger,P1 aim+trigger,P2 trigger,P2 aim+trigger,P3 trigger,P3 aim+trigger,Off;",  // ("trigger": the buttons only, a Sinden's)
-	"H1O[45:43],Crosshair,Off,Player 1,Player 2,Player 3,P1+P2,All;",
-	"H1O[47:46],Sinden border,16 px,24 px,8 px,Off;",  // (a white border round the picture for a Sinden gun's camera: rtl/m2_guns.sv)
-	"H1O[52:51],Off-screen edge,4 px,2 px,8 px,10 px;",  // (a gun this near the left, right or top edge is off the screen: reloads)
+	// (the gun games: each player's Input, and below it only the settings an Input in use has; the bits before 51 were the older gun settings, left unused)
+	"H1O[54:53],P1 Input,Controller,Mouse,Sinden,Light gun;",
+	"H1O[56:55],P2 Input,Controller,Mouse,Sinden,Light gun;",
+	"H2O[58:57],P3 Input,Controller,Mouse,Sinden,Light gun;",
+	"H3O[59],Controller stick,Position,Move;",  // (Position: the aim where the stick points, a full push moving it on; Move: moved while pushed, as the d-pad)
+	"H4O[60],Crosshair,On,Off;",  // (a Controller's or the Mouse's, once that player aims)
+	"H5O[62:61],Sinden border,16 px,24 px,8 px;",  // (a white border round the picture for a Sinden gun's camera: rtl/m2_guns.sv)
+	"H6O[52:51],Off-screen edge,4 px,2 px,8 px,10 px;",  // (a gun this near the left, right or top edge is off the screen: reloads)
 	"H1-;",
 	"O[3],Service mode,Off,On;",
 	"O[8],Pause when OSD is open,Off,On;",  // (and P1's Pause button; while paused, Step runs a frame: below)
@@ -173,7 +174,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({13'd0, ~gun_game | board[2], ~gun_game, direct_video}),
+	.status_menumask({9'd0, ~gun_game | ~|in_gun, ~gun_game | ~|in_sin, ~gun_game | ~|(in_ctl | in_ms), ~gun_game | ~|in_ctl, ~gun_game | board[2], ~gun_game, direct_video}),
 	.forced_scandoubler(forced_scandoubler),
 	.direct_video(direct_video),
 	.gamma_bus(gamma_bus),
@@ -218,6 +219,17 @@ wire        gun_game = 1'b0;   // (no guns in this build: the inputs as a stick'
 `else
 wire        gun_game = board[1];
 `endif
+// each gun player's Input (OSD): 0 Controller, 1 Mouse, 2 Sinden, 3 another light gun (GUN4IR and the like); Total Vice has no Player 3
+wire  [1:0] gun_in [0:2] = '{status[54:53], status[56:55], status[58:57]};
+wire  [2:0] gun_here = {~board[2], 2'b11};
+wire  [2:0] in_ctl = gun_here & {gun_in[2] == 2'd0, gun_in[1] == 2'd0, gun_in[0] == 2'd0};
+wire  [2:0] in_ms  = gun_here & {gun_in[2] == 2'd1, gun_in[1] == 2'd1, gun_in[0] == 2'd1};
+wire  [2:0] in_sin = gun_here & {gun_in[2] == 2'd2, gun_in[1] == 2'd2, gun_in[0] == 2'd2};
+wire  [2:0] in_gun = gun_here & {gun_in[2][1], gun_in[1][1], gun_in[0][1]};   // Sinden or another light gun
+// the mouse's movement aims the first player on Mouse; its buttons (a light gun's trigger and reload, as MiSTer gives them) are the first player's on Mouse, Sinden or Light gun
+wire  [2:0] ms_any = in_ms | in_gun;
+wire  [2:0] ms_aim = in_ms[0] ? 3'b001 : in_ms[1] ? 3'b010 : in_ms[2] ? 3'b100 : 3'b000;
+wire  [2:0] ms_btn = ms_any[0] ? 3'b001 : ms_any[1] ? 3'b010 : ms_any[2] ? 3'b100 : 3'b000;
 always @(posedge clk_sys) if (ioctl_wr && ioctl_download && ioctl_index == 16'd3 && ioctl_addr == 27'h2000) board <= ioctl_dout;
 
 // the DIP switches (the MRA's <switches>, ioctl index 254): byte 0 is IO1 2, MAME's P2: bit 0 the sound, 1 mono, bit 1 the screen, 0 flipped;
@@ -342,18 +354,20 @@ wire [23:0] rgb;
 // Evil Night's guns (rtl/m2_guns.sv); Button 1 the trigger, Button 2 the reload
 wire [31:0] gun_joy [0:2] = '{joystick_0, joystick_1, joystick_2};
 wire [15:0] gun_ana [0:2] = '{joystick_l_analog_0, joystick_l_analog_1, joystick_l_analog_2};
-wire  [1:0] gun_mode [0:2] = '{status[36:35], status[38:37], status[40:39]};
-wire  [2:0] gun_show = !gun_game ? 3'b000 : status[45:43] == 3'd1 ? 3'b001 : status[45:43] == 3'd2 ? 3'b010 : status[45:43] == 3'd3 ? 3'b100 :
-                       status[45:43] == 3'd4 ? 3'b011 : status[45:43] == 3'd5 ? 3'b111 : 3'b000;
+// each stick's mode (rtl/m2_guns.sv): a light gun's Aim (1); a Controller's Auto (0), or D-pad (2) with the OSD's Controller stick at Move; the Mouse's Auto
+wire  [1:0] gun_mode [0:2] = '{gun_in[0][1] ? 2'd1 : gun_in[0] == 2'd0 && status[59] ? 2'd2 : 2'd0,
+                               gun_in[1][1] ? 2'd1 : gun_in[1] == 2'd0 && status[59] ? 2'd2 : 2'd0,
+                               gun_in[2][1] ? 2'd1 : gun_in[2] == 2'd0 && status[59] ? 2'd2 : 2'd0};
+wire  [2:0] gun_show = gun_game && !status[60] ? in_ctl | in_ms : 3'b000;   // (a light gun has no crosshair)
 wire  [9:0] gun_x_o [0:2];
 wire  [8:0] gun_y_o [0:2];
 `ifndef NO_GUN_BOARD
 m2_guns u_guns
 (
 	.clk(clk_sys), .rst(core_rst | ~gun_game), .vblank(vblank),
-	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_who(status[50:48]), .edge_sel(status[52:51]), .off_fire(board[2]), .arc(board[4]),
+	.joy(gun_joy), .ana(gun_ana), .mouse(ps2_mouse), .mode(gun_mode), .ms_aim(ms_aim), .ms_btn(ms_btn), .edge_sel(status[52:51]), .off_fire(board[2]), .arc(board[4]),
 	.gun_x(gun_x_o), .gun_y(gun_y_o), .p5(gun_p5),
-	.show(gun_show), .border(gun_game ? status[47:46] : 2'd3),  // (3: no border; only the gun games have one)
+	.show(gun_show), .border(gun_game && |in_sin ? status[62:61] : 2'd3),  // (3: no border; only when a player's Input is Sinden)
 	.hpos(hpos), .vpos(vpos), .rgb_in(rgb_game), .rgb_out(rgb)
 );
 `else

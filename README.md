@@ -207,20 +207,25 @@ X kicks, Start, Select for a coin.
 Coin, for two players. The default pad layout: A, B and X are the three buttons in that order, Start, Select for a coin.
 
 **Evil Night, Hell Night and Total Vice:** a light gun for each player (three in Evil Night and Hell Night, two in Total Vice), with
-Trigger, Reload, Start and Coin. The default pad layout: B is the trigger, A reloads, Start, Select for a coin. Each player aims with
-any of these:
+Trigger, Reload, Start and Coin. The default pad layout: B is the trigger, A reloads, Start, Select for a coin. Each player's
+**Input** in the OSD is what that player aims with, and the OSD shows only the settings of the Inputs in use:
 
-- **a light gun** that MiSTer sees as a pad's left analog stick (Sinden, GUN4IR): the gun points across the picture. Set that
-  player's Stick to Aim. MiSTer gives a light gun's trigger and reload as the mouse's buttons, so the OSD's Mouse gives them to that
-  player ("P1 trigger", the default, for Player 1);
-- **the d-pad**, which moves the aim while held;
-- **the mouse**, for the player the OSD gives it: its left button is the trigger, the right reloads, and with "aim+trigger" its
-  movement aims too.
+- **Controller** (the default): the pad's left stick and d-pad, with a crosshair. Controller stick: Position (the aim goes where
+  the stick points and back to the middle when it's let go; a full push keeps it moving, out to the edges) or Move (the stick
+  moves the aim while it's pushed, as the d-pad does).
+- **Mouse**: its movement aims, its left button is the trigger and its right reloads, with a crosshair.
+- **Sinden**: a Sinden gun, with the white border it needs round the picture (Sinden border, below) and no crosshair.
+- **Light gun**: any other gun that MiSTer sees as a pad's left analog stick (GUN4IR and the like), with no border and no crosshair.
 
-**A Sinden gun** finds the screen by a white border round the picture, which the core draws in the gun games (OSD: Sinden border,
-16 px by default). The sides and the bottom are that wide, the top stays thin so the scores there stay readable, and a black band
-inside the white keeps the game's own bright pixels from touching it. 16 px or more holds the aim steady on Total Vice's dark
-screens; at 8 px the gun can take a bright edge in the room for the picture's side. Set it Off for any other gun.
+Crosshair (On, Off) is for the players on Controller or Mouse; a player's crosshair shows once that player has aimed or fired,
+so an idle player's isn't in the way. Off-screen edge is for the guns: how near the left or right edge, or the top, a gun counts as
+off the screen. MiSTer gives a Sinden's trigger and reload as the mouse's buttons, and joins every mouse's and gun's buttons into
+one, so the mouse's buttons go to the first player on Mouse, Sinden or Light gun: two Sindens' triggers can't be told apart.
+
+**A Sinden gun** finds the screen by a white border round the picture, which the core draws while a player's Input is Sinden
+(Sinden border, 16 px by default). The sides and the bottom are that wide, the top stays thin so the scores there stay readable,
+and a black band inside the white keeps the game's own bright pixels from touching it. 16 px or more holds the aim steady on Total
+Vice's dark screens; at 8 px the gun can take a bright edge in the room for the picture's side.
 
 Reloading: in Evil Night and Hell Night, Players 1 and 3 aim up (their guns have a mercury switch) and Player 2 presses a button; in Total Vice,
 each player shoots off the screen. Reload (Button 2) does each of these for you.
@@ -235,11 +240,11 @@ Pause again goes on (a reset ends it too). While paused, Step runs one frame and
 | CD audio image | the disc's whole image, `<set>_full.bin` |
 | Aspect ratio | Original, Full Screen, two custom |
 | Scale | Normal, V-Integer, HV-Integer, Narrower HV-Integer, HV-Integer+ |
-| P1 Stick, P2 Stick, P3 Stick (gun games; P3 in Evil Night and Hell Night) | Auto, Aim, D-pad: Aim points the gun where the stick points, with no dead zone (a light gun); D-pad moves it while the stick is pushed; Auto is Aim past a small dead zone, but moves it as D-pad on a full push (an arcade stick on a pad encoder) |
-| Mouse (gun games) | P1 trigger, P1 aim+trigger, P2 trigger, P2 aim+trigger, P3 trigger, P3 aim+trigger, Off: whose trigger and reload the mouse's buttons are; "aim+trigger" also aims with its movement |
-| Crosshair (gun games) | Off, Player 1, Player 2, Player 3, P1+P2, All |
-| Sinden border (gun games) | 16 px, 24 px, 8 px, Off: the white border a Sinden gun needs (above) |
-| Off-screen edge (gun games) | 4 px, 2 px, 8 px, 10 px: a gun this near the left or right edge, or the top, is off the screen (to reload) |
+| P1 Input, P2 Input, P3 Input (gun games; P3 in Evil Night and Hell Night) | Controller (the default), Mouse, Sinden, Light gun: what the player aims with (above) |
+| Controller stick (shown with a player on Controller) | Position, Move |
+| Crosshair (shown with a player on Controller or Mouse) | On, Off: each such player's, once that player aims |
+| Sinden border (shown with a player on Sinden) | 16 px, 24 px, 8 px: the white border a Sinden gun needs (above) |
+| Off-screen edge (shown with a player on Sinden or Light gun) | 4 px, 2 px, 8 px, 10 px: a gun this near the left or right edge, or the top, is off the screen (to reload) |
 | Service mode | Off, On: the game's service menu |
 | Pause when OSD is open | Off, On |
 | Advanced: CPU caches (at reset) | 32 KB, 16 KB, 8 KB, 4 KB as the 602 (each side; Hell Night's build is fixed at 32 KB) |
