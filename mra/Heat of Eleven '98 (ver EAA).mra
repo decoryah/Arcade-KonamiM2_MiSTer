@@ -16,7 +16,7 @@
       a byte for the board, whose bit 0 asks for the larger RAM. The core shows the game's low resolution.
 
       heatof11_cd.zip and heatof11_full.bin aren't in a MAME set: make them from the set's 703eaa02.chd with
-      python3 tools/m2disc.py heatof11/703eaa02.chd or the browser converter (https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/), and put heatof11_cd.zip (25 MB in it) beside heatof11.zip and
+      python3 tools/m2disc.py heatof11/703eaa02.chd or the browser converter (https://decoryah.github.io/konami-m2-chd-converter/), and put heatof11_cd.zip (25 MB in it) beside heatof11.zip and
       heatof11_full.bin (315 MB, the music streams from it) in games/heatof11.
     -->
 

@@ -17,7 +17,7 @@
       As Tobe! Polystars' MRA, with RAM 2 x 8 MB, two guns and the YMZ280B's samples. Index 3: the board has no M48T58, so 8 KB of nothing, then a byte for the board: bit 0 the
       larger RAM, bit 1 the guns, bit 2 reloading by shooting off the screen.
 
-      totlvice_cd.zip and totlvice_full.bin aren't in a MAME set: tools/m2disc.py or the browser converter (https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
+      totlvice_cd.zip and totlvice_full.bin aren't in a MAME set: tools/m2disc.py or the browser converter (https://decoryah.github.io/konami-m2-chd-converter/)
       makes both from the set's totlvice/639eba01.chd (padding this CHD's data track, 2048 bytes a sector, to 2352). totlvice_cd.zip (totlvice_cd.bin, 42 MB, in it) goes beside totlvice.zip; the music streams from totlvice_full.bin in games/totlvice. Without it the
       game runs without its music.
     -->

@@ -112,7 +112,7 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
 
    The `.cue` is the image's cue sheet; the core doesn't need it. Make them in either of these ways:
 
-   - **Any of the six, in a browser:** choose the CHD in the [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
+   - **Any of the six, in a browser:** choose the CHD in the [Konami M2 CHD converter](https://decoryah.github.io/konami-m2-chd-converter/)
      (for Polystars, keep *Repair gaps in Polystars music* ticked) and download the three files it makes. The conversion runs on your
      computer, and the CHD isn't uploaded. It needs a desktop browser (Chrome or Edge) and about 2 GB of free memory.
    - **Or with this repository's `tools/m2disc.py`** (Python 3 and MAME's `chdman`, nothing else). From the folder you want the

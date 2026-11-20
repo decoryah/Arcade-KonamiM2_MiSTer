@@ -18,7 +18,7 @@
       draw in Low Res, the TV's 640 x 240). Index 4 is the YMZ280B's samples. Its build (KonamiM2HellNight) has its Z buffer, 384 KB at
       High Res, in the SDRAM board's memory.
 
-      hellngt_cd.zip and hellngt_full.bin aren't in a MAME set: tools/m2disc.py or the browser converter (https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
+      hellngt_cd.zip and hellngt_full.bin aren't in a MAME set: tools/m2disc.py or the browser converter (https://decoryah.github.io/konami-m2-chd-converter/)
       makes both from the set's hellngt/810eaa02.chd.
       hellngt_cd.zip (hellngt_cd.bin, 58 MB, in it) goes in games/mame, beside the set's zips; the music streams from hellngt_full.bin
       (515 MB) in games/hellngt. Without it the game runs without its music.

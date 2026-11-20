@@ -15,7 +15,7 @@
       As Tobe! Polystars' MRA, with the 636a01 boot ROM, RAM 2 x 8 MB and an M48T58 (m48t58y.9n): index 3 is its 8 KB, then a byte for the board: bit 0 the
       larger RAM, bit 1 the guns and this game's inputs. Index 4 is the YMZ280B's samples.
 
-      evilngt_cd.zip and evilngt_full.bin aren't in a MAME set: tools/m2disc.py or the browser converter (https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/)
+      evilngt_cd.zip and evilngt_full.bin aren't in a MAME set: tools/m2disc.py or the browser converter (https://decoryah.github.io/konami-m2-chd-converter/)
       makes both from the set's evilngt/810uba02.chd. evilngt_cd.zip (evilngt_cd.bin, 58 MB, in it) goes beside evilngt.zip; the music streams from evilngt_full.bin (515 MB) in games/evilngt. Without it the game runs without its music.
     -->
 

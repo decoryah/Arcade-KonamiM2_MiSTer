@@ -68,7 +68,7 @@ player picks what they aim with, and the OSD shows only the settings that matter
    | Heat of Eleven '98 | `heatof11/703eaa02.chd` | `heatof11_cd.zip`, `heatof11_full.bin` (315 MB), `heatof11_full.cue` |
 
    - **Any of the six, in a browser:** the
-     [Konami M2 CHD converter](https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/); for Polystars, with *Repair gaps in
+     [Konami M2 CHD converter](https://decoryah.github.io/konami-m2-chd-converter/); for Polystars, with *Repair gaps in
      Polystars music* ticked. The conversion runs on your computer, and the CHD isn't uploaded.
    - **Or with the repository's `tools/m2disc.py`** (Python 3 and MAME's `chdman`, nothing else), from the folder you want the files
      in, for example `python3 tools/m2disc.py btltryst/636jac02.chd`. If `chdman` isn't on the PATH, give it after the CHD; on

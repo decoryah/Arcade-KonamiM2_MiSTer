@@ -19,7 +19,7 @@
       address= is the fast load: Main_MiSTer copies the ROM straight to its place in the DDR3; an older one streams it.
 
       polystar_cd.zip isn't in a MAME set: make it from the set's 623jaa02.chd with tools/m2disc.py (or tools/cdimage.py) or the browser converter
-      (https://konami-m2-chd-converter.fueledmyrrh2.chatgpt.site/), the file in it named polystar_cd.bin (24 MB), and put it beside polystar.zip.
+      (https://decoryah.github.io/konami-m2-chd-converter/), the file in it named polystar_cd.bin (24 MB), and put it beside polystar.zip.
     -->
 
     <!-- the sound's CD audio streams from the disc's whole raw image (2352 bytes a sector, 546 MB), not in a MAME set: tools/m2disc.py or the browser converter makes it from
