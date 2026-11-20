@@ -296,8 +296,6 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
   where on this core the other games draw in Low Res (640 x 240, the TV's): its MRA's board byte asks for that raster, and its guns'
   range is MAME's hellngt's. A CRT for it needs to take 24 kHz. Its line and frame rates are MAME's within 0.1 %: 24.77 kHz and
   59.53 Hz.
-- **The SDRAM board's builds** (Hell Night, Battle Tryst, Heat of Eleven) keep the Z buffer there. On the bench, with the Z buffer in
-  SDRAM, a few pixels of some pictures take another pixel's colour; not yet fixed.
 - **In MAME:** MAME 0.289 marks Battle Tryst and Heat of Eleven '98 as preliminary. Its Heat of Eleven runs the attract mode; its
   Battle Tryst stops at the MPEG intro, which the core gets past. Total Vice's JAD, AAB and UAC sets are marked not working, and
   aren't supported.
@@ -306,7 +304,8 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
 
 - From power-on, in simulation (`sim/m2boot`), the machine loads the OS from the CD image and shows the same boot checks and title
   screen as MAME.
-- The Triangle Engine's writes are the same as MAME's, byte for byte, on the lists dumped from the game (`sim/te`).
+- The Triangle Engine's writes are the same as MAME's, byte for byte, on the lists dumped from the game (`sim/te`). With the Z
+  buffer in SDRAM (the SDRAM board's builds), they are byte for byte the same as with it on the chip.
 - CRT Adjust (`sim/crt`): on both rasters, On at 0 / 0 / 0 is the same picture in the same place as Off, every H-Size at every
   H-Position keeps each line whole, after the hsync pulse and inside the line, and V-Shift moves the picture by whole lines.
 - The CPUs against MAME's instruction traces (`sim/ppcreplay`) and against a reference model with random programs and interrupts

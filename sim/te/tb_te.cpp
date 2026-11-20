@@ -271,6 +271,19 @@ static void clock1()
 			static FILE *fcw = getenv("TE_CW") ? fopen(getenv("TE_CW"), "w") : nullptr;
 			if (fcw && q->m2_te__DOT__cc__DOT__w_go)
 				fprintf(fcw, "%07x %08x %llu\n", unsigned(q->m2_te__DOT__cc__DOT__w_a) << 1, unsigned(q->m2_te__DOT__c_wd), (unsigned long long)clocks);
+			// the texel stage's requests (T: U, V, the second row's, pu) and each pixel's texel and iterated colour (E), in order (TE_PX=file): where
+			// two builds' pixels part
+			static FILE *fpx = getenv("TE_PX") ? fopen(getenv("TE_PX"), "w") : nullptr;
+			if (fpx && q->m2_te__DOT__pe && q->m2_te__DOT__v9_v && q->m2_te__DOT__t_look)
+				fprintf(fpx, "T %04x %04x %d %d %llu\n", unsigned(q->m2_te__DOT__tu), unsigned(q->m2_te__DOT__tv), int(q->m2_te__DOT__tk_i), int(q->m2_te__DOT__pu),
+					(unsigned long long)clocks);
+			if (fpx && getenv("TE_PXP") && q->m2_te__DOT__pu)
+				fprintf(fpx, "P %03x %03x %04x%04x %04x%04x %d%d %d %llu\n", unsigned(q->m2_te__DOT__wk), unsigned(q->m2_te__DOT__wf), unsigned(q->m2_te__DOT__t0_u),
+					unsigned(q->m2_te__DOT__t0_v), unsigned(q->m2_te__DOT__t1_u), unsigned(q->m2_te__DOT__t1_v), int(q->m2_te__DOT__t_lod), int(q->m2_te__DOT__t_min),
+					int(q->m2_te__DOT__v0_go), (unsigned long long)clocks);
+			if (fpx && q->m2_te__DOT__pe && q->m2_te__DOT__e4_v)
+				fprintf(fpx, "E %02x%02x%02x%02x %08x %llu\n", unsigned(q->m2_te__DOT__bx_r), unsigned(q->m2_te__DOT__bx_g), unsigned(q->m2_te__DOT__bl_oa >> 8) & 255,
+					unsigned(q->m2_te__DOT__bl_ob >> 8) & 255, unsigned(q->m2_te__DOT__fa_q), (unsigned long long)clocks);
 #ifdef Z_SDRAM
 			// every line put in the SDRAM's queue (TE_ZP=file), against what reaches the chip (TE_ZL)
 			static FILE *fzp = getenv("TE_ZP") ? fopen(getenv("TE_ZP"), "w") : nullptr;
@@ -306,8 +319,8 @@ static void clock1()
 			if (getenv("TE_PIPDUMP"))
 			{
 				// (the texel stages as they are now: whichever pixels they hold)
-				printf("  t0 %04x,%04x t1 %04x,%04x wk %03x wy %03x\n", unsigned(q->m2_te__DOT__t0_u), unsigned(q->m2_te__DOT__t0_v), unsigned(q->m2_te__DOT__t1_u),
-					unsigned(q->m2_te__DOT__t1_v), unsigned(q->m2_te__DOT__wk), unsigned(q->m2_te__DOT__wy));
+				printf("  t0 %04x,%04x t1 %04x,%04x wk %03x wf %03x\n", unsigned(q->m2_te__DOT__t0_u), unsigned(q->m2_te__DOT__t0_v), unsigned(q->m2_te__DOT__t1_u),
+					unsigned(q->m2_te__DOT__t1_v), unsigned(q->m2_te__DOT__wk), unsigned(q->m2_te__DOT__wf));
 				printf("  tu %04x tv %04x lod %d min %d a2_lod %d a3_lod %d a4_base %06x k_u0 %03x k_v0 %03x a2_v0 %03x a3_vo %06x\n", unsigned(q->m2_te__DOT__tu), unsigned(q->m2_te__DOT__tv),
 					int(q->m2_te__DOT__t_lod), int(q->m2_te__DOT__t_min), int(q->m2_te__DOT__a2_lod), int(q->m2_te__DOT__a3_lod), unsigned(q->m2_te__DOT__a4_base),
 					unsigned(q->m2_te__DOT__k_u0), unsigned(q->m2_te__DOT__k_v0), unsigned(q->m2_te__DOT__a2_v0), unsigned(q->m2_te__DOT__a3_vo));

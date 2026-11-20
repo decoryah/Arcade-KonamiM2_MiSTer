@@ -912,7 +912,9 @@ module m2_te (
 	// the walker's pixel
 	logic        v1_v, v2_v, v3_v, v4_v, v5_v, v6_v, v7_v, v8_v, v9_v;
 	logic [9:1]  wk;                    // these stages hold a pixel the walker stepped to, kept or not: in a row, the next pixel along the span
-	logic [9:1]  wy;                    // and its row's low bit (a stall as a span starts leaves no gap between it and the last)
+	logic [9:1]  wf;                    // and it's its span's first: a stall as a span starts leaves no gap between it and the last span's, and
+	                                    // that span may be two rows up, past a row with none (a thin triangle's), so a row's low bit can't tell
+	logic        w_first;               // (the walker's next pixel is its span's first)
 	logic [13:0] t0_u, t0_v, t1_u, t1_v;
 	wire  [14:0] t_du = {1'b0, t0_u} - {1'b0, t1_u}, t_dv = {1'b0, t0_v} - {1'b0, t1_v};
 	logic        v1_zc;
@@ -965,7 +967,7 @@ module m2_te (
 			t1_u <= t0_u; t1_v <= t0_v;
 			tu <= t1_u; tv <= t1_v;
 			// the texel step to the next pixel; a span's last pixel has none, so keeps the one before's
-			if (wk[8] && wk[7] && wy[8] == wy[7])
+			if (wk[8] && wk[7] && !wf[7])
 			begin
 				logic [14:0] au, av, tstep;    // (15 bits: the step's magnitude, -16384's too)
 				au = t_du[14] ? 15'(-t_du) : t_du;
@@ -975,7 +977,7 @@ module m2_te (
 				t_lod <= tstep[14:7] != 8'd0 ? (lodmax > 2'd2 ? 2'd3 : lodmax) : tstep[6] ? (lodmax > 2'd1 ? 2'd2 : lodmax) : tstep[5] && lodmax != 2'd0 ? 2'd1 : 2'd0;
 			end
 			wk <= {wk[8:1], v0_go};
-			wy <= {wy[8:1], y[0]};
+			wf <= {wf[8:1], v0_go && w_first};
 
 			u_c[0] <= persp_off ? 16'(uw_in >> np_sh) : u_nv[22:7];
 			v_c[0] <= persp_off ? 16'(vw_in >> np_sh) : v_nv[22:7];
@@ -2172,6 +2174,7 @@ module m2_te (
 							y <= y_n;
 							row_d <= row_dn; row_z <= row_zn; row_s <= row_sn;
 							k_prev <= 1'b0;
+							w_first <= 1'b1;
 							for (int i = 0; i < 7; i++) s_v[i] <= (omit_right && !wk_lr) ? e_v[i] - ddx[i] : e_v[i];
 							px <= (omit_right && !wk_lr) ? xs - 14'sd1 : xs;
 							pxe <= omit_right ? (wk_lr ? xe : xe - 14'sd1) : (wk_lr ? xe + 14'sd1 : xe - 14'sd1);
@@ -2184,6 +2187,7 @@ module m2_te (
 				else if (v0_go)
 				begin
 					k_prev <= fbclipdis || (k_wout && !win_in);
+					w_first <= 1'b0;
 					for (int i = 0; i < 4; i++) s_v[i] <= clamp19(wk_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
 					for (int i = 4; i < 7; i++) s_v[i] <= clamp23(wk_lr ? s_v[i] + ddx[i] : s_v[i] - ddx[i]);
 					px <= wk_lr ? px + (v0_four ? 14'sd4 : 14'sd1) : px - (v0_four ? 14'sd4 : 14'sd1);
