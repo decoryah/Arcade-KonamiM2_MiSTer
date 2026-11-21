@@ -1,0 +1,20 @@
+Fitter Status : Successful - Sat Nov 21 02:14:51 2026
+Quartus Prime Version : 17.0.2 Build 602 07/19/2017 SJ Lite Edition
+Revision Name : KonamiM2
+Top-level Entity Name : sys_top
+Family : Cyclone V
+Device : 5CSEBA6U23I7
+Timing Models : Final
+Logic utilization (in ALMs) : 36,968 / 41,910 ( 88 % )
+Total registers : 35843
+Total pins : 145 / 314 ( 46 % )
+Total virtual pins : 0
+Total block memory bits : 3,884,856 / 5,662,720 ( 69 % )
+Total RAM Blocks : 531 / 553 ( 96 % )
+Total DSP Blocks : 74 / 112 ( 66 % )
+Total HSSI RX PCSs : 0
+Total HSSI PMA RX Deserializers : 0
+Total HSSI TX PCSs : 0
+Total HSSI PMA TX Serializers : 0
+Total PLLs : 3 / 6 ( 50 % )
+Total DLLs : 0 / 4 ( 0 % )

@@ -61,10 +61,10 @@ Built with Quartus 17.0, each core's timing met on every clock (the slack on the
 
 | Core | ALMs (of 41,910) | Machine, 66.67 MHz | SDRAM, 133.33 MHz | HDMI |
 |---|---|---|---|---|
-| `KonamiM2` | 36,992 (88 %) | +1.616 ns | | +0.367 ns |
-| `KonamiM2HellNight` | 38,179 (91 %) | +0.737 ns | +0.262 ns | +0.335 ns |
-| `KonamiM2Tryst` | 39,850 (95 %) | +0.674 ns | +0.407 ns | +0.560 ns |
-| `KonamiM2Heat` | 36,380 (87 %) | +1.300 ns | +0.160 ns | +0.236 ns |
+| `KonamiM2` | 36,968 (88 %) | +1.505 ns | | +0.380 ns |
+| `KonamiM2HellNight` | 37,926 (90 %) | +1.309 ns | +0.227 ns | +0.290 ns |
+| `KonamiM2Tryst` | 40,046 (96 %) | +0.285 ns | +0.229 ns | +0.621 ns |
+| `KonamiM2Heat` | 36,470 (87 %) | +1.221 ns | +0.422 ns | +0.401 ns |
 
 | Game | Set | On this core |
 |---|---|---|
@@ -306,6 +306,9 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
   screen as MAME.
 - The Triangle Engine's writes are the same as MAME's, byte for byte, on the lists dumped from the game (`sim/te`). With the Z
   buffer in SDRAM (the SDRAM board's builds), they are byte for byte the same as with it on the chip.
+- The video line count the M2 OS reads (VLOC) against the OS's own display code, followed in MAME's debugger: Polystars takes its
+  picture line p to the count p + 24, the lines its display list has before the picture. On the whole machine in simulation,
+  Polystars' clear never writes a row of the picture being shown before the display has read it (1,168 frames).
 - CRT Adjust (`sim/crt`): on both rasters, On at 0 / 0 / 0 is the same picture in the same place as Off, every H-Size at every
   H-Position keeps each line whole, after the hsync pulse and inside the line, and V-Shift moves the picture by whole lines.
 - The CPUs against MAME's instruction traces (`sim/ppcreplay`) and against a reference model with random programs and interrupts
@@ -321,7 +324,9 @@ of these four games still gives the EEPROM its settings; the M48T58 starts from 
   disc image without a gap in the music. Evil Night and Total Vice played, with their music and sound effects. Hell Night, Battle
   Tryst and Heat of Eleven '98 played on their own cores, with the SDRAM board. Before release 20261119: all of
   tallendorf's changes in it together, on his last test build; the gun games' Input settings; Battle Tryst's movies with `m2mpegd`
-  and its auto-start scripts; and, on this release's own cores, CRT Adjust on a CRT.
+  and its auto-start scripts; and, on that release's own cores, CRT Adjust on a CRT. Before release 20261121: on its own cores,
+  Polystars' attract without the pixel that flashed at its lower left; on test builds, Hell Night, Battle Tryst and Heat of Eleven
+  '98 played with the SDRAM board's colour fix.
 - By tallendorf, on a MiSTerPi, a MultiSystem 2 and a DE10-Nano with the SDRAM board: Hell Night and Heat of Eleven '98 played, a
   Battle Tryst match played; Hell Night's attract for 10 h without a freeze, and Battle Tryst's for 17.2 h and 16.6 h on a debug build
   that forces CPU 2's decrementer every half second, with the OSD's gate (*CPU 2 DEC interrupt* Off).
