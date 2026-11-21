@@ -153,7 +153,7 @@ Until the rest of the board exists, the core is ppc1 alone on the boot ROM, so t
   more than Polystars' 8) in DDR3 from 0x30000000, through the caches, the download writing DDR3 directly under reset;
 - the board's registers as stubs: each keeps what is written (16 of them), the ones MAME makes constants read those (the
   CDE's DEVICE_ID, SYSTEM_CONF = 0x63659000 and others, CPUID 0x40000000), the VDU's read 0 but VINT and VLOC (the video
-  line, as MAME computes it: ((line + 20) % 260 + 1) << 3);
+  line, then as MAME computes it, ((line + 20) % 260 + 1) << 3; since the corner fix the line + 1: rtl/m2_bda.sv);
 - a status screen, since removed for the room: the last PC, the instructions retired, exceptions, the register accesses and the
   last read and write, taken in the CPU's clock once a frame so they hold still while shown.
 

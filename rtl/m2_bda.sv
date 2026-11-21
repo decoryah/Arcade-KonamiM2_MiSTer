@@ -3,9 +3,16 @@
 // (0x00030000). ppc1 takes the PowerBus interrupt; ppc2's comes from the memory controller's GPIO 3 (inverted), which is how ppc1
 // starts it (konamim2.cpp).
 //
-// The line: the raster's, 262 a frame, MAME's VLOC ((line + 20) % 260) + 1; with arc (the arcade monitor's raster, 416 a frame,
-// rtl/m2_vtiming.sv) ((line + 26) % 410) + 1, MAME's m_vstart and m_vtotal from set_arcres()'s visible area. +0x400 clears the
-// bits given, on the VDU's and the PowerBus's registers that have it.
+// The line: the raster's, 262 a frame (416 with arc, the arcade monitor's raster: rtl/m2_vtiming.sv). VLOC is the line + 1: the
+// VDU starts its list on the line 0 (rtl/m2_vdu.sv) and reads each of its lines during the line before, so VLOC n is the list's
+// line n being read. The M2 OS counts so: its display code (Polystars' 0x40116080) takes a picture line p to VLOC p + the list's
+// lines before the picture (24 in Polystars, whose picture is the lines 24-247), to know whether a buffer it shows takes this
+// frame or the next, and sets its line interrupts with it: VLOC 248 when Polystars' picture has been read, VLOC 1 for the next
+// frame (Evil Night, Total Vice and Battle Tryst 20 and 260, Hell Night and Heat of Eleven 26 and 410: their lists' blank lines,
+// and blank and shown). MAME 0.289's ((line + 20) % 260) + 1 is 20 lines early (VLOC 1 on the line 240, inside the picture):
+// Polystars then clears the buffer it showed before its last rows are read, and a fast clear's first pixel, the last row's left
+// end, got there first (a pixel flashing at the lower left). +0x400 clears the bits given, on the VDU's and the PowerBus's
+// registers that have it.
 `default_nettype none
 module m2_bda (
 	input  logic        clk,
@@ -38,21 +45,16 @@ module m2_bda (
 	// ---- the line ------------------------------------------------------------------------------------------------------
 	logic [8:0]  ln;
 	wire [8:0]   vstart = arc ? 9'd26 : 9'd20;
-	wire [8:0]   vtotal = arc ? 9'd410 : 9'd260;
 	wire [8:0]   ln_nx = vpos + vstart;
 	wire         ln_end = ln_nx != ln;
 	function automatic logic [10:0] vl(input logic [8:0] l);
-		logic [9:0] x;
-		x = 10'(l) + 10'(vstart);
-		x = x >= 10'(vtotal) ? x - 10'(vtotal) : x;
-		return {1'b0, x} + 11'd1;
+		return 11'(l) + 11'd1;
 	endfunction
 	always_ff @(posedge clk)
 		ln <= ln_nx;
 	assign line = ln;
 
-	// (the last lines are the first ones over again to VLOC, and no interrupt: MAME's timers are for a line under 260, or 410)
-	wire ln_ok = ln_end && ln_nx < vtotal;
+	wire ln_ok = ln_end;
 	wire vhit0 = ln_ok && vl(ln_nx) == vint[30:20] && vint[30:20] != 11'd0;
 	wire vhit1 = ln_ok && vl(ln_nx) == vint[14:4] && vint[14:4] != 11'd0;
 
